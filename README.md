@@ -1,0 +1,1 @@
+# AviUtl2_Script_SagyouDarui
