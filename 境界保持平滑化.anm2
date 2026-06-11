@@ -1,0 +1,150 @@
+--label:ぼかし
+--track@radius:範囲,0,100,10,1
+--track@threshold:しきい値,0,100,10,0.1
+--track@angle:角度,-360,360,0,0.1
+--track@rate:適用率,0,100,100,1
+--information:境界保持平滑化(バイラテラル) by AI
+
+--[[pixelshader@bilateral_pass1:
+// パス1: 指定角度方向のバイラテラルフィルタ
+cbuffer params1 : register(b0) {
+    float4 p1; // x = radius, y = threshold, z = dx, w = dy
+};
+Texture2D tex1 : register(t0);
+SamplerState samp1 : register(s0);
+
+float4 bilateral_pass1(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 center_col = tex1.Sample(samp1, uv);
+    
+    float radius = p1.x;
+    float threshold = p1.y;
+    float dx = p1.z;
+    float dy = p1.w;
+
+    // 分散(sigma)の計算
+    float sigma_s = max(radius / 2.0, 0.001);
+    float sigma_r = max(threshold, 0.001);
+
+    float two_sigma_s2 = 2.0 * sigma_s * sigma_s;
+    float two_sigma_r2 = 2.0 * sigma_r * sigma_r;
+
+    float4 sum = 0.0;
+    float sum_weight = 0.0;
+    int rad = (int)ceil(radius);
+
+    // 乗算済みアルファ(Premultiplied Alpha)環境のため、非乗算のRGBを抽出して色差を比較する
+    float3 c1 = center_col.a > 0.0 ? center_col.rgb / center_col.a : 0.0;
+
+    for (int i = -rad; i <= rad; i++) {
+        float2 offset = float2(dx * i, dy * i);
+        float4 col = tex1.Sample(samp1, uv + offset);
+        
+        float3 c2 = col.a > 0.0 ? col.rgb / col.a : 0.0;
+        
+        // 色空間距離の計算 (RGB差分の二乗和 + Alpha差分の二乗)
+        float3 diff = c2 - c1;
+        float dist_color2 = dot(diff, diff);
+        float da = col.a - center_col.a;
+        dist_color2 += da * da;
+        
+        // 空間的な重みと色空間的な重みの合成
+        float weight_s = exp(-(i * i) / two_sigma_s2);
+        float weight_r = exp(-dist_color2 / two_sigma_r2);
+        float w = weight_s * weight_r;
+        
+        sum += col * w;
+        sum_weight += w;
+    }
+    
+    return sum / max(sum_weight, 0.0001);
+}
+]]
+
+--[[pixelshader@bilateral_pass2:
+// パス2: 指定角度+90度方向のバイラテラルフィルタ + 適用率(rate)合成
+cbuffer params2 : register(b0) {
+    float4 p2; // x = radius, y = threshold, z = dx, w = dy
+    float4 p3; // x = rate, yzw = padding
+};
+Texture2D tex_temp : register(t0); // パス1の結果(tempbuffer)
+Texture2D tex_orig : register(t1); // 処理前の元画像(object)
+SamplerState samp2 : register(s0);
+
+float4 bilateral_pass2(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 orig_col = tex_orig.Sample(samp2, uv);
+    float4 center_col = tex_temp.Sample(samp2, uv);
+    
+    float radius = p2.x;
+    float threshold = p2.y;
+    float dx = p2.z;
+    float dy = p2.w;
+    float rate = p3.x;
+
+    float sigma_s = max(radius / 2.0, 0.001);
+    float sigma_r = max(threshold, 0.001);
+
+    float two_sigma_s2 = 2.0 * sigma_s * sigma_s;
+    float two_sigma_r2 = 2.0 * sigma_r * sigma_r;
+
+    float4 sum = 0.0;
+    float sum_weight = 0.0;
+    int rad = (int)ceil(radius);
+
+    float3 c1 = center_col.a > 0.0 ? center_col.rgb / center_col.a : 0.0;
+
+    for (int i = -rad; i <= rad; i++) {
+        float2 offset = float2(dx * i, dy * i);
+        float4 col = tex_temp.Sample(samp2, uv + offset);
+        
+        float3 c2 = col.a > 0.0 ? col.rgb / col.a : 0.0;
+        
+        float3 diff = c2 - c1;
+        float dist_color2 = dot(diff, diff);
+        float da = col.a - center_col.a;
+        dist_color2 += da * da;
+        
+        float weight_s = exp(-(i * i) / two_sigma_s2);
+        float weight_r = exp(-dist_color2 / two_sigma_r2);
+        float w = weight_s * weight_r;
+        
+        sum += col * w;
+        sum_weight += w;
+    }
+    
+    float4 blurred_col = sum / max(sum_weight, 0.0001);
+    
+    // 最後に元画像と適用率(Lerp)でブレンドして返す
+    return lerp(orig_col, blurred_col, rate);
+}
+]]
+
+-- メインのLua処理
+local r = radius
+local th = threshold / 100.0
+local rate_val = rate / 100.0
+
+-- パラメータが0以下の場合は処理をスキップ(元画像のまま)
+if r <= 0 or th <= 0 or rate_val <= 0 then
+    return
+end
+
+-- 角度計算 (度数法をラジアンに変換)
+local a = math.rad(angle)
+local cos_a = math.cos(a)
+local sin_a = math.sin(a)
+
+-- X方向パスの出力先として仮想バッファ(tempbuffer)を確保・初期化
+obj.setoption("drawtarget", "tempbuffer", obj.w, obj.h)
+obj.clearbuffer("tempbuffer")
+
+-- パス1 (指定角度方向の平滑化)
+-- 元のobject(t0)から読み込み、tempbufferに出力
+local dx1 = cos_a / obj.w
+local dy1 = sin_a / obj.h
+obj.pixelshader("bilateral_pass1", "tempbuffer", {"object"}, {r, th, dx1, dy1}, "copy", "clamp")
+
+-- パス2 (パス1と直交する方向の平滑化 + 適用率ブレンド)
+-- tempbuffer(t0) と 元画像のobject(t1) を読み込み、自分自身(object)に直接上書き出力
+local dx2 = -sin_a / obj.w
+local dy2 = cos_a / obj.h
+obj.pixelshader("bilateral_pass2", "object", {"tempbuffer", "object"}, {r, th, dx2, dy2, rate_val, 0.0, 0.0, 0.0}, "copy", "clamp")

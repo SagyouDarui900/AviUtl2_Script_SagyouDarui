@@ -1,0 +1,104 @@
+--label:カスタムオブジェクト
+--track@size:サイズ,1,4000,100,1
+--track@width:幅,1,4000,10,1
+--track@lineWidth:線幅,0,1000,1000,1
+--track@edgeSize:角丸サイズ,0,1000,0,1
+--check@isX:Xにする,0
+--color@col:色,0xffffff
+
+-- サイズや幅が0以下の場合は描画しない
+if size <= 0 or width <= 0 then return end
+
+-- 角丸の半径の制限（図形の幅や高さを超えないように安全対策）
+local max_radius = math.min(size, width) * 0.5
+local radius = math.min(edgeSize * 2.0, max_radius)
+
+-- 中抜き（線画）モードかどうかの判定
+local fill_mode = 0.0
+local lw = lineWidth
+if lw >= max_radius then
+    fill_mode = 1.0 -- 線幅が十分太い場合は「塗りつぶし」として扱う
+end
+
+-- Xモードの判定フラグ (1.0 or 0.0)
+local is_x_mode = (isX == 1 or isX == true) and 1.0 or 0.0
+
+-- キャンバス（描画領域）のサイズ
+-- Xモードの場合は内部で45度傾くため、端が切れないように対角線の長さ(約1.414倍)に広げる
+local canvas_size = size
+if is_x_mode > 0.5 then
+    canvas_size = math.ceil(size * 1.41421356)
+end
+
+-- 描画領域となるベースキャンバス（四角形）を読み込む
+obj.load("figure", "四角形", col, canvas_size, canvas_size)
+
+
+-- ▼ここから下が HLSL (DirectX 11 ピクセルシェーダー) の記述です▼
+--[[pixelshader@universal_cross_ps:
+    // Lua側から受け取るパラメータ (定数バッファ)
+    cbuffer params : register(b0) {
+        float size;
+        float width;
+        float lineWidth;
+        float radius;
+        float fill_mode;
+        float is_x_mode;
+        float canvas_size;
+        float padding;
+    };
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // 矩形の符号付き距離関数 (SDF: Signed Distance Field)
+    float sdBox(float2 p, float2 b) {
+        float2 d = abs(p) - b;
+        return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+    }
+
+    // HLSL メイン関数
+    float4 universal_cross_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // UV座標(0.0~1.0)をピクセルスケールのローカル座標に変換 (中心を0,0にする)
+        float2 p = (uv - 0.5) * canvas_size;
+        
+        // Xモードなら内部の座標系を45度回転させる
+        if (is_x_mode > 0.5) {
+            float s = 0.70710678; // sin(45度)
+            float c = 0.70710678; // cos(45度)
+            p = float2(p.x * c - p.y * s, p.x * s + p.y * c);
+        }
+        
+        // 角丸の半径分だけ、計算上のボックスサイズを縮める
+        float h_len = max(size * 0.5 - radius, 0.0);
+        float h_wid = max(width * 0.5 - radius, 0.0);
+        
+        // 縦棒と横棒のSDF（距離）を計算
+        float d1 = sdBox(p, float2(h_len, h_wid));
+        float d2 = sdBox(p, float2(h_wid, h_len));
+        
+        // 2つの棒を合成(min)した後、縮めた半径分だけ外側に距離を戻す = 角が丸くなる
+        // ※ radius (角丸サイズ) が 0 の場合は、ただの直角な十字になります。
+        float d = min(d1, d2) - radius;
+        
+        // 中抜きモード(線画)の場合の処理
+        if (fill_mode == 0.0) {
+            // 境界から内側に向けて、指定した線幅だけを残す計算
+            d = abs(d + lineWidth * 0.5) - lineWidth * 0.5;
+        }
+        
+        // ピクセルパーフェクトなアンチエイリアス (境界を滑らかに補間)
+        float alpha = saturate(0.5 - d);
+        
+        // 元の色（キャンバス）を取得
+        float4 color = tex.Sample(samp, uv);
+        
+        // AviUtl2仕様: 乗算済みアルファ(Premultiplied Alpha)として出力
+        return color * alpha;
+    }
+]]
+-- ▲HLSLの記述ここまで▲
+
+
+-- 定義したHLSLピクセルシェーダーをGPUで実行する
+-- 第4引数にLua側の変数を配列で渡し、HLSL側の cbuffer にリンクさせます
+obj.pixelshader("universal_cross_ps", "object", {"object"}, {size, width, lw, radius, fill_mode, is_x_mode, canvas_size})

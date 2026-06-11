@@ -1,0 +1,155 @@
+--label:クリッピング
+--track@split_x:分割数X, 1, 200, 10, 1
+--track@split_y:分割数Y, 1, 200, 10, 1
+--track@clip_rate:クリッピング率(%), 0, 100, 10, 0.1
+--check@outer_gap:外周の隙間, true
+--select@clip_dir:削る方向=0,格子(上下左右)=0,縦シマ(左右両端)=1,横シマ(上下両端)=2,左側のみ=3,右側のみ=4,上側のみ=5,下側のみ=6
+
+--[[pixelshader@grid_clip_ps:
+// =========================================================================
+// DirectX 11 HLSL ピクセルシェーダー
+// =========================================================================
+cbuffer params : register(b0) {
+    float split_x;
+    float split_y;
+    float clip_rate;
+    float outer_gap;
+    
+    float w;
+    float h;
+    float clip_dir;
+    float dummy;
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    // ---------------------------------------------------------------------
+    // 1. 100%時の完全透明化処理
+    // ---------------------------------------------------------------------
+    if (clip_rate >= 100.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    
+    // ---------------------------------------------------------------------
+    // 2. ブロック情報とローカル座標の計算
+    // ---------------------------------------------------------------------
+    float bx = clamp(floor(uv.x * split_x), 0.0, split_x - 1.0);
+    float by = clamp(floor(uv.y * split_y), 0.0, split_y - 1.0);
+    
+    // ブロック内のローカルUV座標 (0.0 ～ 1.0)
+    float lu = uv.x * split_x - bx;
+    float lv = uv.y * split_y - by;
+    
+    // ---------------------------------------------------------------------
+    // 3. 割合の計算と基本設定
+    // ---------------------------------------------------------------------
+    float rate = clip_rate * 0.01;
+    float remain_rate = max(0.0, 1.0 - rate);
+    
+    // 残す範囲の初期化 (デフォルト: 中央寄せ)
+    float r_left   = rate * 0.5;
+    float r_right  = 1.0 - rate * 0.5;
+    float r_top    = rate * 0.5;
+    float r_bottom = 1.0 - rate * 0.5;
+    
+    bool protect = (outer_gap < 0.5);
+    int dir = (int)clip_dir;
+    
+    // ---------------------------------------------------------------------
+    // 4. 方向モードに応じた「残す範囲」の決定
+    // ---------------------------------------------------------------------
+    if (dir == 0 || dir == 1 || dir == 2) {
+        // [モード 0, 1, 2] 中央寄せ（格子、縦シマ、横シマ）
+        if (protect) {
+            if (split_x > 1.5) {
+                if (bx == 0.0)             { r_left = 0.0; r_right = remain_rate; }
+                if (bx >= split_x - 1.0)   { r_left = 1.0 - remain_rate; r_right = 1.0; }
+            }
+            if (split_y > 1.5) {
+                if (by == 0.0)             { r_top = 0.0; r_bottom = remain_rate; }
+                if (by >= split_y - 1.0)   { r_top = 1.0 - remain_rate; r_bottom = 1.0; }
+            }
+        }
+    } 
+    else if (dir == 3) { 
+        // [モード 3] 左側を削る -> 右側に残す
+        r_left = rate; r_right = 1.0;
+        if (protect && bx == 0.0 && split_x > 1.5) { r_left = 0.0; r_right = remain_rate; }
+    } 
+    else if (dir == 4) { 
+        // [モード 4] 右側を削る -> 左側に残す
+        r_left = 0.0; r_right = remain_rate;
+        if (protect && bx >= split_x - 1.0 && split_x > 1.5) { r_left = 1.0 - remain_rate; r_right = 1.0; }
+    } 
+    else if (dir == 5) { 
+        // [モード 5] 上側を削る -> 下側に残す
+        r_top = rate; r_bottom = 1.0;
+        if (protect && by == 0.0 && split_y > 1.5) { r_top = 0.0; r_bottom = remain_rate; }
+    } 
+    else if (dir == 6) { 
+        // [モード 6] 下側を削る -> 上側に残す
+        r_top = 0.0; r_bottom = remain_rate;
+        if (protect && by >= split_y - 1.0 && split_y > 1.5) { r_top = 1.0 - remain_rate; r_bottom = 1.0; }
+    }
+    
+    // ---------------------------------------------------------------------
+    // 5. アンチエイリアス処理（ピクセル単位のモアレ防止）
+    // ---------------------------------------------------------------------
+    // ローカルUV空間における約0.75ピクセル分の幅を計算
+    float aa_u = (split_x / max(w, 1.0)) * 0.75;
+    float aa_v = (split_y / max(h, 1.0)) * 0.75;
+    
+    float alpha_x = 1.0;
+    float alpha_y = 1.0;
+    
+    // X方向のグラデーション判定
+    if (dir == 0 || dir == 1 || dir == 3 || dir == 4) {
+        float aL = smoothstep(r_left - aa_u, r_left + aa_u, lu);
+        float aR = smoothstep(r_right + aa_u, r_right - aa_u, lu);
+        alpha_x = aL * aR;
+    }
+    
+    // Y方向のグラデーション判定
+    if (dir == 0 || dir == 2 || dir == 5 || dir == 6) {
+        float aT = smoothstep(r_top - aa_v, r_top + aa_v, lv);
+        float aB = smoothstep(r_bottom + aa_v, r_bottom - aa_v, lv);
+        alpha_y = aT * aB;
+    }
+    
+    // ---------------------------------------------------------------------
+    // 6. 最終的な出力色の計算
+    // ---------------------------------------------------------------------
+    float final_alpha = alpha_x * alpha_y;
+    float4 color = tex.Sample(samp, uv);
+    
+    // AviUtl2の Premultiplied Alpha (乗算済みアルファ) 仕様に準拠し、
+    // RGBとAlphaの全体に係数を掛けて透明化する
+    return color * final_alpha;
+}
+]]
+
+-- =========================================================================
+-- Lua スクリプト処理部
+-- =========================================================================
+
+-- クリッピング率が0以下の場合は処理をスキップ (負荷軽減)
+if clip_rate <= 0 then
+    return
+end
+
+-- シェーダーへ渡す定数配列 (cbuffer params の構造と順序に対応させる)
+local constants = {
+    split_x, 
+    split_y, 
+    clip_rate, 
+    (outer_gap == 1 or outer_gap == true) and 1.0 or 0.0, -- 外周保護フラグ
+    obj.w, 
+    obj.h, 
+    tonumber(clip_dir) or 0,                              -- 削る方向
+    0.0                                                   -- アライメント用ダミー
+}
+
+-- 自身のオブジェクトに対してピクセルシェーダーを適用
+obj.pixelshader("grid_clip_ps", "object", {"object"}, constants)

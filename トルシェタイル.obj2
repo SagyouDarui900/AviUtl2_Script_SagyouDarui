@@ -1,0 +1,129 @@
+--label:カスタムオブジェクト
+--track@scale:タイルサイズ, 10, 500, 100, 1
+--track@seed:シード値, 0, 10000, 1234, 1
+--track@thickness:線の太さ, 1, 50, 15, 1
+--color@col_bg:背景色, 0x1A1A2E
+--color@col_fg:模様色, 0xE94560
+--select@type:模様の種類=0, 円弧=0, 直線=1, 三角形=2
+--check@anim:自動スクロール, 0
+--track@angle:スクロール角度, -360, 360, 45, 1
+--track@scroll_speed:スクロール速度, -100, 100, 10, 0.1
+
+--[[pixelshader@truchet_ps:
+// DirectX 11 HLSL ピクセルシェーダー
+// Lua側から渡される定数バッファ (16バイト境界でアライメント)
+cbuffer params : register(b0) {
+    float2 resolution;
+    float scale;
+    float seed;
+    
+    float thickness_norm;
+    float type;
+    float2 scroll;
+    
+    float4 color_bg;
+    float4 color_fg;
+};
+
+// 擬似乱数ジェネレーター (2D Hash関数)
+float hash(float2 p) {
+    p = frac(p * 0.3183099 + float2(0.71, 0.113));
+    p += dot(p, p.yx + 19.19);
+    return frac((p.x + p.y) * p.x);
+}
+
+float4 truchet_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    // 1. uv (0.0 ~ 1.0) を (-0.5 ~ +0.5) に変換し、画面中央を原点(0,0)とする
+    // 2. 解像度(resolution)を掛けることで、縦横比が歪まないピクセル座標系にする
+    float2 pixel_pos = (uv - 0.5) * resolution;
+    
+    // ピクセル座標にスクロール量を加え、指定のスケールで割ってタイリング空間へ
+    float2 st = (pixel_pos + scroll) / max(scale, 1.0);
+    
+    float2 i = floor(st); // タイルのインデックス(整数座標)
+    float2 f = frac(st);  // タイル内のローカル座標(0.0 ~ 1.0)
+    
+    // セルごとの乱数生成 (シード値を加味)
+    float n = hash(i + seed * 13.37);
+    
+    // 乱数に基づいて模様の向きを反転 (50%の確率)
+    if (n > 0.5) {
+        f.x = 1.0 - f.x;
+    }
+    
+    float d = 0.0;
+    float mask = 0.0;
+    
+    // アンチエイリアス用の滑らかさ係数 (スケールに応じて動的に変化させる)
+    float edge = 1.5 / max(scale, 1.0);
+    
+    // 模様の描画 (typeはLuaのselectインデックス)
+    if (type < 0.5) {
+        // --- 0: 円弧 (Truchet arcs) ---
+        float d1 = length(f) - 0.5;
+        float d2 = length(f - 1.0) - 0.5;
+        d = min(abs(d1), abs(d2));
+        mask = smoothstep(thickness_norm + edge, thickness_norm - edge, d);
+    } else if (type < 1.5) {
+        // --- 1: 直線 (Maze) ---
+        // 角ではなく、各辺の中点を結ぶ2本の直線を描画する
+        float d1 = abs(f.x + f.y - 0.5) * 0.70710678;
+        float d2 = abs(f.x + f.y - 1.5) * 0.70710678;
+        d = min(d1, d2);
+        mask = smoothstep(thickness_norm + edge, thickness_norm - edge, d);
+    } else {
+        // --- 2: 三角形 (Diagonal Fill) ---
+        d = f.x - f.y;
+        mask = smoothstep(edge, -edge, d);
+    }
+    
+    // 背景色と模様色をマスク値を用いて合成
+    float4 col = lerp(color_bg, color_fg, mask);
+    
+    // AviUtl2仕様: Premultiplied Alpha (乗算済みアルファ) を適用
+    col.rgb *= col.a;
+    
+    return col;
+}
+]]
+
+-- 画面の解像度を取得してベースサイズとする
+local w, h = obj.screen_w, obj.screen_h
+
+-- スケールの下限を1.0に制限（シェーダー内での0除算や描画の破綻を防止）
+local s = math.max(scale, 1.0)
+
+-- UIのカラーコードをRGB(0~255)に変換
+local r_bg, g_bg, b_bg = RGB(col_bg)
+local r_fg, g_fg, b_fg = RGB(col_fg)
+
+-- 自動スクロールの計算
+local scroll_x = 0.0
+local scroll_y = 0.0
+if anim == 1 or anim == true then
+    local rad = math.rad(angle)
+    -- スピード（scroll_speed）にスケール(s)を掛けることで、タイルサイズが変わっても見た目のスクロール速度を一定に保つ
+    local move_dist = obj.time * s * (scroll_speed * 0.2)
+    scroll_x = -move_dist * math.cos(rad)
+    scroll_y = -move_dist * math.sin(rad)
+end
+
+-- 先に描画ベースとなる四角形を画面全体サイズで生成し、obj.w と obj.h を確定させる
+obj.load("figure", "四角形", 0xFFFFFF, w, h)
+
+-- HLSLの定数バッファ (cbuffer params) へのデータ流し込み
+-- ※ float型として16バイト(要素4つ)ごとのアライメントを厳密に定義
+local constants = {
+    obj.w, obj.h, s, seed,                          -- float2, float, float (計16バイト)
+    thickness / s, type, scroll_x, scroll_y,        -- float, float, float2 (計16バイト)
+    r_bg/255.0, g_bg/255.0, b_bg/255.0, obj.alpha,  -- float4 (背景色 + 不透明度)
+    r_fg/255.0, g_fg/255.0, b_fg/255.0, obj.alpha   -- float4 (模様色 + 不透明度)
+}
+
+-- 埋め込んだHLSLピクセルシェーダーを実行し、ピクセルをGPU上で書き換える
+-- (第3引数は空配列 {} とし、元の「四角形」のテクスチャ色は参照しない)
+obj.pixelshader("truchet_ps", "object", {}, constants)
+
+-- 注意: ここで obj.draw() は意図的に呼び出しません。
+-- これにより後続のエフェクト（ぼかし、クロマキー等）に画像データを渡し、
+-- 自動描画システムに委ねることができます。

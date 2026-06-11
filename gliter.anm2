@@ -1,0 +1,202 @@
+--label:光効果
+--select@g_type:光のタイプ=0,シャープ(旧式)=0,ソフト(滑らか)=1
+--track@density:密度,1,200,50,1
+--track@size:サイズ,1,100,20,1
+--track@speed:速度,0,20,5,0.1
+--track@threshold:輝度しきい値,0,100,10,1
+--track@fps:コマ打ち(FPS),0,60,12,1
+--track@seed:シード値,0,100,0,1
+--color@glow_col:色,0xFFFFFF
+--check@rand_angle:ランダム角度,1
+--check@only_light:光のみ表示,0
+--filter
+
+--[[
+  【グリッター光効果 (光り方切り替え・コマ打ち対応版)】
+  画像の明るい部分（しきい値以上）に反応して、十字型のキラキラとした光芒を描画します。
+  「光のタイプ」から、鋭く強い「シャープ」と、ノイズを抑えた「ソフト」を切り替えられます。
+]]
+
+--[[pixelshader@glitter_ps:
+// =========================================================================
+// 定数バッファ (Luaスクリプト側から渡される値)
+// =========================================================================
+cbuffer params : register(b0) {
+    float4 p1; // x: density, y: size, z: speed, w: threshold
+    float4 p2; // x: time, y: aspect, z: rand_angle, w: only_light
+    float4 p3; // rgb: color, w: seed
+    float4 p4; // x: g_type (0:シャープ, 1:ソフト)
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+// =========================================================================
+// ユーティリティ関数
+// =========================================================================
+
+// 2D -> 2D ハッシュ関数 (位置のランダム化に使用)
+float2 hash2(float2 p) {
+    float3 p3 = frac(float3(p.xyx) * float3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.xx + p3.yz) * p3.zy);
+}
+
+// 2D -> 1D ハッシュ関数 (明滅のタイミングなどに使用)
+float hash1(float2 p) {
+    float3 p3  = frac(float3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+// 2Dベクトルの回転関数
+float2 rotate(float2 p, float a) {
+    float s = sin(a);
+    float c = cos(a);
+    return float2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+// 光芒の形状を計算する関数
+float get_shape(float2 d, float type) {
+    float2 abs_d = abs(d);
+    if (type < 0.5) {
+        // タイプ0：シャープ (最初のgliter.anm2と完全に同じ計算式。くっきり鋭い光)
+        float cross = max(0.0, 1.0 - (abs_d.x * abs_d.y * 100.0) - length(abs_d) * 0.1);
+        return pow(cross, 2.0); 
+    } else {
+        // タイプ1：ソフト (光の筋を少しふんわりさせる)
+        float cross = max(0.0, 1.0 - (abs_d.x * abs_d.y * 70.0) - length(abs_d) * 0.1);
+        return pow(cross, 1.5);
+    }
+}
+
+// =========================================================================
+// メイン・ピクセルシェーダー
+// =========================================================================
+float4 glitter_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    // パラメータの展開
+    float density    = p1.x;
+    float size       = p1.y * 0.01; // サイズを扱いやすいスケールに調整
+    float speed      = p1.z;
+    float threshold  = p1.w / 100.0;
+    
+    float time       = p2.x;
+    float aspect     = p2.y;
+    float angle_rand = p2.z * 3.14159; // ランダム角度 (ONなら最大πラジアンの振れ幅)
+    float only_light = p2.w;
+    
+    float3 color     = p3.rgb;
+    float seed_val   = p3.w;
+    
+    float g_type     = p4.x;
+
+    // グリッドの分割 (中央を基準に密度をスケーリングするため、UVから0.5を引く)
+    float2 centered_uv = uv - 0.5;
+    float2 id = floor(centered_uv * density);
+    float2 f  = frac(centered_uv * density);
+
+    float glitter_val = 0.0;
+
+    // 隣接する9セルをループ処理し、隣から境界を越えてくる光も描画する
+    for(int y = -1; y <= 1; y++) {
+        for(int x = -1; x <= 1; x++) {
+            float2 offset = float2(x, y);
+            float2 cell_id = id + offset;
+            
+            // セル内の星の発生位置を決定
+            float2 star_pos = hash2(cell_id + seed_val);
+            
+            // 元画像から、この星の発生位置にあたるピクセル色を取得 (明るさ判定用)
+            // 中央基準で計算した座標を、テクスチャサンプリング用に元の0.0~1.0空間に戻す (+0.5)
+            float2 sample_uv = (cell_id + star_pos) / density + 0.5;
+            float4 sample_col = tex.SampleLevel(samp, sample_uv, 0);
+            
+            // RGBから輝度(明るさ)を計算
+            float brightness = dot(sample_col.rgb, float3(0.299, 0.587, 0.114));
+            
+            float mask = 0.0;
+            if (g_type < 0.5) {
+                // シャープ：旧式の二値判定（ノイズも拾うが、パキッと強く光る）
+                mask = (brightness > threshold && sample_col.a > 0.01) ? 1.0 : 0.0;
+            } else {
+                // ソフト：滑らかな階調判定（低画質のノイズを抑えて上品に光る）
+                mask = smoothstep(threshold, threshold + 0.2, brightness);
+                mask *= smoothstep(0.05, 0.15, sample_col.a);
+            }
+            
+            float blink = 0.0;
+            float h1 = hash1(cell_id + seed_val + 10.0);
+            
+            // ピクセルが一定以上の輝度・不透明度を持っている場合のみ発光
+            if(mask > 0.0) {
+                // 個別の明滅アニメーション
+                blink = sin(time * speed + h1 * 6.28318);
+                blink = max(0.0, blink);
+                blink = pow(blink, 3.0);
+            }
+            
+            // 光の描画処理
+            if(blink > 0.0) {
+                // 星ごとのサイズをランダム化
+                float s = size * (0.5 + 0.5 * hash1(cell_id + 13.5));
+                
+                // 星の中心からの距離
+                float2 d = f - offset - star_pos;
+                
+                // 光の形が長方形に歪むのを防ぐため、描画の距離計算のときのみアスペクト比を掛ける
+                d.x *= aspect;
+                
+                // 回転処理
+                d = rotate(d, (h1 - 0.5) * angle_rand);
+                d /= max(s, 0.001); // サイズによるスケーリング (ゼロ除算防止)
+                
+                // 最終的な光を加算（形状切り替え関数を通す）
+                glitter_val += get_shape(d, g_type) * blink * mask;
+            }
+        }
+    }
+    
+    // 元画像のサンプリング
+    float4 originalColor = tex.SampleLevel(samp, uv, 0);
+    float3 final_glitter = color * glitter_val;
+    
+    // 「光のみ表示」がONの場合は、元の画像を真っ黒（透明）にする
+    originalColor *= (1.0 - only_light);
+    
+    return originalColor + float4(final_glitter, glitter_val); 
+}
+]]
+
+-- =========================================================================
+-- Lua スクリプト制御部
+-- =========================================================================
+
+-- 基本色(0xRRGGBB)を HLSL向けのRGB(0.0 ～ 1.0) に変換
+local r = math.floor(glow_col / 0x10000) % 0x100
+local g = math.floor(glow_col / 0x100) % 0x100
+local b = glow_col % 0x100
+r = r / 255.0
+g = g / 255.0
+b = b / 255.0
+
+-- 時間の計算 (FPSによるコマ打ち処理)
+local t = obj.time
+if fps > 0 then
+    -- 指定されたFPS単位で時間を階段状に丸めることで、アニメ風の動きを表現
+    t = math.floor(t * fps) / fps
+end
+
+-- アスペクト比の計算
+local aspect = obj.w / obj.h
+
+-- チェックボックス(ON/OFF)を HLSL向けの数値(1.0 or 0.0) に安全に変換
+local rand_angle_val = (rand_angle == 1 or rand_angle == true) and 1.0 or 0.0
+local only_light_val = (only_light == 1 or only_light == true) and 1.0 or 0.0
+
+-- ピクセルシェーダーの実行
+obj.pixelshader("glitter_ps", "object", {"object"}, {
+    density, size, speed, threshold,          -- b0.p1
+    t, aspect, rand_angle_val, only_light_val,-- b0.p2
+    r, g, b, seed,                            -- b0.p3
+    g_type, 0.0, 0.0, 0.0                     -- b0.p4
+})

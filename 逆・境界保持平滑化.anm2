@@ -1,0 +1,104 @@
+--label:加工
+--track@edge_sens:エッジ感度,0.0,10.0,2.0,0.1
+--track@threshold:エッジ閾値,0.0,1.0,0.1,0.01
+--track@amount:効果量(半径/透過),0.0,100.0,10.0,0.1
+--select@mode:処理モード=0,エッジをぼかす=0,エッジを消す(透過)=1
+
+--[[pixelshader@inverse_edge_ps:
+    // 定数バッファ (16バイトアライメントを厳守)
+    cbuffer params : register(b0) {
+        float2 pixelSize;      // (8 bytes) 1ピクセルあたりのUVサイズ
+        float edgeSensitivity; // (4 bytes) エッジ検出の感度
+        float threshold;       // (4 bytes) エッジと判定する閾値
+        
+        int mode;              // (4 bytes) 0: ぼかす, 1: 消す
+        float amount;          // (4 bytes) ぼかし半径 または 透過の強さ
+        float2 padding;        // (8 bytes) パディング
+    };
+    
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // RGB輝度とアルファを考慮した強度を取得 (黒い図形の境界等も検出するため)
+    float getIntensity(float4 color) {
+        float luma = dot(color.rgb, float3(0.299, 0.587, 0.114));
+        return luma + color.a;
+    }
+
+    float4 inverse_edge_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // 1. 周辺ピクセルをサンプリングしてSobelフィルタでエッジ強度を算出
+        float2 off3[9] = {
+            float2(-1, -1), float2(0, -1), float2(1, -1),
+            float2(-1,  0), float2(0,  0), float2(1,  0),
+            float2(-1,  1), float2(0,  1), float2(1,  1)
+        };
+        
+        float l[9];
+        [unroll]
+        for(int i=0; i<9; i++) {
+            l[i] = getIntensity(tex.Sample(samp, uv + off3[i] * pixelSize));
+        }
+        
+        float gx = (l[2] + 2.0*l[5] + l[8]) - (l[0] + 2.0*l[3] + l[6]);
+        float gy = (l[0] + 2.0*l[1] + l[2]) - (l[6] + 2.0*l[7] + l[8]);
+        
+        // エッジ強度の計算と閾値処理 (smoothstepで境界を滑らかに)
+        float edge = sqrt(gx*gx + gy*gy) * edgeSensitivity;
+        edge = smoothstep(threshold, threshold + 0.2, edge);
+        
+        float4 centerColor = tex.Sample(samp, uv);
+        
+        // エッジではない平坦な部分は元の色をそのまま返す (処理の最適化)
+        if (edge <= 0.0) {
+            return centerColor;
+        }
+
+        // --- モード1: エッジを消す（透過処理） ---
+        if (mode == 1) {
+            // amountを係数として透過度合いを調整 (10.0基準)
+            float factor = saturate(1.0 - edge * (amount / 10.0));
+            // AviUtl2のPremultiplied Alpha仕様に準拠するため、RGBとAlpha両方に減衰をかける
+            return centerColor * factor;
+        }
+
+        // --- モード0: エッジをぼかす処理 ---
+        // 高速かつ高品質な16サンプルのPoisson Disk配置
+        float2 poisson[16] = {
+            float2(-0.94201624, -0.39906216), float2(0.94558609, -0.76890725), float2(-0.094184101, -0.92938870), float2(0.34495938, 0.29387760),
+            float2(-0.91588581, 0.45771432), float2(-0.81544232, -0.87912464), float2(-0.38277543, 0.27676845), float2(0.97484398, 0.75648379),
+            float2(0.44323325, -0.97511554), float2(0.53742981, -0.47373420), float2(-0.26496911, -0.41893023), float2(0.79197514, 0.19090188),
+            float2(-0.24188840, 0.99706507), float2(-0.81409955, 0.91437590), float2(0.19984126, 0.78641367), float2(0.14383161, -0.14100790)
+        };
+
+        float4 blurColor = centerColor;
+        float count = 1.0;
+        
+        [unroll]
+        for(int j=0; j<16; j++) {
+            blurColor += tex.Sample(samp, uv + poisson[j] * pixelSize * amount);
+            count += 1.0;
+        }
+        blurColor /= count;
+        
+        // エッジの強度(edge)をアルファマスクとして、元の色とぼかした色を合成
+        return lerp(centerColor, blurColor, edge);
+    }
+]]
+
+-- ピクセルサイズ（解像度依存の1ピクセルあたりのUV移動量）
+local ps_w = 1.0 / obj.w
+local ps_h = 1.0 / obj.h
+
+-- 定数バッファのテーブル作成 (HLSLのcbufferの順番と完全に一致させる)
+-- 注意: Lua側のテーブルなのでコメントは「--」を使用すること
+local cb = {
+    ps_w, ps_h,        -- pixelSize
+    edge_sens,         -- edgeSensitivity
+    threshold,         -- threshold
+    mode,              -- mode
+    amount,            -- amount
+    0.0, 0.0           -- padding
+}
+
+-- 現在のオブジェクト自身に対してシェーダーを適用
+obj.pixelshader("inverse_edge_ps", "object", {"object"}, cb)

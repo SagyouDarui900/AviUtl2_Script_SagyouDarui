@@ -1,0 +1,228 @@
+--label:光効果
+
+--group:Glow抽出・露出
+--track@threshold:抽出閾値,0.0,2.0,0.2,0.01
+--track@smooth_val:閾値の平滑化,0.0,1.0,0.2,0.01
+--track@exposure:抽出露出(発光強度),0.0,10.0,1.0,0.1
+--track@highlight:ハイライト強調,0.1,10.0,1.0,0.01
+--group:
+
+--group:Physics (拡散・減衰)
+--track@radius:拡散半径,0,2000,500,1
+--track@spread:拡散の滑らかさ,0.1,5.0,1.0,0.01
+--track@falloff:逆二乗フォールオフ,0.0,5.0,1.0,0.01
+--track@core_boost:芯の強調,0.0,10.0,0.0,0.01
+--group:
+
+--group:色波長の広がり補正
+--track@rad_r:Red減衰補正,0.0,3.0,1.0,0.01
+--track@rad_g:Green減衰補正,0.0,3.0,1.0,0.01
+--track@rad_b:Blue減衰補正,0.0,3.0,1.0,0.01
+--group:
+
+--group:出力＆トーンマップ
+--select@blend_mode:合成モード=0,加算=0,スクリーン=1
+--check@show_glow_only:発光のみ表示,false
+--select@tm_mode:トーンマップ=0,なし=0,ACES(シネマ)=1,Reinhard=2,Exposure=3
+--track@tm_exp:TM露出補正,0.1,10.0,1.0,0.01
+--track@tm_white:白点(Reinhard用),0.1,10.0,1.0,0.01
+--group:
+
+--[[pixelshader@ExtractGlow:
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+cbuffer Params : register(b0) {
+    float threshold;
+    float smooth_val;
+    float exposure;
+    float highlight;
+};
+
+float4 ExtractGlow(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 color = tex.Sample(samp, uv);
+    if (color.a <= 0.0) return float4(0, 0, 0, 0);
+
+    float3 rgb = max(0.0, color.rgb / color.a); 
+    float lum = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+
+    float mask = smoothstep(threshold, threshold + max(smooth_val, 0.001), lum);
+    mask = pow(abs(mask), max(0.01, 1.0 / highlight));
+    
+    float3 out_rgb = rgb * mask * exposure;
+    return float4(out_rgb * color.a, color.a * mask);
+}
+]]
+
+--[[pixelshader@Downsample:
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+cbuffer Params : register(b0) { float2 texelSize; float spread; float pad; };
+
+float4 Downsample(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 o = texelSize * spread;
+    float4 sum = tex.Sample(samp, uv) * 0.5;
+    sum += tex.Sample(samp, uv + float2(-o.x, -o.y)) * 0.125;
+    sum += tex.Sample(samp, uv + float2( o.x, -o.y)) * 0.125;
+    sum += tex.Sample(samp, uv + float2(-o.x,  o.y)) * 0.125;
+    sum += tex.Sample(samp, uv + float2( o.x,  o.y)) * 0.125;
+    return sum;
+}
+]]
+
+--[[pixelshader@Upsample:
+Texture2D texAccum : register(t0);
+Texture2D texBase : register(t1);
+SamplerState samp : register(s0);
+cbuffer Params : register(b0) { float2 texelSize; float spread; float weight; float rad_r; float rad_g; float rad_b; float pad2; };
+
+float4 Upsample(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 o = texelSize * spread;
+    float4 c = texAccum.Sample(samp, uv) * 0.5;
+    c += texAccum.Sample(samp, uv + float2(-o.x, -o.y)) * 0.125;
+    c += texAccum.Sample(samp, uv + float2( o.x, -o.y)) * 0.125;
+    c += texAccum.Sample(samp, uv + float2(-o.x,  o.y)) * 0.125;
+    c += texAccum.Sample(samp, uv + float2( o.x,  o.y)) * 0.125;
+    
+    c.r *= weight * rad_r;
+    c.g *= weight * rad_g;
+    c.b *= weight * rad_b;
+    c.a *= weight;
+    
+    float4 base = texBase.Sample(samp, uv);
+    return base + c;
+}
+]]
+
+--[[pixelshader@BlendFinal:
+Texture2D texOrig : register(t0);
+Texture2D texGlow : register(t1);
+SamplerState samp : register(s0);
+cbuffer Params : register(b0) { 
+    float mode; 
+    float tm_mode; 
+    float tm_exp; 
+    float tm_white; 
+};
+
+// ACES Filmic Tone Mapping Curve
+float3 ACES(float3 x) {
+    float a = 2.51f; float b = 0.03f; float c = 2.43f; float d = 0.59f; float e = 0.14f;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+float4 BlendFinal(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 orig = texOrig.Sample(samp, uv);
+    float4 glow = texGlow.Sample(samp, uv);
+    
+    // 浮動小数点精度の誤差を防ぐため、確実に整数にキャスト
+    int b_mode = (int)(mode + 0.5);
+    int t_mode = (int)(tm_mode + 0.5);
+
+    // --- Tone Mapping (HDR -> SDR) ---
+    // 【修正】元の画像を暗くしないよう、Glow単体に対してのみトーンマップをかける
+    if (t_mode > 0 && glow.a > 0.00001) {
+        // 乗算済みアルファを解除
+        float3 rgb = max(0.0, glow.rgb / glow.a);
+        
+        if (t_mode == 1) {
+            // ACES (映画のようなコントラストと彩度保持)
+            rgb = ACES(rgb * tm_exp);
+        } else if (t_mode == 2) {
+            // Reinhard (自然で緩やかな白飛び抑制)
+            rgb *= tm_exp;
+            rgb = (rgb * (1.0 + rgb / (tm_white * tm_white))) / (1.0 + rgb);
+        } else if (t_mode == 3) {
+            // Exposure (単純な露出補正)
+            rgb = 1.0 - exp(-rgb * tm_exp);
+        }
+        
+        // 再び乗算済みアルファに戻す
+        glow.rgb = rgb * glow.a;
+    }
+    
+    // --- 最終合成 ---
+    float4 blended;
+    if (b_mode == 2) {
+        blended = glow;
+    } else if (b_mode == 1) { // スクリーン
+        float3 out_rgb = orig.rgb + glow.rgb - (orig.rgb * glow.rgb);
+        blended = float4(out_rgb, max(orig.a, glow.a));
+    } else { // 加算 (デフォルト)
+        blended = orig + glow;
+    }
+    
+    return blended;
+}
+]]
+
+-- ==========================================
+-- Lua Script Body
+-- ==========================================
+if obj.w == 0 or obj.h == 0 then return end
+
+local pad_size = math.min(radius, 1000)
+if pad_size > 0 then
+    obj.effect("領域拡張", "上", pad_size, "下", pad_size, "左", pad_size, "右", pad_size)
+end
+
+local pre = "dg_" .. (obj.id or obj.index or 0) .. "_"
+
+obj.setoption("drawtarget", "tempbuffer", obj.w, obj.h)
+obj.pixelshader("ExtractGlow", "tempbuffer", "object", {threshold, smooth_val, exposure, highlight})
+obj.copybuffer("cache:" .. pre .. "d_0", "tempbuffer")
+
+local widths = {[0] = obj.w}
+local heights = {[0] = obj.h}
+local passes = 0
+
+local max_depth = 1
+if radius > 0 then
+    max_depth = math.min(8, math.max(1, math.floor(math.log(radius) / math.log(2))))
+end
+
+while passes < max_depth do
+    local nw = math.max(1, math.floor(widths[passes] / 2))
+    local nh = math.max(1, math.floor(heights[passes] / 2))
+    if nw < 2 or nh < 2 then break end
+    
+    passes = passes + 1
+    widths[passes] = nw
+    heights[passes] = nh
+    
+    obj.setoption("drawtarget", "tempbuffer", nw, nh)
+    obj.pixelshader("Downsample", "tempbuffer", {"cache:" .. pre .. "d_" .. (passes - 1)}, {1.0 / widths[passes-1], 1.0 / heights[passes-1], spread, 0.0})
+    obj.copybuffer("cache:" .. pre .. "d_" .. passes, "tempbuffer")
+end
+
+obj.copybuffer("cache:" .. pre .. "accum", "cache:" .. pre .. "d_" .. passes)
+
+for i = passes - 1, 0, -1 do
+    obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
+    
+    local depth_val = i + 1.0
+    local step_weight = 1.0
+    if falloff > 0.0 then
+        step_weight = 1.0 / math.max(0.001, math.pow(depth_val, falloff))
+    end
+    
+    if core_boost > 0.0 then
+        if i == 0 then step_weight = step_weight + core_boost end
+        if i == 1 then step_weight = step_weight + (core_boost * 0.5) end
+        if i == 2 then step_weight = step_weight + (core_boost * 0.25) end
+    end
+    
+    local cb = {1.0 / widths[i+1], 1.0 / heights[i+1], spread, step_weight, rad_r, rad_g, rad_b, 0.0}
+    obj.pixelshader("Upsample", "tempbuffer", {"cache:" .. pre .. "accum", "cache:" .. pre .. "d_" .. i}, cb)
+    obj.copybuffer("cache:" .. pre .. "accum", "tempbuffer")
+end
+
+local final_mode = blend_mode
+if show_glow_only == 1 or show_glow_only == true then 
+    final_mode = 2 
+end
+
+obj.setoption("drawtarget", "tempbuffer", obj.w, obj.h)
+obj.pixelshader("BlendFinal", "tempbuffer", {"object", "cache:" .. pre .. "accum"}, {final_mode, tm_mode, tm_exp, tm_white})
+
+obj.copybuffer("object", "tempbuffer")
+obj.setoption("drawtarget", "framebuffer")

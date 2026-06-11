@@ -1,0 +1,169 @@
+--label:加工
+--track@density:細かさ,1,500,200,1
+--track@amount:ラメの量,0,100,50,1
+--track@speed:きらめき速度,0,30,10,0.1
+--track@intensity:輝度,0,10,2.5,0.1
+--track@fps:コマ打ち(FPS),0,60,12,1
+--track@seed:シード値,0,1000,0,1
+--color@lame_col:基本色,0xFFFFFF
+--check@holo:ホログラム,0
+--filter
+
+--[[pixelshader@lame_ps:
+// =========================================================================
+// 定数バッファ (Luaから渡される制御パラメータ群)
+// =========================================================================
+cbuffer params : register(b0) {
+    float4 p1; // x: density (細かさ), y: amount (量), z: speed (速度), w: intensity (輝度)
+    float4 p2; // x: time (時間), y: aspect (アスペクト比), z: holo (ホロ有無), w: seed (シード)
+    float4 p3; // rgb: lame_color (基本色)
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+// =========================================================================
+// 共通ユーティリティ関数
+// =========================================================================
+
+// 2D座標(グリッドID)から 0.0～1.0 の疑似乱数を生成するハッシュ関数
+float hash12(float2 p) {
+    float3 p3  = frac(float3(p.xyx) * .1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+// HSV色空間からRGB色空間への変換関数 (ホログラムの虹色表現に使用)
+float3 hsv2rgb(float3 c) {
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * lerp(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// =========================================================================
+// ラメ粒子描画・アニメーション計算
+// =========================================================================
+float3 get_powder_layer(float2 uv, float density, float amount, float time, float speed, float3 lame_color, float holo, float seed_offset) {
+    // 空間をグリッド（セル）に分割
+    float2 id = floor(uv * density);
+    float2 f  = frac(uv * density);
+
+    // セル固有のランダム値
+    float n = hash12(id + seed_offset);
+    
+    // 確率判定：パラメータ「ラメの量」を下回るセルのみラメ粒子を生成
+    if (n > amount / 100.0) return float3(0.0, 0.0, 0.0);
+
+    // 粒子の最大サイズを制限 (セル境界をはみ出しにくくする)
+    float size = 0.1 + hash12(id + 7.7 + seed_offset) * 0.3;
+    
+    // 【見切れバグ対策】セルの端で粒が直線的にカットされてしまうのを防ぐため、
+    // ランダム配置される中心座標の可動域を「自身のサイズ（半径）」分だけ内側に狭める
+    float2 center = float2(
+        lerp(size, 1.0 - size, hash12(id + 13.5 + seed_offset)),
+        lerp(size, 1.0 - size, hash12(id + 43.1 + seed_offset))
+    );
+    
+    // 粒子中心からのピクセル距離
+    float d = length(f - center);
+    
+    // 粒子ごとの明滅スピードを基準速度から最大±60%ランダム化
+    float local_speed = speed * (0.4 + 1.2 * hash12(id + 99.9 + seed_offset));
+    
+    // 粒子ごとの初期明滅タイミング（位相）をランダム化 (1フレーム目の密度偏りを完全解消)
+    float phase = hash12(id + 77.7 + seed_offset) * 6.28318;
+    
+    // キらめき度合いの計算 (sin波をべき乗して鋭いフラッシュにする)
+    float blink = sin(time * local_speed + phase);
+    blink = max(0.0, blink); 
+    blink = pow(blink, 4.0); 
+    
+    // smoothstepにより、粒子の縁にむけて滑らかに減衰する光の球体を描画
+    float glow = smoothstep(size, 0.0, d) * blink;
+    
+    // カラー処理
+    float3 col = lame_color;
+    if (holo > 0.5) {
+        // ホログラムONの場合、位置と経過時間に応じて緩やかに移り変わる色相を算出
+        float hue = frac(n * 5.0 + time * 0.2);
+        col = hsv2rgb(float3(hue, 0.8, 1.0));
+    }
+    
+    return col * glow;
+}
+
+// =========================================================================
+// メイン ピクセルシェーダー
+// =========================================================================
+float4 lame_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    // パラメータ読み出し
+    float density   = p1.x;
+    float amount    = p1.y;
+    float speed     = p1.z;
+    float intensity = p1.w;
+    
+    float time      = p2.x;
+    float aspect    = p2.y;
+    float holo      = p2.z;
+    float seed_val  = p2.w;
+    
+    float3 lame_color = p3.rgb;
+
+    // 元画像のテクスチャ色をサンプリング
+    float4 baseColor = tex.SampleLevel(samp, uv, 0);
+    
+    // 【半透明ジャギー対策】
+    // 旧仕様にあった「閾値(<0.01)以下の透過バッサリカット」を廃止。
+    // 代わりにアルファ（透過度）をそのままマスクとして保持。
+    float mask = baseColor.a;
+    if(mask < 0.001) return baseColor; // 完全透明領域のみスキップしてGPU負荷を低減
+
+    // 【中央基準スケール補正】
+    // UVの中心座標を(0,0)に並行移動してからアスペクト比を掛けることで、
+    // 「細かさ」を変更した際に画像の中央を中心に拡縮されるようにする
+    float2 aspect_uv = float2((uv.x - 0.5) * aspect, uv.y - 0.5);
+
+    // 疎密感・スケールの異なる3つのラメ層を重ねることで、豊かな密度感と奥行きを表現
+    float3 layer1 = get_powder_layer(aspect_uv, density, amount, time, speed, lame_color, holo, seed_val + 0.0);
+    float3 layer2 = get_powder_layer(aspect_uv + 0.5, density * 1.3, amount, time, speed * 1.1, lame_color, holo, seed_val + 100.0);
+    float3 layer3 = get_powder_layer(aspect_uv + float2(0.2, 0.7), density * 1.6, amount, time, speed * 0.9, lame_color, holo, seed_val + 200.0);
+
+    // 各レイヤーを統合し、輝度倍率、さらにオブジェクト形状（半透明のフチ）に合わせたマスク値を乗算
+    float3 total_powder = (layer1 + layer2 + layer3) * intensity * mask;
+
+    // 元画像にラメの光を加算合成 (乗算済みアルファ/Premultiplied Alpha処理)
+    float3 final_rgb = baseColor.rgb + total_powder;
+    
+    return float4(final_rgb, baseColor.a);
+}
+]]
+
+-- =========================================================================
+-- Lua スクリプトメインロジック
+-- =========================================================================
+
+-- UIから渡されるカラーピッカー値(0xRRGGBB)を 0.0～1.0 範囲のRGB値に分解・変換
+local r = math.floor(lame_col / 0x10000) % 0x100
+local g = math.floor(lame_col / 0x100) % 0x100
+local b = lame_col % 0x100
+r = r / 255.0
+g = g / 255.0
+b = b / 255.0
+
+-- コマ打ち(FPS)処理
+local t = obj.time
+if fps > 0 then
+    -- 入力されたFPSに基づいて、経過時間を階段状に固定化
+    -- 例: 12fpsなら、1秒間に12回だけ時間がステップ更新され、カクカクとした動きになる
+    t = math.floor(t * fps) / fps
+end
+
+-- アスペクト比補正値の算出 (解像度に合わせてラメ粒を真円/正方形に維持)
+local aspect = obj.w / obj.h
+
+-- ピクセルシェーダーの起動
+obj.pixelshader("lame_ps", "object", {"object"}, {
+    density, amount, speed, intensity, -- b0.p1 (制御系)
+    t, aspect, holo, seed,             -- b0.p2 (時間・画面・シード)
+    r, g, b, 0.0                       -- b0.p3 (カラー)
+})

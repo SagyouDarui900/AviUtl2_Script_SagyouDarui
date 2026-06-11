@@ -1,0 +1,153 @@
+--label:ぼかし
+--track@range:範囲,0,500,10,0.1
+--track@aspect_val:縦横比,-100,100,0,0.1
+
+--[[pixelshader@blur_x_ps:
+    cbuffer params : register(b0) {
+        float range;
+        float scale_x;
+        float scale_y;
+        float orig_w;
+        float orig_h;
+        float3 padding;
+    };
+    
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // 1パス目：X方向のアルファ空間拡散（色RGBは計算から除外し超高速化）
+    float4 blur_x_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float blur_w = range * scale_x;
+        if (blur_w <= 0.001) return float4(0.0, 0.0, 0.0, tex.SampleLevel(samp, uv, 0).a);
+
+        float sigma = max(0.1, blur_w / 3.0);
+        float step_size = blur_w / 40.0;
+        float texel_x = 1.0 / orig_w;
+        float gauss_coeff = -1.0 / (2.0 * sigma * sigma);
+
+        float sum_a = 0.0;
+        float total_weight = 0.0;
+        
+        [unroll(81)]
+        for (int i = -40; i <= 40; i++) {
+            float offset = (float)i * step_size;
+            float weight = exp(offset * offset * gauss_coeff);
+            
+            float2 sample_uv = uv + float2(offset * texel_x, 0.0);
+            
+            float in_bounds = step(0.0, sample_uv.x) * step(sample_uv.x, 1.0) * step(0.0, sample_uv.y) * step(sample_uv.y, 1.0);
+            
+            sum_a += tex.SampleLevel(samp, sample_uv, 0).a * in_bounds * weight;
+            total_weight += weight;
+        }
+        
+        return float4(0.0, 0.0, 0.0, sum_a / total_weight);
+    }
+]]
+
+--[[pixelshader@blur_y_ps:
+    cbuffer params : register(b0) {
+        float range;
+        float scale_x;
+        float scale_y;
+        float orig_w;
+        float orig_h;
+        float3 padding;
+    };
+    
+    Texture2D tex_blur : register(t0); 
+    Texture2D tex_orig : register(t1); 
+    SamplerState samp : register(s0);
+
+    // 2パス目：Y方向アルファ空間拡散 ＋ エッジ消失フェザー合成
+    float4 blur_y_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float4 c_orig = tex_orig.SampleLevel(samp, uv, 0);
+        if (c_orig.a <= 0.001) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float blur_h = range * scale_y;
+        float blur_a = 0.0;
+
+        if (blur_h <= 0.001) {
+            blur_a = tex_blur.SampleLevel(samp, uv, 0).a;
+        } else {
+            float sigma = max(0.1, blur_h / 3.0);
+            float step_size = blur_h / 40.0;
+            float texel_y = 1.0 / orig_h;
+            float gauss_coeff = -1.0 / (2.0 * sigma * sigma);
+            
+            float sum_a = 0.0;
+            float total_weight = 0.0;
+            
+            [unroll(81)]
+            for (int i = -40; i <= 40; i++) {
+                float offset = (float)i * step_size;
+                float weight = exp(offset * offset * gauss_coeff);
+                
+                float2 sample_uv = uv + float2(0.0, offset * texel_y);
+                
+                float in_bounds = step(0.0, sample_uv.x) * step(sample_uv.x, 1.0) * step(0.0, sample_uv.y) * step(sample_uv.y, 1.0);
+                
+                sum_a += tex_blur.SampleLevel(samp, sample_uv, 0).a * in_bounds * weight;
+                total_weight += weight;
+            }
+            blur_a = sum_a / total_weight;
+        }
+
+        // =========================================================
+        // 【完全版】境界ぼかし（インナーフェザー）のロジック
+        // =========================================================
+        
+        // blur_a は空間的なアルファの拡散値。
+        // 一番外側のピクセルで0.0、元の図形の「輪郭線上」でちょうど0.5になります。
+        
+        // 0.5 (輪郭線上) 以下の部分を「完全に透明(0.0)」として切り捨てることで、
+        // プツッと切れた「元の形（ハードエッジ）」を跡形もなく消滅させます。
+        // 0.5から0.95にかけて、内側に向かって滑らかなS字カーブでふわふわと不透明に戻します。
+        float feather = smoothstep(0.5, 0.95, blur_a);
+        
+        // 元のアルファ値と掛け合わせることで、図形の外には1ピクセルもはみ出しません（影ができません）
+        float final_a = c_orig.a * feather;
+        
+        // 色（RGB）は「元のクッキリした色」をそのまま維持します。
+        // ぼかした暗い色を混ぜないため、境界が暗く落ち込む現象を100%防げます。
+        float3 orig_rgb = c_orig.rgb / c_orig.a;
+        
+        return float4(orig_rgb * final_a, final_a);
+    }
+]]
+
+-- ここからLua側の処理
+local r = range
+if r <= 0 then
+    return
+end
+
+local aspect_ratio = aspect_val / 100.0
+local scale_x = 1.0
+local scale_y = 1.0
+
+if aspect_ratio > 0 then
+    scale_y = 1.0 - aspect_ratio
+elseif aspect_ratio < 0 then
+    scale_x = 1.0 + aspect_ratio
+end
+
+obj.copybuffer("cache:orig", "object")
+
+-- 1パス目（アルファ成分の横方向拡散）
+obj.setoption("drawtarget", "tempbuffer", obj.w, obj.h)
+obj.pixelshader("blur_x_ps", "tempbuffer", {"cache:orig"}, {
+    r, scale_x, scale_y, obj.w, obj.h, 0.0, 0.0, 0.0
+})
+
+obj.setoption("drawtarget", "framebuffer")
+obj.load("tempbuffer")
+
+-- 2パス目（アルファ成分の縦方向拡散 ＋ エッジ消失フェザー合成）
+obj.setoption("drawtarget", "tempbuffer", obj.w, obj.h)
+obj.pixelshader("blur_y_ps", "tempbuffer", {"object", "cache:orig"}, {
+    r, scale_x, scale_y, obj.w, obj.h, 0.0, 0.0, 0.0
+})
+
+obj.setoption("drawtarget", "framebuffer")
+obj.load("tempbuffer")

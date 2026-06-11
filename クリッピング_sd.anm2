@@ -1,0 +1,122 @@
+--label:クリッピング
+--separator:上方向
+--track@clip_top:上::クリッピング(%),0,100,0,0.1
+--track@angle_top:上角度::角度,-360,360,0,0.1
+--separator:下方向
+--track@clip_bottom:下::クリッピング(%),0,100,0,0.1
+--track@angle_bottom:下角度::角度,-360,360,0,0.1
+--check@sync_tb:上下同期(下を上に),0
+--separator:左方向
+--track@clip_left:左::クリッピング(%),0,100,0,0.1
+--track@angle_left:左角度::角度,-360,360,0,0.1
+--separator:右方向
+--track@clip_right:右::クリッピング(%),0,100,0,0.1
+--track@angle_right:右角度::角度,-360,360,0,0.1
+--check@sync_lr:左右同期(右を左に),0
+
+--[[pixelshader@clipping_sd_ps:
+Texture2D t0 : register(t0);
+SamplerState s0 : register(s0);
+
+// ==========================================
+// 定数バッファの定義 (Lua側から渡される値)
+// ==========================================
+cbuffer b0 : register(b0) {
+    float4 clip_amounts; // x: 上, y: 下, z: 左, w: 右 (0.0 ～ 1.0の正規化値)
+    float4 angles;       // x: 上, y: 下, z: 左, w: 右 (ラジアン角)
+    float2 obj_size;     // x: 幅(ピクセル), y: 高さ(ピクセル)
+}
+
+float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 color = t0.Sample(s0, uv);
+    
+    // 完全に透明なピクセルの場合は計算をスキップ (GPU最適化)
+    if (color.a == 0.0) return color;
+
+    float w = obj_size.x;
+    float h = obj_size.y;
+    
+    // UV座標(0.0~1.0)を、中心を原点(0,0)としたピクセル単位のローカル座標へ変換
+    float2 p = float2((uv.x - 0.5) * w, (uv.y - 0.5) * h);
+    
+    float alpha_mult = 1.0;
+    
+    // ==========================================
+    // 上辺のクリッピング
+    // ==========================================
+    // 回転の基準点 (上端から指定パーセント下がった位置の中央)
+    float2 p_top = float2(0.0, -h * 0.5 + h * clip_amounts.x);
+    // 法線ベクトル (削られる方向を向く。角度に応じて回転させる)
+    float2 n_top = float2(sin(angles.x), -cos(angles.x));
+    // SDF(符号付き距離関数)を利用して、ピクセル境界に滑らかなアンチエイリアスを適用
+    alpha_mult *= saturate(0.5 - dot(p - p_top, n_top));
+    
+    // ==========================================
+    // 下辺のクリッピング
+    // ==========================================
+    float2 p_bottom = float2(0.0, h * 0.5 - h * clip_amounts.y);
+    float2 n_bottom = float2(-sin(angles.y), cos(angles.y));
+    alpha_mult *= saturate(0.5 - dot(p - p_bottom, n_bottom));
+    
+    // ==========================================
+    // 左辺のクリッピング
+    // ==========================================
+    float2 p_left = float2(-w * 0.5 + w * clip_amounts.z, 0.0);
+    float2 n_left = float2(-cos(angles.z), -sin(angles.z));
+    alpha_mult *= saturate(0.5 - dot(p - p_left, n_left));
+    
+    // ==========================================
+    // 右辺のクリッピング
+    // ==========================================
+    float2 p_right = float2(w * 0.5 - w * clip_amounts.w, 0.0);
+    float2 n_right = float2(cos(angles.w), sin(angles.w));
+    alpha_mult *= saturate(0.5 - dot(p - p_right, n_right));
+    
+    // AviUtl2は乗算済みアルファ(Premultiplied Alpha)空間のため、RGBとAの両方に同じ倍率を乗算する
+    return color * alpha_mult;
+}
+]]
+
+-- ==========================================
+-- ユーザー設定値の取得と加工
+-- ==========================================
+-- グローバル空間を汚染しないよう、ローカル変数へ格納する
+local c_top    = clip_top
+local c_bottom = clip_bottom
+local c_left   = clip_left
+local c_right  = clip_right
+
+local a_top    = angle_top
+local a_bottom = angle_bottom
+local a_left   = angle_left
+local a_right  = angle_right
+
+-- 同期オプションの処理
+-- (デフォルトを0に設定しているため、チェックボックスON時は1が代入される)
+if sync_tb == 1 then
+    c_bottom = c_top
+    a_bottom = a_top
+end
+
+if sync_lr == 1 then
+    c_right = c_left
+    a_right = a_left
+end
+
+-- 高速化のため、頻出する関数とオブジェクト情報をローカル変数へ
+local math_rad = math.rad
+local w, h = obj.w, obj.h
+
+-- ピクセルシェーダー(HLSL)の定数バッファ(cbuffer)に渡す配列データを作成
+-- ※cbufferの16バイト(float4)アライメント規則に合わせるため、末尾に0.0のダミー値(パディング)を追加
+local constants = {
+    c_top / 100.0, c_bottom / 100.0, c_left / 100.0, c_right / 100.0, -- clip_amounts (float4)
+    math_rad(a_top), math_rad(a_bottom), math_rad(a_left), math_rad(a_right), -- angles (float4)
+    w, h, 0.0, 0.0 -- obj_size (float2) + アライメント用パディング(float2)
+}
+
+-- ==========================================
+-- 描画処理 (GPUオフロード)
+-- ==========================================
+-- "object" を対象として、自身のテクスチャを読み込み、ピクセルシェーダーで書き換える
+obj.pixelshader("clipping_sd_ps", "object", {"object"}, constants)

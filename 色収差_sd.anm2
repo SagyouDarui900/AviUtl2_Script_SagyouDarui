@@ -1,0 +1,158 @@
+--label:画面効果
+
+--track@amount:ズレ量/強さ,-2000,2000,10,0.1
+--track@angle:角度(平行用),-360,360,0,0.1
+--track@center_x:中心X,-4000,4000,0,1
+--track@center_y:中心Y,-4000,4000,0,1
+--group:詳細設定
+--track@quality:品質(ｻﾝﾌﾟﾙ数),1,64,8,1
+--select@mode:モード=0,平行ズレ=0,放射ズレ(倍率)=1,回転ズレ=2
+--select@color_order:配色=0,赤(+)・青(-)=0,緑(+)・赤(-)=1,青(+)・緑(-)=2,赤(+)・緑(-)=3,緑(+)・青(-)=4,青(+)・赤(-)=5
+--check@hide_orig:元画像を表示しない,0
+--track@mix_rate:元画像ブレンド,0,100,0,0.1
+--group:
+
+-- 放射・回転ズレの基準となる中心座標を画面上で操作できるアンカー
+obj.setanchor("center_", 1, "line")
+
+-- 品質（サンプル数）の保証
+local q = math.floor(math.max(1, quality))
+
+--[[pixelshader@omni_chromatic_aberration:
+    // ----------------------------------------------------------------
+    // HLSL Shader Definition for AviUtl 2 (DirectX 11)
+    // ----------------------------------------------------------------
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // 16バイトアライメントを厳守した定数バッファ
+    cbuffer params : register(b0) {
+        float amount;       // ズレ量 (ピクセル / % / 度)
+        float angle;        // 角度 (平行ズレ用)
+        float center_x;     // 中心X
+        float center_y;     // 中心Y
+
+        float quality;      // サンプル数
+        float mode;         // 0:平行, 1:放射, 2:回転
+        float color_order;  // 配色パターン
+        float hide_orig;    // 元画像非表示フラグ
+
+        float mix_rate;     // 元画像とのブレンド率
+        float w;            // 画像の幅
+        float h;            // 画像の高さ
+        float padding;      // アライメント調整用
+    };
+
+    // t (-1.0 ~ 1.0) に応じて各色の重みを計算する関数
+    float3 get_color_weight(float order, float t) {
+        float w_plus  = max(0.0, t);
+        float w_minus = max(0.0, -t);
+        float w_zero  = 1.0 - abs(t);
+
+        int i_order = (int)(order + 0.5);
+        if (i_order == 0) return float3(w_plus, w_zero, w_minus); // R(+), G(0), B(-)
+        if (i_order == 1) return float3(w_minus, w_plus, w_zero); // G(+), R(0), B(-)
+        if (i_order == 2) return float3(w_zero, w_minus, w_plus); // B(+), G(0), R(-)
+        if (i_order == 3) return float3(w_plus, w_minus, w_zero); // R(+), B(0), G(-)
+        if (i_order == 4) return float3(w_zero, w_plus, w_minus); // G(+), B(0), R(-)
+        if (i_order == 5) return float3(w_minus, w_zero, w_plus); // B(+), R(0), G(-)
+        return float3(w_plus, w_zero, w_minus);
+    }
+
+    float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // 元画像のサンプリング
+        float4 orig_color = tex.Sample(samp, uv);
+        
+        // ゼロ除算防止を含む解像度ベクトル
+        float2 res = max(float2(w, h), float2(1.0, 1.0));
+        
+        // 中心のUV座標とアスペクト比
+        float2 center_uv = float2(0.5, 0.5) + float2(center_x, center_y) / res;
+        float2 aspect = float2(res.x / res.y, 1.0);
+        
+        int loop_count = (int)(quality + 0.5);
+        // qualityが1や2の場合は「くっきりモード」として内部的に3点サンプリングに切り替える
+        int steps = max(3, loop_count);
+        
+        float3 sum_col = float3(0.0, 0.0, 0.0);
+        float3 sum_a   = float3(0.0, 0.0, 0.0);
+        float3 sum_w   = float3(0.0, 0.0, 0.0);
+        
+        int m = (int)(mode + 0.5);
+        float rad_angle = angle * 3.14159265 / 180.0;
+        float2 dir_linear = float2(cos(rad_angle), sin(rad_angle));
+
+        // ブラーサンプリングループ
+        for (int i = 0; i < steps; i++) {
+            // t を -1.0 から 1.0 まで変化させる
+            float t = (float)i / (float)(steps - 1) * 2.0 - 1.0;
+            float2 sample_uv = uv;
+            
+            if (m == 0) {
+                // [0] 平行ズレ (amount はピクセル数)
+                sample_uv = uv + dir_linear * amount * t / res;
+            } else if (m == 1) {
+                // [1] 放射ズレ (amount はパーセント倍率)
+                sample_uv = uv + (uv - center_uv) * (amount / 100.0) * t;
+            } else if (m == 2) {
+                // [2] 回転ズレ (amount は度数)
+                float2 dir = (uv - center_uv) * aspect;
+                float rad = amount * t * 3.14159265 / 180.0;
+                float c = cos(rad);
+                float s = sin(rad);
+                float2 rot_dir = float2(dir.x * c - dir.y * s, dir.x * s + dir.y * c) / aspect;
+                sample_uv = center_uv + rot_dir;
+            }
+            
+            float4 smp = tex.Sample(samp, sample_uv);
+            float3 cw = get_color_weight(color_order, t);
+            
+            // 色とアルファに重みを掛けて加算
+            sum_col += smp.rgb * cw;
+            sum_a   += smp.aaa * cw;
+            sum_w   += cw;
+        }
+        
+        float4 final_color = float4(0.0, 0.0, 0.0, 0.0);
+        
+        // 重みの合計で割り、RGBを正規化
+        if (sum_w.r > 0.0) final_color.r = sum_col.r / sum_w.r;
+        if (sum_w.g > 0.0) final_color.g = sum_col.g / sum_w.g;
+        if (sum_w.b > 0.0) final_color.b = sum_col.b / sum_w.b;
+        
+        // 色チャンネルごとのアルファ値の平均を計算
+        float out_a_r = (sum_w.r > 0.0) ? (sum_a.r / sum_w.r) : 0.0;
+        float out_a_g = (sum_w.g > 0.0) ? (sum_a.g / sum_w.g) : 0.0;
+        float out_a_b = (sum_w.b > 0.0) ? (sum_a.b / sum_w.b) : 0.0;
+        
+        // 最大のアルファ値を採用することで、エッジの半透明化や欠けを防ぐ
+        final_color.a = max(max(out_a_r, out_a_g), out_a_b);
+        
+        // 元画像とのブレンド処理
+        if (hide_orig < 0.5) {
+            // 元画像を表示する場合は、mix_rate に応じて元画像に近づける
+            final_color = lerp(final_color, orig_color, mix_rate / 100.0);
+        } else {
+            // 元画像を表示しない場合は、mix_rate を全体の透明度として適用する
+            final_color *= (1.0 - mix_rate / 100.0);
+        }
+        
+        return final_color;
+    }
+]]
+
+-- シェーダーの実行
+obj.pixelshader("omni_chromatic_aberration", "object", {"object"}, {
+    amount,
+    angle,
+    center_x,
+    center_y,
+    q,
+    mode,
+    color_order,
+    hide_orig,
+    mix_rate,
+    obj.w,
+    obj.h,
+    0.0
+})

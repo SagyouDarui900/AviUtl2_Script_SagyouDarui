@@ -1,0 +1,83 @@
+--label:加工
+--track@zoom_lv:ピクセル倍率,100,50000,100,0.01
+--track@color_steps:色階調(減色),2,256,256,1
+--check@no_interp:補間なし,true
+--information:Quantize (v2 Optimized)
+
+--[[pixelshader@ps_quantize:
+    cbuffer params : register(b0) {
+        float color_steps;
+        float3 padding;
+    };
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // 仮想バッファ(tempbuffer)の画像を元のオブジェクトのサイズに引き伸ばしつつ、
+    // 同時に色の量子化(減色)を行うシェーダー
+    float4 ps_quantize(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float4 color = tex.Sample(samp, uv);
+
+        // アルファ値が存在し、かつ色階調が最大(256)未満の場合のみ減色処理を適用
+        if (color.a > 0.0 && color_steps < 256.0) {
+            // AviUtl2は「乗算済みアルファ」のため、一度アルファ値で除算して元のRGBに戻す
+            color.rgb /= color.a;
+
+            // 色の量子化 (Posterization)
+            // 例: color_stepsが4なら、0.0, 0.33, 0.66, 1.0 の4階調になる
+            float steps = color_steps - 1.0;
+            color.rgb = floor(color.rgb * steps + 0.5) / steps;
+
+            // 再びアルファ値を乗算して戻す
+            color.rgb *= color.a;
+        }
+
+        return color;
+    }
+]]
+
+-- 倍率の計算 (100 = 1.0倍)
+local zoom = zoom_lv * 0.01
+
+-- サンプラーの選択
+-- 補間なし: "dot" (ドットがくっきりしたモザイク状になる)
+-- 補間あり: "clip" (境界がぼやけた劣化表現になる)
+local sampler_type = no_interp and "dot" or "clip"
+
+-- モザイク化（解像度の低下）を行うかどうか
+local do_mosaic = zoom > 1.0
+-- 減色（色の劣化）を行うかどうか
+local do_posterize = color_steps < 256
+
+-- どちらも無効な場合は処理をスキップ
+if not do_mosaic and not do_posterize then return end
+
+if do_mosaic then
+    -- =========================================================
+    -- 1. 仮想バッファ(tempbuffer)への縮小描画 (空間の量子化)
+    -- =========================================================
+    local w, h = obj.w, obj.h
+    local w2 = math.max(1, math.floor(w / zoom + 0.5))
+    local h2 = math.max(1, math.floor(h / zoom + 0.5))
+
+    obj.setoption("drawtarget", "tempbuffer", w2, h2)
+    obj.setoption("sampler", sampler_type)
+
+    local vertex = {
+        { -w2/2, -h2/2, 0, 0, 0 },
+        {  w2/2, -h2/2, 0, 1, 0 },
+        {  w2/2,  h2/2, 0, 1, 1 },
+        { -w2/2,  h2/2, 0, 0, 1 }
+    }
+    obj.drawpoly(vertex)
+
+    -- =========================================================
+    -- 2. 元サイズへの拡大 + 色の量子化
+    -- =========================================================
+    -- シェーダーに定数(b0)として color_steps の値を渡す
+    obj.pixelshader("ps_quantize", "object", {"tempbuffer"}, {color_steps}, "copy", sampler_type)
+else
+    -- =========================================================
+    -- モザイクなしで、減色のみを行う場合
+    -- =========================================================
+    obj.pixelshader("ps_quantize", "object", {"object"}, {color_steps}, "copy", sampler_type)
+end
