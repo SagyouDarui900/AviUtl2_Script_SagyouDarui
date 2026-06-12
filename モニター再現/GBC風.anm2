@@ -1,0 +1,199 @@
+--@GBCモニター再現
+--label:画面効果\モニター再現
+--track@scale:ドットサイズ,1,20,4,0.1
+--track@ambient:環境光(明るさ),0,200,100,1
+--track@grid_a:グリッド濃度,0,100,60,1
+--track@shadow:影の距離,0,5,1.0,0.1
+--track@angle:影の角度,-180,180,45,0.1
+--check@use_subpixel:サブピクセル表示,1
+--check@quantize:15bitカラー化,1
+
+--[[pixelshader@gbc_lcd:
+    // -----------------------------------------------------------
+    // CGB-001 反射型カラー液晶シミュレーション (DirectX 11)
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float2 res;
+        float scale;
+        float ambient;
+        float grid_a;
+        float shadow;
+        float angle;
+        float use_subpixel;
+        float quantize;
+        float3 pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // RGBから「液晶がどれだけ光を遮るか（濃度）」を算出
+    float get_density(float3 rgb) {
+        return 1.0 - dot(rgb, float3(0.299, 0.587, 0.114));
+    }
+
+    float4 gbc_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // 画像の中心(0.5, 0.5)を基準にドットのグリッドを生成する (左上基準の解消)
+        float2 grid_uv = (uv - 0.5) * res / scale;
+        float2 block_index = floor(grid_uv + 0.5);
+        float2 pixel_uv = block_index * scale / res + 0.5;
+
+        // 画面外のサンプリングを防ぐ
+        if (pixel_uv.x < 0.0 || pixel_uv.x > 1.0 || pixel_uv.y < 0.0 || pixel_uv.y > 1.0) {
+            return float4(0, 0, 0, 0);
+        }
+
+        float4 original = tex.Sample(samp, pixel_uv);
+        if (original.a <= 0.0) return float4(0, 0, 0, 0);
+        float3 rgb = original.rgb / original.a;
+
+        // 0. GBCの色数制限 (15-bit RGB: 32,768色)
+        // 1677万色を「各チャンネル5bit(32階調)」に落とすことで、デジタル特有の粗いグラデーションを再現
+        if (quantize > 0.5) {
+            rgb = round(rgb * 31.0) / 31.0;
+        }
+
+        // 1. GBC特有の「色ずれ」と「彩度低下」の再現
+        // 実機のカラーフィルターは純色ではなく、色が混ざってくすんだパステル調になる
+        float3 gbc_color;
+        gbc_color.r = rgb.r * 0.75 + rgb.g * 0.15 + rgb.b * 0.10;
+        gbc_color.g = rgb.r * 0.10 + rgb.g * 0.70 + rgb.b * 0.20;
+        gbc_color.b = rgb.r * 0.10 + rgb.g * 0.20 + rgb.b * 0.70;
+        
+        // 実機のコントラストの低さをガンマカーブで表現
+        gbc_color = pow(abs(gbc_color), 0.85);
+
+        // 2. 反射板と液晶の物理シミュレート
+        float3 ref_bg = float3(0.65, 0.68, 0.62) * (ambient / 100.0);
+        float3 lcd_black = float3(0.12, 0.15, 0.12) * (ambient / 100.0);
+
+        // 影の計算 (中心基準で再計算)
+        float rad = angle * 3.14159265 / 180.0;
+        float2 shadow_dir = float2(cos(rad), sin(rad));
+        float2 shadow_offset = shadow_dir * shadow * scale / res;
+        
+        float2 shadow_grid_uv = (uv - shadow_offset - 0.5) * res / scale;
+        float2 shadow_block = floor(shadow_grid_uv + 0.5);
+        float2 shadow_pixel_uv = shadow_block * scale / res + 0.5;
+        
+        float4 shadow_sample = tex.Sample(samp, shadow_pixel_uv);
+        float shadow_density = 0.0;
+        if (shadow_sample.a > 0.0) {
+            float3 s_rgb = shadow_sample.rgb / shadow_sample.a;
+            if (quantize > 0.5) s_rgb = round(s_rgb * 31.0) / 31.0;
+            shadow_density = get_density(s_rgb) * shadow_sample.a;
+        }
+
+        // 影が落ちている部分の反射板は少し暗くなる
+        float3 bg_color = ref_bg;
+        if (shadow_density > 0.05) {
+            bg_color = lerp(ref_bg, lcd_black, shadow_density * 0.6);
+        }
+
+        // 液晶の透過光をベースカラーに乗算＆ブレンド
+        float3 pixel_color = lerp(lcd_black, bg_color * (gbc_color * 1.2 + 0.1), gbc_color);
+        pixel_color = min(pixel_color, bg_color); 
+
+        // 3. サブピクセル（RGBストライプ）表現
+        float2 inner_uv = frac(grid_uv + 0.5);
+        
+        if (use_subpixel > 0.5 && scale >= 4.0) {
+            float x = inner_uv.x;
+            float r_mask = 1.0 - smoothstep(0.333 - 0.05, 0.333 + 0.05, x);
+            float g_mask = smoothstep(0.333 - 0.05, 0.333 + 0.05, x) * (1.0 - smoothstep(0.666 - 0.05, 0.666 + 0.05, x));
+            float b_mask = smoothstep(0.666 - 0.05, 0.666 + 0.05, x);
+            
+            float3 stripe_tint = float3(r_mask, g_mask, b_mask) * 2.5;
+            float stripe_strength = saturate((scale - 4.0) / 6.0);
+            pixel_color = lerp(pixel_color, pixel_color * stripe_tint, stripe_strength * 0.8);
+        }
+
+        // 4. グリッド（ブラックマトリクス）
+        float border = 0.08; 
+        float sm = max(0.02, 1.0 / (scale * 3.0));
+        float dx = min(inner_uv.x, 1.0 - inner_uv.x);
+        float dy = min(inner_uv.y, 1.0 - inner_uv.y);
+        float grid_mask = smoothstep(border - sm, border + sm, dx) * smoothstep(border - sm, border + sm, dy);
+
+        float3 grid_color_val = float3(0.05, 0.07, 0.05) * (ambient / 100.0);
+        float3 final_color = lerp(grid_color_val, pixel_color, lerp(1.0, grid_mask, grid_a / 100.0));
+
+        return float4(final_color * original.a, original.a);
+    }
+]]
+
+-- AviUtl2のチェックボックスは OFFの時 0 を返すため、Luaの仕様(0はtrue)を回避する安全な取得
+local sp = (use_subpixel == 1 or use_subpixel == true) and 1.0 or 0.0
+local qz = (quantize == 1 or quantize == true) and 1.0 or 0.0
+
+obj.pixelshader("gbc_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    scale,
+    ambient,
+    grid_a,
+    shadow,
+    angle,
+    sp,
+    qz
+})
+
+--@GBC電源OFF
+--label:アニメーション効果
+--track@progress:進行度,0,100,0,0.1
+
+--[[pixelshader@gbc_power_off:
+    // -----------------------------------------------------------
+    // カラー液晶 電源OFF風アニメーション
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float progress;
+        float3 pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float4 gbc_power_off(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        if (progress <= 0.0) return tex.Sample(samp, uv);
+
+        float4 color = tex.Sample(samp, uv);
+        if (color.a <= 0.0) return color;
+
+        float3 rgb = color.rgb / color.a;
+        
+        // GBCの無通電時のパネル色（暗い銀緑色）
+        float3 panel_color = float3(0.40, 0.45, 0.40);
+
+        // アニメーションフェーズ (TFT/カラー液晶は比較的スッと消える)
+        float p_loss = saturate(progress / 0.15);            // 0.0~0.15: 彩度消失とコントラスト低下
+        float p_fade = saturate((progress - 0.15) / 0.45);   // 0.15~0.6: パネル色への急速な溶け込み
+        float p_shrink = saturate((progress - 0.6) / 0.3);   // 0.6~0.9: 残像の消滅
+        
+        // 1. コントラストと彩度の消失 (電圧低下)
+        float lum = dot(rgb, float3(0.299, 0.587, 0.114));
+        float3 desat = lerp(rgb, float3(lum, lum, lum), p_loss);
+        rgb = lerp(rgb, desat, p_loss);
+        
+        // 2. パネル色への溶け込み
+        rgb = lerp(rgb, panel_color, p_loss * 0.5 + p_fade * 0.5);
+
+        // 3. 画面端から中央に向かってフワッと残像が消える
+        if (p_shrink > 0.0) {
+            float2 diff = uv - 0.5;
+            float dist = dot(diff, diff) * 4.0; // 画面端は1.0、中央は0.0
+            float wipe = smoothstep(1.0 - p_shrink * 1.5, 1.0 - p_shrink, dist);
+            rgb = lerp(rgb, panel_color, wipe);
+        }
+        
+        if (progress >= 0.9) {
+            rgb = panel_color;
+        }
+
+        return float4(saturate(rgb) * color.a, color.a);
+    }
+]]
+
+local p = progress or 0
+obj.pixelshader("gbc_power_off", "object", {"object"}, {
+    p / 100.0
+})

@@ -1,0 +1,193 @@
+--@GBAモニター再現
+--label:画面効果\モニター再現
+--select@model:モデル=0,初代GBA(反射型)=0,GBASP(ﾌﾛﾝﾄﾗｲﾄ)=1,GBASP(ﾊﾞｯｸﾗｲﾄ)=2
+--track@scale:ドットサイズ,1,50,4,0.1
+--track@matrix_a:グリッド濃度,0,100,75,1
+--check@use_subpixel:サブピクセルとノッチ,1
+--check@quantize:15bitカラー化,1
+
+--[[pixelshader@gba_lcd:
+    // -----------------------------------------------------------
+    // GBA 歴代3モデル 光学シミュレーション (DirectX 11 HLSL)
+    // 【GPU最適化版】三次関数(smoothstep)を一次関数(saturate)に置換
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float2 res;
+        float model;
+        float scale;
+        float matrix_a;
+        float use_subpixel;
+        float quantize;
+        float pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // RGBから「液晶がどれだけ光を遮るか（濃度）」を算出
+    float get_density(float3 rgb) {
+        return 1.0 - dot(rgb, float3(0.299, 0.587, 0.114));
+    }
+
+    float4 gba_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // 画面の中心を基準にドットのグリッドを生成 (左上ズレ防止)
+        float2 grid_uv = (uv - 0.5) * res / scale;
+        float2 block_index = floor(grid_uv + 0.5);
+        
+        // サンプリング座標を「ピクセルの中心(整数+0.5)」に補正し、バイリニア滲みを防ぐ
+        float2 pixel_pos = floor(block_index * scale + res * 0.5) + 0.5;
+        float2 pixel_uv = pixel_pos / res;
+
+        // 画面外サンプリング防止 (処理の早期リターンで軽量化)
+        if (pixel_uv.x < 0.0 || pixel_uv.x > 1.0 || pixel_uv.y < 0.0 || pixel_uv.y > 1.0) {
+            return float4(0, 0, 0, 0);
+        }
+
+        float4 original = tex.Sample(samp, pixel_uv);
+        if (original.a <= 0.0) return float4(0, 0, 0, 0);
+        float3 rgb = original.rgb / original.a;
+
+        // 1. 15-bit カラー量子化 (32,768色制限)
+        if (quantize > 0.5) {
+            rgb = round(rgb * 31.0) / 31.0;
+        }
+
+        // 2. GBA液晶特有の色ずれ補正 (カラーフィルターの混色)
+        float3 filter_color;
+        filter_color.r = rgb.r * 0.85 + rgb.g * 0.10 + rgb.b * 0.05;
+        filter_color.g = rgb.r * 0.10 + rgb.g * 0.80 + rgb.b * 0.10;
+        filter_color.b = rgb.r * 0.05 + rgb.g * 0.15 + rgb.b * 0.80;
+
+        // X3571エラー回避: pow関数に渡す前にマイナス値を0.0でガードする
+        filter_color = max(filter_color, 0.0);
+
+        int m = int(model);
+        float3 final_pixel_color;
+
+        // =========================================================
+        // 3. モデルごとの光学シミュレーション (光源と反射の物理特性)
+        // =========================================================
+        if (m == 0) {
+            // ① AGB-001 (初代GBA / 反射型TFT)
+            float3 panel_off_color = float3(0.40, 0.45, 0.40); 
+            
+            float2 shadow_offset = float2(1.5, 1.5) * scale / res;
+            float2 shadow_grid_uv = (uv - shadow_offset - 0.5) * res / scale;
+            float2 shadow_block = floor(shadow_grid_uv + 0.5);
+            float2 shadow_pos = floor(shadow_block * scale + res * 0.5) + 0.5;
+            
+            float4 s_samp = tex.Sample(samp, shadow_pos / res);
+            float s_den = 0.0;
+            if (s_samp.a > 0.0) s_den = get_density(s_samp.rgb / s_samp.a) * s_samp.a;
+            
+            float3 bg_ref = lerp(panel_off_color, panel_off_color * 0.3, s_den);
+            float3 transmit = pow(filter_color, 1.2); 
+            final_pixel_color = bg_ref * transmit * 2.2;
+            
+        } else if (m == 1) {
+            // ② AGS-001 (初代GBASP / フロントライト)
+            float3 panel_off_color = float3(0.50, 0.55, 0.60); 
+            
+            float2 shadow_offset = float2(0.8, 0.8) * scale / res;
+            float2 shadow_grid_uv = (uv - shadow_offset - 0.5) * res / scale;
+            float2 shadow_block = floor(shadow_grid_uv + 0.5);
+            float2 shadow_pos = floor(shadow_block * scale + res * 0.5) + 0.5;
+            
+            float4 s_samp = tex.Sample(samp, shadow_pos / res);
+            float s_den = 0.0;
+            if (s_samp.a > 0.0) s_den = get_density(s_samp.rgb / s_samp.a) * s_samp.a;
+            
+            float3 bg_ref = lerp(panel_off_color, panel_off_color * 0.4, s_den);
+            float3 transmit = pow(filter_color, 0.95);
+            float3 reflected = bg_ref * transmit * 2.0;
+            
+            float3 glare = float3(0.12, 0.18, 0.25);
+            final_pixel_color = reflected + glare * (1.0 - transmit * 0.4);
+            
+        } else {
+            // ③ AGS-101 (後期GBASP / バックライト)
+            float3 backlight = float3(1.0, 1.0, 1.0); 
+            float3 transmit = pow(filter_color, 1.15); 
+            final_pixel_color = backlight * transmit * 1.2; 
+        }
+
+        // =========================================================
+        // 4. サブピクセルとノッチ（TFTトランジスタの影）の構築
+        // =========================================================
+        float2 inner_uv = frac(grid_uv + 0.5);
+        float3 sub_mask = float3(1.0, 1.0, 1.0);
+        float shape = 1.0;
+
+        if (use_subpixel > 0.5 && scale >= 3.0) {
+            float x = inner_uv.x;
+            
+            // 【軽量化】smoothstepをsaturateに置換
+            float r = saturate((0.383 - x) / 0.1);
+            float g = saturate((x - 0.283) / 0.1) * saturate((0.716 - x) / 0.1);
+            float b = saturate((x - 0.616) / 0.1);
+            
+            sub_mask = float3(r, g, b) * 2.8;
+
+            float sub_x = frac(x * 3.0);
+            float sub_y = inner_uv.y;
+            float blur = max(0.02, 1.0 / (scale * 2.0));
+
+            // 【軽量化】ノッチとセルのエッジ計算を一次関数化
+            float box_x = saturate((sub_x - 0.12) / blur) * saturate((0.88 - sub_x) / blur);
+            float box_y = saturate((sub_y - 0.08) / blur) * saturate((0.92 - sub_y) / blur);
+            
+            float notch_x = saturate((sub_x - 0.4) / blur);
+            float notch_y = saturate((sub_y - 0.4) / blur);
+            float notch = 1.0 - (notch_x * notch_y);
+            
+            shape = box_x * box_y * notch;
+            
+            // モアレ回避
+            float moire = saturate((scale - 3.0) / 5.0);
+            sub_mask = lerp(float3(1.0, 1.0, 1.0), sub_mask, moire);
+            shape = lerp(1.0, shape, moire);
+        } else {
+            // 単純なグリッド
+            float border = 0.06;
+            float sm = max(0.02, 1.0 / (scale * 3.0));
+            float dx = min(inner_uv.x, 1.0 - inner_uv.x);
+            float dy = min(inner_uv.y, 1.0 - inner_uv.y);
+            
+            // 【軽量化】
+            float shape_x = saturate((dx - border + sm) / (sm * 2.0));
+            float shape_y = saturate((dy - border + sm) / (sm * 2.0));
+            shape = shape_x * shape_y;
+        }
+
+        // =========================================================
+        // 5. ブラックマトリクス（配線）の合成と輝度補償
+        // =========================================================
+        float luma_comp = 1.0;
+        
+        if (use_subpixel > 0.5 && scale >= 3.0) {
+            luma_comp = lerp(1.0, 2.5, saturate((scale - 3.0) / 5.0));
+        } else {
+            luma_comp = lerp(1.0, 1.15, saturate((scale - 1.0) / 5.0));
+        }
+        
+        float3 out_rgb = final_pixel_color * sub_mask * luma_comp;
+        
+        float3 matrix_color = float3(0.02, 0.02, 0.02);
+        float3 final_rgb = lerp(matrix_color, out_rgb, lerp(1.0, shape, matrix_a / 100.0));
+
+        return float4(saturate(final_rgb) * original.a, original.a);
+    }
+]]
+
+-- Lua側の安全な変数取得
+local sp = (use_subpixel == 1 or use_subpixel == true) and 1.0 or 0.0
+local qz = (quantize == 1 or quantize == true) and 1.0 or 0.0
+
+obj.pixelshader("gba_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    model or 0,
+    scale,
+    matrix_a,
+    sp,
+    qz
+})

@@ -1,0 +1,105 @@
+--label:画面効果\モニター再現
+--select@device:機種解像度=0,GB/GBC (160x144)=0,GBA (240x160)=1,NDS (256x192)=2,3DS上 (400x240)=3,3DS下 (320x240)=4,カスタム=5
+--track@scale:画面倍率,0.1,50.0,4.0,0.1
+--select@mode:リサイズ方式=0,クリッピング(中央切抜)=0,内接(レターボックス)=1,外接(クロップ)=2,比率無視=3
+--track@center_x:中心X,-4096,4096,0,1
+--track@center_y:中心Y,-4096,4096,0,1
+--track@custom_w:カスタム幅,1,4096,160,1
+--track@custom_h:カスタム高さ,1,4096,144,1
+--check@pixel_art:ドット補間(ニアレスト),0
+
+--[[pixelshader@resize_monitor:
+    // -----------------------------------------------------------
+    // レトロゲーム機 仮想スクリーン生成シェーダー (DirectX 11)
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float2 res;         // 元映像解像度
+        float2 target_res;  // 仮想スクリーン解像度
+        float mode;         // 0:Clip, 1:Fit, 2:Fill, 3:Stretch
+        float pixel_art;    // 0:Bilinear, 1:Nearest
+        float2 center;      // クリッピング用 中心オフセット (X, Y)
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float4 resize_monitor(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 px = uv * res;
+        
+        // 仮想スクリーンを元映像の中央に配置
+        float2 screen_min = (res - target_res) / 2.0;
+        float2 screen_max = screen_min + target_res;
+
+        // 仮想スクリーンの枠外は完全に透明にする
+        if (px.x < screen_min.x || px.x > screen_max.x || 
+            px.y < screen_min.y || px.y > screen_max.y) {
+            return float4(0, 0, 0, 0);
+        }
+
+        // 仮想スクリーン内のローカルUV (0.0 ~ 1.0)
+        float2 screen_uv = (px - screen_min) / target_res;
+        float2 src_uv = screen_uv;
+
+        if (mode < 0.5) {
+            // [0] クリッピング (中央切り抜き: 元のサイズを変えずに中央を抜く)
+            // 中心位置 (center) のオフセットを加算
+            float2 src_px = (res / 2.0) - (target_res / 2.0) + (screen_uv * target_res) + center;
+            src_uv = src_px / res;
+        } else if (mode < 1.5) {
+            // [1] 内接 (Fit: アスペクト比を維持して収め、余白を作る)
+            float s = min(target_res.x / res.x, target_res.y / res.y);
+            float2 draw_size = res * s;
+            float2 offset = (target_res - draw_size) / 2.0;
+            float2 draw_px = screen_uv * target_res;
+            
+            // 映像領域外の余白(レターボックス)は透明
+            if (draw_px.x < offset.x || draw_px.x > offset.x + draw_size.x ||
+                draw_px.y < offset.y || draw_px.y > offset.y + draw_size.y) {
+                return float4(0, 0, 0, 0);
+            }
+            src_uv = (draw_px - offset) / draw_size;
+        } else if (mode < 2.5) {
+            // [2] 外接 (Fill: アスペクト比を維持して満たし、はみ出た分をカット)
+            float s = max(target_res.x / res.x, target_res.y / res.y);
+            float2 draw_size = res * s;
+            float2 offset = (target_res - draw_size) / 2.0;
+            float2 draw_px = screen_uv * target_res;
+            src_uv = (draw_px - offset) / draw_size;
+        } else {
+            // [3] 比率無視 (Stretch: 仮想スクリーン全体に引き伸ばす)
+            src_uv = screen_uv;
+        }
+
+        // 元映像の範囲外を参照しようとした場合は透明
+        if (src_uv.x < 0.0 || src_uv.x > 1.0 || src_uv.y < 0.0 || src_uv.y > 1.0) {
+            return float4(0, 0, 0, 0);
+        }
+
+        // ニアレストネイバー（ドット絵用）のスナップ処理
+        if (pixel_art > 0.5) {
+            // 元解像度のピクセル中心にサンプリング位置をスナップ
+            src_uv = (floor(src_uv * res) + 0.5) / res;
+        }
+
+        return tex.Sample(samp, src_uv);
+    }
+]]
+
+-- 機種ごとの実機解像度を設定
+local rw, rh = 160, 144
+if device == 0 then rw, rh = 160, 144
+elseif device == 1 then rw, rh = 240, 160
+elseif device == 2 then rw, rh = 256, 192
+elseif device == 3 then rw, rh = 400, 240
+elseif device == 4 then rw, rh = 320, 240
+else rw, rh = custom_w, custom_h end
+
+-- 最終的な仮想スクリーンのサイズを算出
+local target_w = rw * scale
+local target_h = rh * scale
+
+local constants = {
+    obj.w, obj.h, target_w, target_h,
+    mode, pixel_art, center_x, center_y
+}
+obj.pixelshader("resize_monitor", "object", {"object"}, constants)

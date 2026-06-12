@@ -1,0 +1,68 @@
+--label:画面効果\モニター再現
+--track@threshold:2値化しきい値,0,100,50,1
+--track@shadow:影の距離,0,20,5,0.1
+--color@col_bg:背景(反射板),0x9dae9c
+--color@col_fg:液晶(セグメント),0x111111
+
+--[[pixelshader@gw_lcd:
+    // -----------------------------------------------------------
+    // Game & Watch セグメントLCDシミュレーション (DirectX 11)
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float2 res;         // 解像度
+        float threshold;    // 2値化のしきい値
+        float shadow;       // 影の深さ（ガラスの厚み）
+        float4 col_bg;      // 背景色（反射板）
+        float4 col_fg;      // セグメント色（液晶）
+        float4 pad;         // 16バイトアライメント用パディング
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float4 gw_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float4 original = tex.Sample(samp, uv);
+        if(original.a <= 0.0) return float4(0, 0, 0, 0);
+
+        float3 rgb = original.rgb / original.a; 
+        float luma = dot(rgb, float3(0.299, 0.587, 0.114));
+
+        float soft_seg = 1.0 - smoothstep(threshold - 0.05, threshold + 0.05, luma);
+
+        float2 shadow_offset = float2(-1.0, -1.0) / res * shadow;
+        float4 c_shadow = tex.Sample(samp, uv + shadow_offset);
+        
+        float soft_shadow = 0.0;
+        if (c_shadow.a > 0.0) {
+            float luma_shadow = dot(c_shadow.rgb / c_shadow.a, float3(0.299, 0.587, 0.114));
+            soft_shadow = 1.0 - smoothstep(threshold - 0.05, threshold + 0.05, luma_shadow);
+        }
+
+        float dist = distance(uv, float2(0.5, 0.5));
+        float3 bg_color = col_bg.rgb * (1.0 - dist * 0.25);
+
+        bg_color = lerp(bg_color, col_fg.rgb, soft_shadow * 0.15);
+        float3 final_color = lerp(bg_color, col_fg.rgb, soft_seg * 0.95);
+
+        return float4(final_color * original.a, original.a);
+    }
+]]
+
+local function hex2rgb(hex)
+    local r = math.floor(hex / 65536) / 255.0
+    local g = math.floor((hex % 65536) / 256) / 255.0
+    local b = (hex % 256) / 255.0
+    return r, g, b
+end
+
+local br, bg, bb = hex2rgb(col_bg)
+local fr, fg, fb = hex2rgb(col_fg)
+
+local constants = {
+    obj.w, obj.h, threshold / 100.0, shadow,
+    br, bg, bb, 1.0,
+    fr, fg, fb, 1.0,
+    0.0, 0.0, 0.0, 0.0
+}
+
+obj.pixelshader("gw_lcd", "object", {"object"}, constants)

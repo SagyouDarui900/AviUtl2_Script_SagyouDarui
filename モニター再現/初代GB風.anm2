@@ -1,0 +1,241 @@
+--@GBモニター再現
+--label:画面効果\モニター再現
+--track@scale:ドットサイズ,1,20,4,0.1
+--track@grid_a:グリッド濃度,0,100,60,1
+--track@shadow:影の距離,0,5,1.5,0.1
+--track@angle:影の角度,-180,180,45,0.1
+--select@palette_type:パレット=0,GB風(緑)=0,GB風(グレー)=1,3DSVC風(緑)=2,3DSVC風(グレー)=3
+
+--[[pixelshader@dmg_lcd:
+    // -----------------------------------------------------------
+    // DMG-01 STNモノクロ液晶シミュレーション (DirectX 11)
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float2 res;          // 解像度
+        float scale;         // ドットサイズ
+        float grid_a;        // グリッド不透明度
+        float shadow;        // 影の深さ
+        float angle;         // 影の角度
+        float palette_type;  // パレット種類
+        float pad;           // パディング
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // パレットの取得
+    float3 get_palette_color(int type, int index) {
+        // GB Green
+        if (type == 0) {
+            if (index == 0) return float3(15, 56, 15) / 255.0;
+            if (index == 1) return float3(48, 98, 48) / 255.0;
+            if (index == 2) return float3(139, 172, 15) / 255.0;
+            return float3(155, 188, 15) / 255.0;
+        }
+        // GB Gray
+        else if (type == 1) {
+            if (index == 0) return float3(0, 0, 0) / 255.0;
+            if (index == 1) return float3(85, 85, 85) / 255.0;
+            if (index == 2) return float3(170, 170, 170) / 255.0;
+            return float3(255, 255, 255) / 255.0;
+        }
+        // 3DS VC Green
+        else if (type == 2) {
+            if (index == 0) return float3(24, 56, 24) / 255.0;
+            if (index == 1) return float3(40, 104, 40) / 255.0;
+            if (index == 2) return float3(104, 168, 40) / 255.0;
+            return float3(136, 200, 40) / 255.0;
+        }
+        // 3DS VC Gray
+        else {
+            if (index == 0) return float3(40, 40, 24) / 255.0;
+            if (index == 1) return float3(104, 104, 80) / 255.0;
+            if (index == 2) return float3(160, 160, 136) / 255.0;
+            return float3(200, 200, 168) / 255.0;
+        }
+    }
+
+    // 画素の濃度（暗さ）を計算: 0.0=白, 1.0=黒
+    float get_density(float4 color) {
+        if (color.a <= 0.0) return 0.0;
+        float3 rgb = color.rgb / color.a;
+        float lum = dot(rgb, float3(0.299, 0.587, 0.114));
+        return 1.0 - lum;
+    }
+
+    float4 dmg_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // 画像の中心(0.5, 0.5)を基準にドットのグリッドを生成する (左上基準の解消)
+        float2 grid_uv = (uv - 0.5) * res / scale;
+        float2 block_index = floor(grid_uv + 0.5);
+        float2 pixel_uv = block_index * scale / res + 0.5;
+
+        // 画面外のサンプリングを防ぐ
+        if (pixel_uv.x < 0.0 || pixel_uv.x > 1.0 || pixel_uv.y < 0.0 || pixel_uv.y > 1.0) {
+            return float4(0, 0, 0, 0);
+        }
+
+        float4 original_color = tex.Sample(samp, pixel_uv);
+        if (original_color.a == 0.0) return float4(0, 0, 0, 0);
+
+        float density = get_density(original_color);
+
+        // 影の計算 (中心基準で再計算)
+        float rad = angle * 3.14159265 / 180.0;
+        float2 shadow_dir = float2(cos(rad), sin(rad));
+        float2 shadow_offset = shadow_dir * shadow * scale / res;
+        
+        float2 shadow_grid_uv = (uv - shadow_offset - 0.5) * res / scale;
+        float2 shadow_block = floor(shadow_grid_uv + 0.5);
+        float2 shadow_pixel_uv = shadow_block * scale / res + 0.5;
+
+        float4 shadow_sample = tex.Sample(samp, shadow_pixel_uv);
+        float shadow_density = get_density(shadow_sample);
+
+        int p_type = int(palette_type);
+        float3 p_col1 = get_palette_color(p_type, 0); // 最暗 (ONドット)
+        float3 p_col2 = get_palette_color(p_type, 1);
+        float3 p_col3 = get_palette_color(p_type, 2);
+        float3 p_col4 = get_palette_color(p_type, 3); // 最明 (背景)
+
+        float3 bg_color = p_col4;
+        if (shadow_sample.a > 0.0 && shadow_density > 0.5) {
+            bg_color = lerp(p_col4, p_col3, 0.5 * shadow_sample.a);
+        }
+
+        float2 inner_uv = frac(grid_uv + 0.5);
+        
+        float3 fg_color;
+        // 実機の4階調に変換
+        if (density > 0.8) fg_color = p_col1;
+        else if (density > 0.5) fg_color = p_col2;
+        else if (density > 0.2) fg_color = p_col3;
+        else fg_color = p_col4;
+
+        float border = 0.1; 
+        float smooth_edge = max(0.02, 1.0 / (scale * 4.0));
+        float dx = min(inner_uv.x, 1.0 - inner_uv.x);
+        float dy = min(inner_uv.y, 1.0 - inner_uv.y);
+        float dot_mask = smoothstep(border - smooth_edge, border + smooth_edge, min(dx, dy));
+
+        float3 grid_color = lerp(p_col4, p_col1, 0.15);
+        bg_color = lerp(bg_color, grid_color, (1.0 - dot_mask) * grid_a);
+
+        float3 final_color = lerp(bg_color, fg_color, dot_mask * density);
+        
+        if (density < 0.1) {
+            final_color = lerp(final_color, p_col3, dot_mask * 0.05);
+        }
+
+        return float4(final_color * original_color.a, original_color.a);
+    }
+]]
+
+-- シェーダー実行
+local p_type = palette_type or 0
+obj.pixelshader("dmg_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    scale,
+    grid_a / 100.0,
+    shadow,
+    angle,
+    p_type
+})
+
+--@GB電源OFF
+--label:アニメーション効果
+--track@progress:進行度,0,100,0,0.1
+--select@palette_type:パレット=0,GB風(緑)=0,GB風(グレー)=1,3DSVC風(緑)=2,3DSVC風(グレー)=3
+
+--[[pixelshader@gb_power_off:
+    // -----------------------------------------------------------
+    // ゲームボーイ(STN液晶) 電源OFF風アニメーション
+    // -----------------------------------------------------------
+    cbuffer params : register(b0) {
+        float progress;
+        float palette_type;
+        float2 pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    // パレットの取得（dmg_lcdと同じものを使用）
+    float3 get_palette_color(int type, int index) {
+        if (type == 0) {
+            if (index == 0) return float3(15, 56, 15) / 255.0;
+            if (index == 1) return float3(48, 98, 48) / 255.0;
+            if (index == 2) return float3(139, 172, 15) / 255.0;
+            return float3(155, 188, 15) / 255.0;
+        } else if (type == 1) {
+            if (index == 0) return float3(0, 0, 0) / 255.0;
+            if (index == 1) return float3(85, 85, 85) / 255.0;
+            if (index == 2) return float3(170, 170, 170) / 255.0;
+            return float3(255, 255, 255) / 255.0;
+        } else if (type == 2) {
+            if (index == 0) return float3(24, 56, 24) / 255.0;
+            if (index == 1) return float3(40, 104, 40) / 255.0;
+            if (index == 2) return float3(104, 168, 40) / 255.0;
+            return float3(136, 200, 40) / 255.0;
+        } else {
+            if (index == 0) return float3(40, 40, 24) / 255.0;
+            if (index == 1) return float3(104, 104, 80) / 255.0;
+            if (index == 2) return float3(160, 160, 136) / 255.0;
+            return float3(200, 200, 168) / 255.0;
+        }
+    }
+
+    float4 gb_power_off(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        if (progress <= 0.0) return tex.Sample(samp, uv);
+
+        float4 color = tex.Sample(samp, uv);
+        if (color.a <= 0.0) return color;
+
+        // アニメーションの進行を4つのフェーズに分割
+        float p_contrast = saturate(progress / 0.4);            // 0.0~0.4: 電源が弱まる瞬間
+        float p_fadeout  = saturate((progress - 0.4) / 0.4);    // 0.4~0.8: パネル色への溶け込み
+        float p_flash    = saturate((progress - 0.8) / 0.1);    // 0.8~0.9: 完全に落ちる瞬間のフラッシュ
+        // 0.9~1.0はフラッシュが収まってパネル色で静止する時間
+
+        float3 rgb = color.rgb / color.a;
+        float3 panel_color = get_palette_color(int(palette_type), 3); // 背景色（無通電時のパネル色）
+
+        // 1. 電源が弱まる瞬間
+        float blur_amount = p_contrast * 0.008;
+        if (blur_amount > 0.0) {
+            float3 c_l = tex.Sample(samp, uv + float2(-blur_amount, 0)).rgb;
+            float3 c_r = tex.Sample(samp, uv + float2(blur_amount, 0)).rgb;
+            float3 c_u = tex.Sample(samp, uv + float2(0, -blur_amount * 0.5)).rgb;
+            float3 c_d = tex.Sample(samp, uv + float2(0, blur_amount * 0.5)).rgb;
+            
+            float3 blur_max = max(max(c_l, c_r), max(c_u, c_d));
+            rgb = lerp(rgb, max(rgb, blur_max), p_contrast * 0.6);
+            
+            rgb = lerp(rgb, lerp(rgb, float3(0.5, 0.5, 0.5), 0.7), p_contrast);
+        }
+
+        // 2. フェードアウトの進行 (液晶パネルの色へ溶けていく)
+        rgb = lerp(rgb, panel_color, p_fadeout);
+
+        // 3. 完全に落ちる瞬間 (フラッシュ)
+        if (p_flash > 0.0 && p_flash < 1.0) {
+            float flash_wave = sin(p_flash * 3.141592); // 0 -> 1 -> 0
+            rgb += float3(1.0, 1.0, 1.0) * flash_wave * 0.6;
+        }
+
+        // 4. フラッシュ後、完全にパネルだけが残る
+        if (progress >= 0.9) {
+            rgb = panel_color;
+        }
+
+        // 透明化(アルファ低下)は一切行わず、液晶の物質としての実体を残す
+        return float4(saturate(rgb) * color.a, color.a);
+    }
+]]
+
+-- シェーダー実行
+local p = progress or 0
+local p_type_off = palette_type or 0
+obj.pixelshader("gb_power_off", "object", {"object"}, {
+    p / 100.0,
+    p_type_off
+})
