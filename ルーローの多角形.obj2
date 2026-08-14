@@ -1,0 +1,119 @@
+--label:カスタムオブジェクト
+--track@size:サイズ,0,2000,200,1
+--track@n:角数(奇数),3,31,3,2
+--track@line_width:ライン幅,0,1000,0,1
+--track@resolution:分割数/辺,1,100,16,1
+--color@col:図形色,0xffffff
+--information:ルーローの多角形
+
+-- パラメータの正規化
+local n_poly = math.floor(n)
+if n_poly % 2 == 0 then n_poly = n_poly + 1 end
+n_poly = math.max(3, n_poly)
+
+local shape_width = size
+local circum_radius = shape_width / (2 * math.cos(math.pi / (2 * n_poly)))
+local safe_line_width = math.max(0, math.min(line_width, shape_width / 2 - 1))
+local split_res = math.max(1, math.floor(resolution))
+
+local out_vertices = {}
+local inner_vertices = {}
+local pi = math.pi
+local pi2 = pi * 2
+
+-- 頂点座標の生成
+for i = 0, n_poly - 1 do
+    local theta_i = -pi / 2 + (pi2 * i) / n_poly
+    local cx = circum_radius * math.cos(theta_i)
+    local cy = circum_radius * math.sin(theta_i)
+    
+    local start_angle = theta_i + pi - pi / (2 * n_poly)
+    local end_angle = theta_i + pi + pi / (2 * n_poly)
+    
+    for j = 0, split_res - 1 do
+        local angle = start_angle + (end_angle - start_angle) * (j / split_res)
+        local vx_out = cx + shape_width * math.cos(angle)
+        local vy_out = cy + shape_width * math.sin(angle)
+        table.insert(out_vertices, {vx_out, vy_out})
+    end
+end
+
+-- 内周の座標計算 (マイタージョイント)
+if safe_line_width > 0 then
+    local num_pts = #out_vertices
+    local function normalize(dx, dy)
+        local len = math.sqrt(dx * dx + dy * dy)
+        if len == 0 then return 0, 0 end
+        return dx / len, dy / len
+    end
+
+    for i = 1, num_pts do
+        local prev_i = (i - 2) % num_pts + 1
+        local next_i = i % num_pts + 1
+        
+        local p_prev = out_vertices[prev_i]
+        local p_curr = out_vertices[i]
+        local p_next = out_vertices[next_i]
+        
+        local v1x, v1y = normalize(p_curr[1] - p_prev[1], p_curr[2] - p_prev[2])
+        local v2x, v2y = normalize(p_next[1] - p_curr[1], p_next[2] - p_curr[2])
+        
+        local n1x, n1y = -v1y, v1x
+        local n2x, n2y = -v2y, v2x
+        
+        local dx, dy = normalize(n1x + n2x, n1y + n2y)
+        local cos_phi = n1x * dx + n1y * dy
+        
+        local offset_len = safe_line_width
+        if cos_phi > 0.05 then
+            offset_len = safe_line_width / cos_phi
+        end
+        
+        local vx_in = p_curr[1] + dx * offset_len
+        local vy_in = p_curr[2] + dy * offset_len
+        table.insert(inner_vertices, {vx_in, vy_in})
+    end
+end
+
+-- ポリゴンの構築
+local polys = {}
+local color_r, color_g, color_b = RGB(col)
+local alpha = obj.alpha
+
+local r = (color_r / 255.0) * alpha
+local g = (color_g / 255.0) * alpha
+local b = (color_b / 255.0) * alpha
+local a = alpha
+
+if safe_line_width > 0 then
+    -- 枠線描画
+    for i = 1, #out_vertices do
+        local next_i = i % #out_vertices + 1
+        local v1_out = out_vertices[i]
+        local v2_out = out_vertices[next_i]
+        local v1_in = inner_vertices[i]
+        local v2_in = inner_vertices[next_i]
+        
+        table.insert(polys, {v1_out[1], v1_out[2], 0, r, g, b, a})
+        table.insert(polys, {v2_out[1], v2_out[2], 0, r, g, b, a})
+        table.insert(polys, {v1_in[1], v1_in[2], 0, r, g, b, a})
+        
+        table.insert(polys, {v2_out[1], v2_out[2], 0, r, g, b, a})
+        table.insert(polys, {v2_in[1], v2_in[2], 0, r, g, b, a})
+        table.insert(polys, {v1_in[1], v1_in[2], 0, r, g, b, a})
+    end
+else
+    -- 塗りつぶし描画
+    for i = 1, #out_vertices do
+        local next_i = i % #out_vertices + 1
+        local v1 = out_vertices[i]
+        local v2 = out_vertices[next_i]
+        
+        table.insert(polys, {0, 0, 0, r, g, b, a})
+        table.insert(polys, {v1[1], v1[2], 0, r, g, b, a})
+        table.insert(polys, {v2[1], v2[2], 0, r, g, b, a})
+    end
+end
+
+-- 三角形モードで一括描画
+obj.drawpoly(polys, 3)
