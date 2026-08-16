@@ -1,0 +1,239 @@
+@GBモニター再現
+--filter
+--label:画面効果\モニター再現
+--check@pixelate:実機解像度に合わせる,1
+--track@scale:ドットサイズ,1,50,4,0.1
+--hide@scale:pixelate==1
+--track@grid_a:グリッド濃度,0,100,60,1
+--track@shadow:影の距離,0,5,1.5,0.1
+--track@angle:影の角度,-180,180,45,0.1
+--track@crosstalk:縦クロストーク,0,100,25,1
+--select@palette_type:パレット=0,GB風(緑)=0,GB風(グレー)=1,3DSVC風(緑)=2,3DSVC風(グレー)=3
+
+--[[pixelshader@dmg_lcd:
+    cbuffer params : register(b0) {
+        float2 res;
+        float2 grid_num;
+        float grid_a;
+        float shadow;
+        float angle;
+        float palette_type;
+        float crosstalk;
+        float3 pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float3 get_palette_color(int type, int index) {
+        if (type == 0) {
+            if (index == 0) return float3(15.0, 56.0, 15.0) / 255.0;
+            if (index == 1) return float3(48.0, 98.0, 48.0) / 255.0;
+            if (index == 2) return float3(139.0, 172.0, 15.0) / 255.0;
+            return float3(155.0, 188.0, 15.0) / 255.0;
+        } else if (type == 1) {
+            if (index == 0) return float3(0.0, 0.0, 0.0) / 255.0;
+            if (index == 1) return float3(85.0, 85.0, 85.0) / 255.0;
+            if (index == 2) return float3(170.0, 170.0, 170.0) / 255.0;
+            return float3(255.0, 255.0, 255.0) / 255.0;
+        } else if (type == 2) {
+            if (index == 0) return float3(24.0, 56.0, 24.0) / 255.0;
+            if (index == 1) return float3(40.0, 104.0, 40.0) / 255.0;
+            if (index == 2) return float3(104.0, 168.0, 40.0) / 255.0;
+            return float3(136.0, 200.0, 40.0) / 255.0;
+        } else {
+            if (index == 0) return float3(40.0, 40.0, 24.0) / 255.0;
+            if (index == 1) return float3(104.0, 104.0, 80.0) / 255.0;
+            if (index == 2) return float3(160.0, 160.0, 136.0) / 255.0;
+            return float3(200.0, 200.0, 168.0) / 255.0;
+        }
+    }
+
+    float get_density(float4 color) {
+        if (color.a <= 0.0) return 0.0;
+        float3 rgb = color.rgb / color.a;
+        return 1.0 - dot(rgb, float3(0.299, 0.587, 0.114));
+    }
+
+    float4 dmg_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 block = floor(uv * grid_num);
+        float2 pixel_uv = (block + 0.5) / grid_num;
+
+        if (pixel_uv.x < 0.0 || pixel_uv.x > 1.0 || pixel_uv.y < 0.0 || pixel_uv.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float4 original_color = tex.Sample(samp, pixel_uv);
+        if (original_color.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float density = get_density(original_color);
+
+        float col_sample_dens = 0.0;
+        if (crosstalk > 0.0) {
+            float step_y = 4.0 / grid_num.y;
+            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - step_y * 2.0))));
+            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - step_y))));
+            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + step_y))));
+            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + step_y * 2.0))));
+            col_sample_dens *= 0.25;
+        }
+
+        float rad = angle * 3.14159265 / 180.0;
+        float2 shadow_offset = float2(cos(rad), sin(rad)) * shadow / grid_num;
+        float2 shadow_block = floor((uv - shadow_offset) * grid_num);
+        float2 shadow_pixel_uv = (shadow_block + 0.5) / grid_num;
+
+        float4 shadow_sample = tex.Sample(samp, shadow_pixel_uv);
+        float shadow_density = get_density(shadow_sample);
+
+        int p_type = int(palette_type);
+        float3 p_col1 = get_palette_color(p_type, 0);
+        float3 p_col2 = get_palette_color(p_type, 1);
+        float3 p_col3 = get_palette_color(p_type, 2);
+        float3 p_col4 = get_palette_color(p_type, 3);
+
+        float3 bg_color = p_col4;
+        if (shadow_sample.a > 0.0 && shadow_density > 0.5) {
+            bg_color = lerp(p_col4, p_col3, 0.5 * shadow_sample.a);
+        }
+
+        bg_color = lerp(bg_color, p_col3, col_sample_dens * crosstalk * 0.35);
+
+        float3 fg_color;
+        if (density > 0.8) fg_color = p_col1;
+        else if (density > 0.5) fg_color = p_col2;
+        else if (density > 0.2) fg_color = p_col3;
+        else fg_color = p_col4;
+
+        float2 inner_uv = frac(uv * grid_num);
+        float cell_w = res.x / grid_num.x;
+        float border = 0.08;
+        float smooth_edge = max(0.02, 1.0 / (cell_w * 3.0));
+        float dx = min(inner_uv.x, 1.0 - inner_uv.x);
+        float dy = min(inner_uv.y, 1.0 - inner_uv.y);
+        float dot_mask = smoothstep(border - smooth_edge, border + smooth_edge, min(dx, dy));
+
+        float3 grid_color = lerp(p_col4, p_col1, 0.15);
+        bg_color = lerp(bg_color, grid_color, (1.0 - dot_mask) * grid_a);
+
+        float3 final_color = lerp(bg_color, fg_color, dot_mask * density);
+        if (density < 0.1) {
+            final_color = lerp(final_color, p_col3, dot_mask * 0.05);
+        }
+
+        return float4(saturate(final_color) * original_color.a, original_color.a);
+    }
+]]
+
+local p_type = palette_type or 0
+local is_pix = (pixelate == 1 or pixelate == true)
+local gx, gy
+
+if is_pix then
+    gy = 144
+    local dot_size = obj.h / 144
+    gx = math.max(1, math.floor(obj.w / dot_size + 0.5))
+else
+    local s = math.max(scale or 4.0, 0.1)
+    gx = math.max(1, math.floor(obj.w / s + 0.5))
+    gy = math.max(1, math.floor(obj.h / s + 0.5))
+end
+
+obj.pixelshader("dmg_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    gx, gy,
+    (grid_a or 60) / 100.0,
+    shadow or 1.5,
+    angle or 45,
+    p_type,
+    (crosstalk or 25) / 100.0,
+    0.0, 0.0, 0.0
+})
+
+@GB電源OFF
+--filter
+--label:画面効果\モニター再現
+--track@progress:進行度,0,100,0,0.1
+--select@palette_type:パレット=0,GB風(緑)=0,GB風(グレー)=1,3DSVC風(緑)=2,3DSVC風(グレー)=3
+
+--[[pixelshader@gb_power_off:
+    cbuffer params : register(b0) {
+        float progress;
+        float palette_type;
+        float2 pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float3 get_palette_color(int type, int index) {
+        if (type == 0) {
+            if (index == 0) return float3(15.0, 56.0, 15.0) / 255.0;
+            if (index == 1) return float3(48.0, 98.0, 48.0) / 255.0;
+            if (index == 2) return float3(139.0, 172.0, 15.0) / 255.0;
+            return float3(155.0, 188.0, 15.0) / 255.0;
+        } else if (type == 1) {
+            if (index == 0) return float3(0.0, 0.0, 0.0) / 255.0;
+            if (index == 1) return float3(85.0, 85.0, 85.0) / 255.0;
+            if (index == 2) return float3(170.0, 170.0, 170.0) / 255.0;
+            return float3(255.0, 255.0, 255.0) / 255.0;
+        } else if (type == 2) {
+            if (index == 0) return float3(24.0, 56.0, 24.0) / 255.0;
+            if (index == 1) return float3(40.0, 104.0, 40.0) / 255.0;
+            if (index == 2) return float3(104.0, 168.0, 40.0) / 255.0;
+            return float3(136.0, 200.0, 40.0) / 255.0;
+        } else {
+            if (index == 0) return float3(40.0, 40.0, 24.0) / 255.0;
+            if (index == 1) return float3(104.0, 104.0, 80.0) / 255.0;
+            if (index == 2) return float3(160.0, 160.0, 136.0) / 255.0;
+            return float3(200.0, 200.0, 168.0) / 255.0;
+        }
+    }
+
+    float4 gb_power_off(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        if (progress <= 0.0) return tex.Sample(samp, uv);
+
+        float4 color = tex.Sample(samp, uv);
+        if (color.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float p_contrast = saturate(progress / 0.4);
+        float p_fadeout  = saturate((progress - 0.4) / 0.4);
+        float p_flash    = saturate((progress - 0.8) / 0.1);
+
+        float3 rgb = color.rgb / color.a;
+        float3 panel_color = get_palette_color(int(palette_type), 3);
+
+        float blur_amount = p_contrast * 0.008;
+        if (blur_amount > 0.0) {
+            float3 c_l = tex.Sample(samp, uv + float2(-blur_amount, 0.0)).rgb;
+            float3 c_r = tex.Sample(samp, uv + float2(blur_amount, 0.0)).rgb;
+            float3 c_u = tex.Sample(samp, uv + float2(0.0, -blur_amount * 0.5)).rgb;
+            float3 c_d = tex.Sample(samp, uv + float2(0.0, blur_amount * 0.5)).rgb;
+            
+            float3 blur_max = max(max(c_l, c_r), max(c_u, c_d));
+            rgb = lerp(rgb, max(rgb, blur_max), p_contrast * 0.6);
+            rgb = lerp(rgb, float3(0.5, 0.5, 0.5), p_contrast * 0.7);
+        }
+
+        rgb = lerp(rgb, panel_color, p_fadeout);
+
+        if (p_flash > 0.0 && p_flash < 1.0) {
+            float flash_wave = sin(p_flash * 3.14159265);
+            rgb += float3(1.0, 1.0, 1.0) * flash_wave * 0.6;
+        }
+
+        if (progress >= 0.9) {
+            rgb = panel_color;
+        }
+
+        return float4(saturate(rgb) * color.a, color.a);
+    }
+]]
+
+local p = progress or 0
+local p_type_off = palette_type or 0
+obj.pixelshader("gb_power_off", "object", {"object"}, {
+    p / 100.0,
+    p_type_off,
+    0.0, 0.0
+})

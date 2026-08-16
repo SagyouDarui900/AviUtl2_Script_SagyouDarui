@@ -1,0 +1,177 @@
+--filter
+--label:画面効果\モニター再現
+--select@model:モデル=0,初代GBA(反射型)=0,GBA SP(フロントライト)=1,GBA SP(バックライト)=2
+--check@pixelate:実機解像度に合わせる,1
+--track@scale:ドットサイズ,1,50,4,0.1
+--hide@scale:pixelate==1
+--track@brightness:明度補正,0,200,100,1
+--track@color_correct:色補正強度,0,100,100,1
+--track@matrix_a:グリッド濃度,0,100,75,1
+--check@use_subpixel:サブピクセルとノッチ,1
+--check@bgr_order:BGRサブピクセル配列,0
+--check@quantize:15bitカラー化,1
+
+--[[pixelshader@gba_lcd:
+    cbuffer params : register(b0) {
+        float2 res;
+        float2 grid_num;
+        float model;
+        float brightness;
+        float color_correct;
+        float matrix_a;
+        float use_subpixel;
+        float quantize;
+        float bgr_order;
+        float pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float get_density(float3 rgb) {
+        return 1.0 - dot(rgb, float3(0.299, 0.587, 0.114));
+    }
+
+    float4 gba_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 block = floor(uv * grid_num);
+        float2 pixel_uv = (block + 0.5) / grid_num;
+
+        if (pixel_uv.x < 0.0 || pixel_uv.x > 1.0 || pixel_uv.y < 0.0 || pixel_uv.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float4 original = tex.Sample(samp, pixel_uv);
+        if (original.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+        float3 rgb = original.rgb / original.a;
+
+        if (quantize > 0.5) {
+            rgb = round(rgb * 31.0) / 31.0;
+        }
+
+        int m = int(model);
+        float gamma_in = (m == 0) ? lerp(2.2, 3.0, color_correct) : 2.2;
+        float3 c_lin = pow(max(rgb, 0.0), gamma_in);
+        
+        float3 filter_color_mixed;
+        if (m == 0) {
+            filter_color_mixed.r = c_lin.r * 0.820 + c_lin.g * 0.130 + c_lin.b * 0.050;
+            filter_color_mixed.g = c_lin.r * 0.120 + c_lin.g * 0.730 + c_lin.b * 0.150;
+            filter_color_mixed.b = c_lin.r * 0.080 + c_lin.g * 0.180 + c_lin.b * 0.740;
+        } else {
+            filter_color_mixed.r = c_lin.r * 0.930 + c_lin.g * 0.040 + c_lin.b * 0.030;
+            filter_color_mixed.g = c_lin.r * 0.030 + c_lin.g * 0.930 + c_lin.b * 0.040;
+            filter_color_mixed.b = c_lin.r * 0.030 + c_lin.g * 0.050 + c_lin.b * 0.920;
+        }
+        filter_color_mixed = pow(max(filter_color_mixed, 0.0), 1.0 / 2.2);
+
+        float3 filter_color = lerp(rgb, filter_color_mixed, color_correct);
+        float3 final_pixel_color;
+
+        if (m == 0) {
+            float3 panel_off_color = float3(0.40, 0.45, 0.40) * brightness; 
+            float2 shadow_offset = float2(1.5, 1.5) / grid_num;
+            float2 shadow_block = floor((uv - shadow_offset) * grid_num);
+            float2 shadow_pixel_uv = (shadow_block + 0.5) / grid_num;
+            
+            float4 s_samp = tex.Sample(samp, shadow_pixel_uv);
+            float s_den = 0.0;
+            if (s_samp.a > 0.0) s_den = get_density(s_samp.rgb / s_samp.a) * s_samp.a;
+            
+            float3 bg_ref = lerp(panel_off_color, panel_off_color * 0.3, s_den);
+            float3 transmit = pow(max(filter_color, 0.0), 1.2); 
+            final_pixel_color = bg_ref * transmit * 2.2;
+        } else if (m == 1) {
+            float3 panel_off_color = float3(0.50, 0.55, 0.60) * brightness; 
+            float2 shadow_offset = float2(0.8, 0.8) / grid_num;
+            float2 shadow_block = floor((uv - shadow_offset) * grid_num);
+            float2 shadow_pixel_uv = (shadow_block + 0.5) / grid_num;
+            
+            float4 s_samp = tex.Sample(samp, shadow_pixel_uv);
+            float s_den = 0.0;
+            if (s_samp.a > 0.0) s_den = get_density(s_samp.rgb / s_samp.a) * s_samp.a;
+            
+            float3 bg_ref = lerp(panel_off_color, panel_off_color * 0.4, s_den);
+            float3 transmit = pow(max(filter_color, 0.0), 0.95);
+            float3 reflected = bg_ref * transmit * 2.0;
+            float3 glare = float3(0.12, 0.18, 0.25) * brightness;
+            final_pixel_color = reflected + glare * (1.0 - transmit * 0.4);
+        } else {
+            float3 transmit = pow(max(filter_color, 0.0), 1.1); 
+            final_pixel_color = float3(1.0, 1.0, 1.0) * transmit * 1.15 * brightness; 
+        }
+
+        float2 inner_uv = frac(uv * grid_num);
+        float cell_w = res.x / grid_num.x;
+        float3 sub_mask = float3(1.0, 1.0, 1.0);
+        float shape = 1.0;
+
+        if (use_subpixel > 0.5 && cell_w >= 3.0) {
+            float x = (bgr_order > 0.5) ? (1.0 - inner_uv.x) : inner_uv.x;
+            
+            float r = saturate((0.383 - x) / 0.1);
+            float g = saturate((x - 0.283) / 0.1) * saturate((0.716 - x) / 0.1);
+            float b = saturate((x - 0.616) / 0.1);
+            sub_mask = float3(r, g, b) * 2.8;
+
+            float sub_x = frac(inner_uv.x * 3.0);
+            float sub_y = inner_uv.y;
+            float blur = max(0.02, 1.0 / (cell_w * 2.0));
+
+            float box_x = saturate((sub_x - 0.12) / blur) * saturate((0.88 - sub_x) / blur);
+            float box_y = saturate((sub_y - 0.08) / blur) * saturate((0.92 - sub_y) / blur);
+            float notch_x = saturate((sub_x - 0.4) / blur);
+            float notch_y = saturate((sub_y - 0.4) / blur);
+            float notch = 1.0 - (notch_x * notch_y);
+            
+            shape = box_x * box_y * notch;
+            float moire = saturate((cell_w - 3.0) / 5.0);
+            sub_mask = lerp(float3(1.0, 1.0, 1.0), sub_mask, moire);
+            shape = lerp(1.0, shape, moire);
+        } else {
+            float border = 0.06;
+            float sm = max(0.02, 1.0 / (cell_w * 3.0));
+            float dx = min(inner_uv.x, 1.0 - inner_uv.x);
+            float dy = min(inner_uv.y, 1.0 - inner_uv.y);
+            shape = saturate((dx - border + sm) / (sm * 2.0)) * saturate((dy - border + sm) / (sm * 2.0));
+        }
+
+        float luma_comp = (use_subpixel > 0.5 && cell_w >= 3.0) 
+            ? lerp(1.0, 2.5, saturate((cell_w - 3.0) / 5.0)) 
+            : lerp(1.0, 1.15, saturate((cell_w - 1.0) / 5.0));
+        
+        float3 out_rgb = final_pixel_color * sub_mask * luma_comp;
+        float3 matrix_color = float3(0.02, 0.02, 0.02);
+        float3 final_rgb = lerp(matrix_color, out_rgb, lerp(1.0, shape, matrix_a));
+
+        return float4(saturate(final_rgb) * original.a, original.a);
+    }
+]]
+
+local sp = (use_subpixel == 1 or use_subpixel == true) and 1.0 or 0.0
+local qz = (quantize == 1 or quantize == true) and 1.0 or 0.0
+local bgr = (bgr_order == 1 or bgr_order == true) and 1.0 or 0.0
+local is_pix = (pixelate == 1 or pixelate == true)
+local gx, gy
+
+if is_pix then
+    gy = 160
+    local dot_size = obj.h / 160
+    gx = math.max(1, math.floor(obj.w / dot_size + 0.5))
+else
+    local s = math.max(scale or 4.0, 0.1)
+    gx = math.max(1, math.floor(obj.w / s + 0.5))
+    gy = math.max(1, math.floor(obj.h / s + 0.5))
+end
+
+obj.pixelshader("gba_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    gx, gy,
+    model or 0,
+    (brightness or 100) / 100.0,
+    (color_correct or 100) / 100.0,
+    (matrix_a or 75) / 100.0,
+    sp,
+    qz,
+    bgr,
+    0.0
+})

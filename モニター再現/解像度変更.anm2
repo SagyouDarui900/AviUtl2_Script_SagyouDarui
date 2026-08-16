@@ -1,0 +1,92 @@
+--label:画面効果\モニター再現
+--filter
+--select@device:機種解像度=0,GB/GBC (160x144)=0,GBA (240x160)=1,NDS (256x192)=2,3DS上 (400x240)=3,3DS下 (320x240)=4,カスタム=5
+--track@scale:画面倍率,0.1,50.0,4.0,0.1
+--select@mode:リサイズ方式=0,クリッピング(中央切抜)=0,内接(レターボックス)=1,外接(クロップ)=2,比率無視=3
+--track@center_x:中心X,-4096,4096,0,1
+--track@center_y:中心Y,-4096,4096,0,1
+--trackgroup@center_x,center_y:中心位置
+--track@custom_w:カスタム幅,1,4096,160,1
+--track@custom_h:カスタム高さ,1,4096,144,1
+--trackgroup@custom_w,custom_h:カスタム解像度
+--check@pixel_art:ドット補間(ニアレスト),0
+
+--[[pixelshader@resize_monitor:
+    cbuffer params : register(b0) {
+        float2 res;
+        float2 target_res;
+        float mode;
+        float pixel_art;
+        float2 center;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float4 resize_monitor(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 px = uv * res;
+        float2 screen_min = (res - target_res) * 0.5;
+        float2 screen_max = screen_min + target_res;
+
+        if (px.x < screen_min.x || px.x > screen_max.x || 
+            px.y < screen_min.y || px.y > screen_max.y) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float2 screen_uv = (px - screen_min) / target_res;
+        float2 src_uv = screen_uv;
+
+        if (mode < 0.5) {
+            float2 src_px = (res * 0.5) - (target_res * 0.5) + (screen_uv * target_res) + center;
+            src_uv = src_px / res;
+        } else if (mode < 1.5) {
+            float s = min(target_res.x / res.x, target_res.y / res.y);
+            float2 draw_size = res * s;
+            float2 offset = (target_res - draw_size) * 0.5;
+            float2 draw_px = screen_uv * target_res;
+            
+            if (draw_px.x < offset.x || draw_px.x > offset.x + draw_size.x ||
+                draw_px.y < offset.y || draw_px.y > offset.y + draw_size.y) {
+                return float4(0.0, 0.0, 0.0, 0.0);
+            }
+            src_uv = (draw_px - offset) / draw_size;
+        } else if (mode < 2.5) {
+            float s = max(target_res.x / res.x, target_res.y / res.y);
+            float2 draw_size = res * s;
+            float2 offset = (target_res - draw_size) * 0.5;
+            float2 draw_px = screen_uv * target_res;
+            src_uv = (draw_px - offset) / draw_size;
+        } else {
+            src_uv = screen_uv;
+        }
+
+        if (src_uv.x < 0.0 || src_uv.x > 1.0 || src_uv.y < 0.0 || src_uv.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        if (pixel_art > 0.5) {
+            src_uv = (floor(src_uv * res) + 0.5) / res;
+        }
+
+        return tex.Sample(samp, src_uv);
+    }
+]]
+
+local rw, rh = 160, 144
+local dev = device or 0
+if dev == 0 then rw, rh = 160, 144
+elseif dev == 1 then rw, rh = 240, 160
+elseif dev == 2 then rw, rh = 256, 192
+elseif dev == 3 then rw, rh = 400, 240
+elseif dev == 4 then rw, rh = 320, 240
+else rw, rh = custom_w or 160, custom_h or 144 end
+
+local scl = scale or 4.0
+local target_w = rw * scl
+local target_h = rh * scl
+local p_art = (pixel_art == 1 or pixel_art == true) and 1.0 or 0.0
+
+obj.pixelshader("resize_monitor", "object", {"object"}, {
+    obj.w, obj.h, target_w, target_h,
+    mode or 0, p_art, center_x or 0, center_y or 0
+})

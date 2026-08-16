@@ -1,0 +1,191 @@
+@GBCモニター再現
+--filter
+--label:画面効果\モニター再現
+--check@pixelate:実機解像度に合わせる,1
+--track@scale:ドットサイズ,1,50,4,0.1
+--hide@scale:pixelate==1
+--track@ambient:環境光(明るさ),0,200,100,1
+--track@color_correct:色補正強度,0,100,100,1
+--track@grid_a:グリッド濃度,0,100,60,1
+--track@shadow:影の距離,0,5,1.0,0.1
+--track@angle:影の角度,-180,180,45,0.1
+--check@use_subpixel:サブピクセル表示,1
+--check@quantize:15bitカラー化,1
+
+--[[pixelshader@gbc_lcd:
+    cbuffer params : register(b0) {
+        float2 res;
+        float2 grid_num;
+        float ambient;
+        float color_correct;
+        float grid_a;
+        float shadow;
+        float angle;
+        float use_subpixel;
+        float quantize;
+        float pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float get_density(float3 rgb) {
+        return 1.0 - dot(rgb, float3(0.299, 0.587, 0.114));
+    }
+
+    float4 gbc_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 block = floor(uv * grid_num);
+        float2 pixel_uv = (block + 0.5) / grid_num;
+
+        if (pixel_uv.x < 0.0 || pixel_uv.x > 1.0 || pixel_uv.y < 0.0 || pixel_uv.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float4 original = tex.Sample(samp, pixel_uv);
+        if (original.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+        float3 rgb = original.rgb / original.a;
+
+        if (quantize > 0.5) {
+            rgb = round(rgb * 31.0) / 31.0;
+        }
+
+        float3 c_lin = pow(max(rgb, 0.0), 2.2);
+        float3 gbc_color_mixed;
+        gbc_color_mixed.r = c_lin.r * 0.800 + c_lin.g * 0.150 + c_lin.b * 0.050;
+        gbc_color_mixed.g = c_lin.r * 0.100 + c_lin.g * 0.720 + c_lin.b * 0.180;
+        gbc_color_mixed.b = c_lin.r * 0.080 + c_lin.g * 0.180 + c_lin.b * 0.740;
+        gbc_color_mixed = pow(max(gbc_color_mixed, 0.0), 1.0 / 2.2);
+
+        float3 gbc_color = lerp(rgb, gbc_color_mixed, color_correct);
+
+        float3 ref_bg = float3(0.65, 0.68, 0.62) * ambient;
+        float3 lcd_black = float3(0.12, 0.15, 0.12) * ambient;
+
+        float rad = angle * 3.14159265 / 180.0;
+        float2 shadow_offset = float2(cos(rad), sin(rad)) * shadow / grid_num;
+        float2 shadow_block = floor((uv - shadow_offset) * grid_num);
+        float2 shadow_pixel_uv = (shadow_block + 0.5) / grid_num;
+        
+        float4 shadow_sample = tex.Sample(samp, shadow_pixel_uv);
+        float shadow_density = 0.0;
+        if (shadow_sample.a > 0.0) {
+            float3 s_rgb = shadow_sample.rgb / shadow_sample.a;
+            if (quantize > 0.5) s_rgb = round(s_rgb * 31.0) / 31.0;
+            shadow_density = get_density(s_rgb) * shadow_sample.a;
+        }
+
+        float3 bg_color = ref_bg;
+        if (shadow_density > 0.05) {
+            bg_color = lerp(ref_bg, lcd_black, shadow_density * 0.6);
+        }
+
+        float3 pixel_color = lerp(lcd_black, bg_color * (gbc_color * 1.2 + 0.1), gbc_color);
+        pixel_color = min(pixel_color, bg_color);
+
+        float2 inner_uv = frac(uv * grid_num);
+        float cell_w = res.x / grid_num.x;
+
+        if (use_subpixel > 0.5 && cell_w >= 3.0) {
+            float x = inner_uv.x;
+            float r_mask = 1.0 - smoothstep(0.283, 0.383, x);
+            float g_mask = smoothstep(0.283, 0.383, x) * (1.0 - smoothstep(0.616, 0.716, x));
+            float b_mask = smoothstep(0.616, 0.716, x);
+            
+            float3 stripe_tint = float3(r_mask, g_mask, b_mask) * 2.5;
+            float stripe_strength = saturate((cell_w - 3.0) / 5.0);
+            pixel_color = lerp(pixel_color, pixel_color * stripe_tint, stripe_strength * 0.8);
+        }
+
+        float border = 0.08; 
+        float sm = max(0.02, 1.0 / (cell_w * 3.0));
+        float dx = min(inner_uv.x, 1.0 - inner_uv.x);
+        float dy = min(inner_uv.y, 1.0 - inner_uv.y);
+        float grid_mask = smoothstep(border - sm, border + sm, dx) * smoothstep(border - sm, border + sm, dy);
+
+        float3 grid_color_val = float3(0.05, 0.07, 0.05) * ambient;
+        float3 final_color = lerp(grid_color_val, pixel_color, lerp(1.0, grid_mask, grid_a));
+
+        return float4(saturate(final_color) * original.a, original.a);
+    }
+]]
+
+local sp = (use_subpixel == 1 or use_subpixel == true) and 1.0 or 0.0
+local qz = (quantize == 1 or quantize == true) and 1.0 or 0.0
+local is_pix = (pixelate == 1 or pixelate == true)
+local gx, gy
+
+if is_pix then
+    gy = 144
+    local dot_size = obj.h / 144
+    gx = math.max(1, math.floor(obj.w / dot_size + 0.5))
+else
+    local s = math.max(scale or 4.0, 0.1)
+    gx = math.max(1, math.floor(obj.w / s + 0.5))
+    gy = math.max(1, math.floor(obj.h / s + 0.5))
+end
+
+obj.pixelshader("gbc_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    gx, gy,
+    (ambient or 100) / 100.0,
+    (color_correct or 100) / 100.0,
+    (grid_a or 60) / 100.0,
+    shadow or 1.0,
+    angle or 45,
+    sp,
+    qz,
+    0.0
+})
+
+@GBC電源OFF
+--filter
+--label:画面効果\モニター再現
+--track@progress:進行度,0,100,0,0.1
+
+--[[pixelshader@gbc_power_off:
+    cbuffer params : register(b0) {
+        float progress;
+        float3 pad;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float4 gbc_power_off(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        if (progress <= 0.0) return tex.Sample(samp, uv);
+
+        float4 color = tex.Sample(samp, uv);
+        if (color.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float3 rgb = color.rgb / color.a;
+        float3 panel_color = float3(0.40, 0.45, 0.40);
+
+        float p_loss = saturate(progress / 0.15);
+        float p_fade = saturate((progress - 0.15) / 0.45);
+        float p_shrink = saturate((progress - 0.6) / 0.3);
+        
+        float lum = dot(rgb, float3(0.299, 0.587, 0.114));
+        float3 desat = lerp(rgb, float3(lum, lum, lum), p_loss);
+        rgb = lerp(rgb, desat, p_loss);
+        rgb = lerp(rgb, panel_color, p_loss * 0.5 + p_fade * 0.5);
+
+        if (p_shrink > 0.0) {
+            float2 diff = uv - 0.5;
+            float dist = dot(diff, diff) * 4.0;
+            float wipe = smoothstep(1.0 - p_shrink * 1.5, 1.0 - p_shrink, dist);
+            rgb = lerp(rgb, panel_color, wipe);
+        }
+        
+        if (progress >= 0.9) {
+            rgb = panel_color;
+        }
+
+        return float4(saturate(rgb) * color.a, color.a);
+    }
+]]
+
+local p = progress or 0
+obj.pixelshader("gbc_power_off", "object", {"object"}, {
+    p / 100.0,
+    0.0, 0.0, 0.0
+})

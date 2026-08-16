@@ -1,0 +1,87 @@
+--filter
+--label:画面効果\モニター再現
+--check@pixelate:低解像度化,0
+--track@res_down:解像度分割数,10,320,80,1
+--hide@res_down:pixelate==0
+--track@threshold:2値化しきい値,0,100,50,1
+--track@shadow:影の距離,0,20,5,0.1
+--track@ghost:非通電残光(ゴースト),0,100,8,1
+--color@col_bg:背景(反射板),0x9dae9c
+--color@col_fg:液晶(セグメント),0x111111
+
+--[[pixelshader@gw_lcd:
+    cbuffer params : register(b0) {
+        float2 res;
+        float2 grid_num;
+        float threshold;
+        float shadow;
+        float ghost;
+        float pad;
+        float4 col_bg;
+        float4 col_fg;
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float4 gw_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 sample_uv = (grid_num.x > 0.0) ? ((floor(uv * grid_num) + 0.5) / grid_num) : uv;
+        float4 original = tex.Sample(samp, sample_uv);
+        if (original.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float3 rgb = original.rgb / original.a; 
+        float luma = dot(rgb, float3(0.299, 0.587, 0.114));
+
+        float soft_seg = 1.0 - smoothstep(threshold - 0.05, threshold + 0.05, luma);
+
+        float2 shadow_offset = float2(-1.0, -1.0) / res * shadow;
+        float2 shadow_sample_uv = (grid_num.x > 0.0) ? ((floor((uv + shadow_offset) * grid_num) + 0.5) / grid_num) : (uv + shadow_offset);
+        float4 c_shadow = tex.Sample(samp, shadow_sample_uv);
+        
+        float soft_shadow = 0.0;
+        if (c_shadow.a > 0.0) {
+            float luma_shadow = dot(c_shadow.rgb / c_shadow.a, float3(0.299, 0.587, 0.114));
+            soft_shadow = 1.0 - smoothstep(threshold - 0.05, threshold + 0.05, luma_shadow);
+        }
+
+        float dist = distance(uv, float2(0.5, 0.5));
+        float3 bg_color = col_bg.rgb * (1.0 - dist * 0.20);
+
+        bg_color = lerp(bg_color, col_fg.rgb, (1.0 - soft_seg) * ghost * 0.15);
+        bg_color = lerp(bg_color, col_fg.rgb, soft_shadow * 0.18);
+        float3 final_color = lerp(bg_color, col_fg.rgb, soft_seg * 0.95);
+
+        return float4(final_color * original.a, original.a);
+    }
+]]
+
+local function hex2rgb(hex)
+    local val = hex or 0
+    local r = math.floor(val / 65536) / 255.0
+    local g = math.floor((val % 65536) / 256) / 255.0
+    local b = (val % 256) / 255.0
+    return r, g, b
+end
+
+local br, bg, bb = hex2rgb(col_bg or 0x9dae9c)
+local fr, fg, fb = hex2rgb(col_fg or 0x111111)
+
+local is_pix = (pixelate == 1 or pixelate == true)
+local gx, gy = 0.0, 0.0
+if is_pix then
+    local d = math.max(res_down or 80, 1)
+    gy = d
+    local dot_size = obj.h / d
+    gx = math.max(1, math.floor(obj.w / dot_size + 0.5))
+end
+
+obj.pixelshader("gw_lcd", "object", {"object"}, {
+    obj.w, obj.h,
+    gx, gy,
+    (threshold or 50) / 100.0,
+    shadow or 5.0,
+    (ghost or 8) / 100.0,
+    0.0,
+    br, bg, bb, 1.0,
+    fr, fg, fb, 1.0
+})
