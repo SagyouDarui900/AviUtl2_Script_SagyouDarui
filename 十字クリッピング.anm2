@@ -1,0 +1,84 @@
+--label:クリッピング
+--group:サイズ設定,true
+--track@size:サイズ(%),0,1000,100,0.1
+--track@cross_w:幅(%),0,2000,20,0.1
+--track@cross_h:高さ(%),0,2000,20,0.1
+--trackgroup@cross_w,cross_h:縦横個別
+--group:
+
+--group:配置・回転,true
+--track@center_x:中心X,-20000,20000,0,0.1
+--track@center_y:中心Y,-20000,20000,0,0.1
+--trackgroup@center_x,center_y:中心座標
+--track@angle:角度,-3600,3600,0,0.1
+--group:
+
+--check@invert:反転,0
+
+--[[pixelshader@cross_clip_ps:
+Texture2D t0 : register(t0);
+SamplerState s0 : register(s0);
+
+cbuffer params : register(b0) {
+    float2 obj_size;
+    float2 center;
+    float2 cross_half;
+    float  sin_angle;
+    float  cos_angle;
+    float  invert;
+    float3 padding;
+};
+
+float4 cross_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 color = t0.Sample(s0, uv);
+    if (color.a == 0.0) return color;
+
+    // UV座標から中心基準のローカルピクセル座標へ変換
+    float2 p = float2((uv.x - 0.5) * obj_size.x, (uv.y - 0.5) * obj_size.y);
+    float2 p_rel = p - center;
+
+    // 回転変換
+    float2 local_p;
+    local_p.x =  p_rel.x * cos_angle + p_rel.y * sin_angle;
+    local_p.y = -p_rel.x * sin_angle + p_rel.y * cos_angle;
+
+    // 縦帯・横帯の外側までの符号付き距離を計算
+    float dist_v = abs(local_p.x) - cross_half.x;
+    float dist_h = abs(local_p.y) - cross_half.y;
+    float dist = min(dist_v, dist_h);
+
+    // 1ピクセル幅のアンチエイリアス処理
+    float alpha = saturate(0.5 - dist);
+
+    if (invert > 0.5) {
+        alpha = 1.0 - alpha;
+    }
+
+    return color * alpha;
+}
+]]
+
+-- プレビュー画面での中心操作用アンカー
+obj.setanchor("center_x,center_y", 0, "arm")
+
+local w, h = obj.w, obj.h
+local base_size = math.min(w, h)
+local rad = math.rad(angle)
+local sin_a = math.sin(rad)
+local cos_a = math.cos(rad)
+
+local scale = size * 0.01
+local half_w = (base_size * (cross_w * 0.01) * scale) * 0.5
+local half_h = (base_size * (cross_h * 0.01) * scale) * 0.5
+
+-- 定数バッファ（float4 × 3 = 12要素）
+local constants = {
+    w, h,
+    center_x, center_y,
+    half_w, half_h,
+    sin_a, cos_a,
+    invert,
+    0.0, 0.0, 0.0
+}
+
+obj.pixelshader("cross_clip_ps", "object", {"object"}, constants)
