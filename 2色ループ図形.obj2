@@ -1,0 +1,146 @@
+--label:カスタムオブジェクト
+--information:波紋リング v3.2 (GPU最適化版)
+
+--group:形状・基本設定
+--track@size:全体サイズ,10,10000,2000,1
+--track@count:リング数,1,2000,10,1
+--select@shape:波紋の形=0,円=0,四角形=1,ひし形=2
+--group:
+
+--group:アニメーション設定
+--track@speed:速度(倍率),-10.0,10.0,1.0,0.1
+--check@bpm_sync:BPM同期,0
+--track@bpm:BPM,1.0,500.0,120.0,0.1
+--hide@bpm:bpm_sync==0
+--track@offset:ズレ調整,-2.0,2.0,0.0,0.01
+--select@mode:動き=0,外へ広がる=0,内へ縮む=1,拡大縮小(サイン)=2
+--select@ease:緩急=0,等速=0,滑らか(Sine)=1,鋭く(Quad)=2,極端(Expo)=3,弾む(Bounce)=4,振動(Elastic)=5,点滅(Step)=6
+--group:
+
+--group:配色設定
+--color@col1:色1,0x00A0FF
+--color@col2:色2,0xFF90D0
+--group:
+
+--[[pixelshader@ring_ps:
+cbuffer Params : register(b0) {
+    float4 color1;       // rgb: col1 * alpha, a: alpha
+    float4 color2;       // rgb: col2 * alpha, a: alpha
+    float4 ring_param;   // x: count, y: phase, z: shape_type, w: mode
+    float4 anim_param;   // x: ease_type, yzw: unused
+};
+
+float ease(float t, float type) {
+    t = saturate(t);
+    if (type == 0.0) return t;
+    if (type == 1.0) return (sin((t - 0.5) * 3.14159265) + 1.0) * 0.5;
+    if (type == 2.0) return (t < 0.5) ? (2.0 * t * t) : (1.0 - pow(max(-2.0 * t + 2.0, 0.0), 2.0) * 0.5);
+    if (type == 3.0) return (t == 0.0) ? 0.0 : (t == 1.0) ? 1.0 : (t < 0.5) ? (pow(2.0, 20.0 * t - 10.0) * 0.5) : ((2.0 - pow(2.0, -20.0 * t + 10.0)) * 0.5);
+    if (type == 4.0) {
+        float n1 = 7.5625;
+        float d1 = 2.75;
+        if (t < 1.0 / d1) {
+            return n1 * t * t;
+        } else if (t < 2.0 / d1) {
+            t -= 1.5 / d1;
+            return n1 * t * t + 0.75;
+        } else if (t < 2.5 / d1) {
+            t -= 2.25 / d1;
+            return n1 * t * t + 0.9375;
+        } else {
+            t -= 2.625 / d1;
+            return n1 * t * t + 0.984375;
+        }
+    }
+    if (type == 5.0) {
+        if (t == 0.0 || t == 1.0) return t;
+        return pow(2.0, -10.0 * t) * sin((t * 10.0 - 0.75) * ((2.0 * 3.14159265) / 3.0)) + 1.0;
+    }
+    if (type == 6.0) {
+        // 2色が交互に入れ替わる点滅処理
+        return step(0.5, t) * 0.5;
+    }
+    return t;
+}
+
+float4 ring_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 d = uv - 0.5;
+    float dist = 0.0;
+    float shape_type = ring_param.z;
+    
+    if (shape_type == 0.0) {
+        dist = length(d) * 2.0;
+    } else if (shape_type == 1.0) {
+        dist = max(abs(d.x), abs(d.y)) * 2.0;
+    } else {
+        dist = (abs(d.x) + abs(d.y)) * 2.0;
+    }
+
+    // 外周境界のエッジアンチエイリアス
+    float edge_fw = max(fwidth(dist), 0.0001);
+    float edge_alpha = 1.0 - smoothstep(1.0 - edge_fw, 1.0 + edge_fw, dist);
+    if (edge_alpha <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    float count_val = ring_param.x;
+    float local_pos = dist * count_val;
+    
+    float phase_val = ring_param.y;
+    float p_int = floor(phase_val);
+    float p_frac = frac(phase_val);
+    p_frac = ease(p_frac, anim_param.x);
+    float p_eased = p_int + p_frac;
+    
+    float mode_val = ring_param.w;
+    if (mode_val == 0.0) {
+        local_pos -= p_eased; 
+    } else if (mode_val == 1.0) {
+        local_pos += p_eased;
+    } else if (mode_val == 2.0) {
+        local_pos += sin(p_eased * 3.14159265 * 2.0) * (count_val * 0.5);
+    }
+
+    // 0.0/1.0境界の不連続面を回避する対称三角波アンチエイリアス
+    float fw = max(fwidth(local_pos), 0.0001);
+    float tri_wave = abs(frac(local_pos) - 0.5);
+    float t = smoothstep(0.25 - fw * 0.5, 0.25 + fw * 0.5, tri_wave);
+    
+    float4 final_col = lerp(color1, color2, t);
+    return final_col * edge_alpha;
+}
+]]
+
+do
+    local s_size = math.max(math.floor(size), 10)
+
+    local current_time = obj.time
+    local phase_base = (bpm_sync == 1) and ((current_time * bpm) / 240.0 * speed) or (current_time * speed)
+    local final_phase = phase_base + offset
+
+    local obj_alpha = obj.alpha
+    local r1, g1, b1 = RGB(col1)
+    local r2, g2, b2 = RGB(col2)
+
+    local c1_r = (r1 / 255.0) * obj_alpha
+    local c1_g = (g1 / 255.0) * obj_alpha
+    local c1_b = (b1 / 255.0) * obj_alpha
+
+    local c2_r = (r2 / 255.0) * obj_alpha
+    local c2_g = (g2 / 255.0) * obj_alpha
+    local c2_b = (b2 / 255.0) * obj_alpha
+
+    obj.clearbuffer("object", s_size, s_size)
+
+    obj.pixelshader(
+        "ring_ps",
+        "object",
+        {},
+        {
+            c1_r, c1_g, c1_b, obj_alpha,
+            c2_r, c2_g, c2_b, obj_alpha,
+            count, final_phase, shape, mode,
+            ease, 0.0, 0.0, 0.0
+        }
+    )
+end
