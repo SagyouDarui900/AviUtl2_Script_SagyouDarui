@@ -1,122 +1,69 @@
---information:Grid Noise Animator v1.0.0
 --label:画面効果
+--information:Grid Noise Animator
+--filter
 
--- -------------------------------------------------------------------------
--- UIパラメータ定義
--- -------------------------------------------------------------------------
+--group:グリッド設定
 --track@grid_x:分割数X,1,256,32,1
 --track@grid_y:分割数Y,1,256,32,1
 --trackgroup@grid_x,grid_y:グリッド分割
 --check@is_square:正方形にする,0
+--hide@grid_y:is_square==1
+--group:
 
---select@noise_type:ノイズタイプ,ホワイトノイズ=0,ブルーノイズ=1
+--group:ノイズ・ランダム設定
+--select@noise_type:ノイズタイプ=0,ホワイトノイズ=0,ブルーノイズ=1
 --track@seed_val:シード値,0,1000,0,1
-
---track@hue_var:色相変動,0,360,15,1
---track@light_var:明度変動(%),0,100,5.0,0.1
---track@sat_var:彩度変動(%),0,100,5.0,0.1
-
---track@depth:深度,0,100,0,0.1
---track@edge_emp:エッジ強調,0,100,0,0.1
-
---track@distort:歪みpx,0,200,2.0,0.1
---track@shake:震えpx,0,200,0,0.1
---track@blur_px:ぼかしpx,0,100,1.0,0.1
-
 --track@sync_cycle:同期サイクル,1,120,1,1
---check@ml_protect:ML学習保護,0
+--group:
 
--- -------------------------------------------------------------------------
--- Luaメイン処理
--- -------------------------------------------------------------------------
-local w, h = obj.w, obj.h
-if w == 0 or h == 0 then
+--group:色調変動設定
+--track@hue_var:色相変動,0.0,360.0,15.0,1.0
+--track@sat_var:彩度変動(%),0.0,100.0,5.0,0.1
+--track@light_var:明度変動(%),0.0,100.0,5.0,0.1
+--trackgroup@hue_var,sat_var,light_var:色調変動
+--group:
+
+--group:質感・エッジ設定
+--track@depth:深度,0.0,100.0,0.0,0.1
+--track@edge_emp:エッジ強調,0.0,100.0,0.0,0.1
+--check@ml_protect:ML学習保護,0
+--group:
+
+--group:変形・ブラー設定
+--track@distort:歪みpx,0.0,200.0,2.0,0.1
+--track@shake:震えpx,0.0,200.0,0.0,0.1
+--track@blur_px:ぼかしpx,0.0,100.0,1.0,0.1
+--group:
+
+if obj.w <= 0 or obj.h <= 0 then
     return
 end
 
--- アスペクト比に基づく自動計算（正方形化オプション）
-local actual_grid_y = grid_y
-if is_square == 1 then
-    actual_grid_y = grid_x * (h / w)
-end
-
--- 同期サイクルとユーザー指定シードを加算し、現在の乱数ベースを決定
-local total_seed = math.floor(obj.frame / sync_cycle) + seed_val
-
--- 全てのピクセル処理をGPU（DirectX 11 HLSL）へオフロード
-obj.pixelshader(
-    "grid_noise_animator",
-    "object",
-    { "object" },
-    {
-        grid_x,
-        actual_grid_y,
-        hue_var / 360.0,
-        sat_var / 100.0,
-        light_var / 100.0,
-        distort,
-        blur_px,
-        total_seed,
-        noise_type,
-        depth,
-        edge_emp,
-        ml_protect,
-        shake,
-        obj.frame,
-        w,
-        h
-    }
-)
-
--- -------------------------------------------------------------------------
--- HLSL ピクセルシェーダー実装
--- DirectX 11 / 16bit Float パイプライン / Premultiplied Alpha 準拠
--- -------------------------------------------------------------------------
 --[[pixelshader@grid_noise_animator:
-struct Constants {
-    float grid_x;
-    float grid_y;
-    float hue_var;
-    float sat_var;
-    float light_var;
-    float distort;
-    float blur_px;
-    float seed;
-    float noise_type;
-    float depth;
-    float edge_emp;
-    float ml_protect;
-    float shake;
-    float frame;
-    float tex_w;
-    float tex_h;
+cbuffer Params : register(b0) {
+    float4 param_grid; // x: grid_x, y: grid_y, z: distort, w: blur_px
+    float4 param_hsv;  // x: hue_var, y: sat_var, z: light_var, w: noise_type
+    float4 param_fx;   // x: depth, y: edge_emp, z: ml_protect, w: shake
+    float4 param_env;  // x: seed, y: inv_w, z: inv_h, w: obj_alpha
 };
 
-cbuffer constants : register(b0) { Constants constants; }
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
-// =========================================================================
-// ユーティリティ関数
-// =========================================================================
-
-// 標準的な疑似乱数ジェネレータ（ホワイトノイズ）
 float rand(float2 co) {
     return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
 }
 
-// 近傍の乱数差分を利用したハイパス近似ノイズ（疑似ブルーノイズ）
 float pseudo_blue_noise(float2 co) {
     float center = rand(co);
     float l = rand(co + float2(-1.0, 0.0));
-    float r = rand(co + float2(1.0, 0.0));
-    float u = rand(co + float2(0.0, -1.0));
-    float d = rand(co + float2(0.0, 1.0));
+    float r = rand(co + float2( 1.0, 0.0));
+    float u = rand(co + float2( 0.0, -1.0));
+    float d = rand(co + float2( 0.0,  1.0));
     float val = center - (l + r + u + d) * 0.25;
     return saturate(val * 1.5 + 0.5);
 }
 
-// ユーザー設定に基づくノイズの取得
 float get_noise(float2 co, float type) {
     if (type > 0.5) {
         return pseudo_blue_noise(co);
@@ -125,11 +72,10 @@ float get_noise(float2 co, float type) {
     }
 }
 
-// RGB <-> HSV 変換関数 (16bit Float環境対応)
 float3 rgb2hsv(float3 c) {
     float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-    float4 p = c.g < c.b ? float4(c.bg, K.wz) : float4(c.gb, K.xy);
-    float4 q = c.r < p.x ? float4(p.xyw, c.r) : float4(c.r, p.yzx);
+    float4 p = (c.g < c.b) ? float4(c.bg, K.wz) : float4(c.gb, K.xy);
+    float4 q = (c.r < p.x) ? float4(p.xyw, c.r) : float4(c.r, p.yzx);
     float d = q.x - min(q.w, q.y);
     float e = 1.0e-10;
     return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
@@ -138,44 +84,37 @@ float3 rgb2hsv(float3 c) {
 float3 hsv2rgb(float3 c) {
     float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
     float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * lerp(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    return c.z * lerp(K.xxx, saturate(p - K.xxx), c.y);
 }
 
-// =========================================================================
-// メイン ピクセルシェーダー処理
-// =========================================================================
-float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
-    // 1. グリッド座標の計算 (画像中心を基準とする)
-    float2 grid_uv_float = (uv - 0.5) * float2(constants.grid_x, constants.grid_y);
+float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 grid_uv_float = (uv - 0.5) * param_grid.xy;
     float2 grid_uv = floor(grid_uv_float);
-    float2 cell_uv = frac(grid_uv_float); // セル内のローカル座標(0.0~1.0)
-    
-    // 2. セル単位の乱数生成用ベースシード
-    float rnd_seed = constants.seed + 123.456;
-    
-    // 各パラメータ用の変動値 (-1.0 ~ 1.0) を取得
-    float r_hue   = (get_noise(grid_uv + float2(rnd_seed * 1.1, rnd_seed * 1.2), constants.noise_type) - 0.5) * 2.0;
-    float r_sat   = (get_noise(grid_uv + float2(rnd_seed * 1.3, rnd_seed * 1.4), constants.noise_type) - 0.5) * 2.0;
-    float r_light = (get_noise(grid_uv + float2(rnd_seed * 1.5, rnd_seed * 1.6), constants.noise_type) - 0.5) * 2.0;
-    float r_distX = (get_noise(grid_uv + float2(rnd_seed * 1.7, rnd_seed * 1.8), constants.noise_type) - 0.5) * 2.0;
-    float r_distY = (get_noise(grid_uv + float2(rnd_seed * 1.9, rnd_seed * 2.0), constants.noise_type) - 0.5) * 2.0;
+    float2 cell_uv = frac(grid_uv_float);
 
-    // 3. 震え（Shake）オフセットの計算
+    float rnd_seed = param_env.x + 123.456;
+    float n_type = param_hsv.w;
+
+    float r_hue   = (get_noise(grid_uv + float2(rnd_seed * 1.1, rnd_seed * 1.2), n_type) - 0.5) * 2.0;
+    float r_sat   = (get_noise(grid_uv + float2(rnd_seed * 1.3, rnd_seed * 1.4), n_type) - 0.5) * 2.0;
+    float r_light = (get_noise(grid_uv + float2(rnd_seed * 1.5, rnd_seed * 1.6), n_type) - 0.5) * 2.0;
+    float r_distX = (get_noise(grid_uv + float2(rnd_seed * 1.7, rnd_seed * 1.8), n_type) - 0.5) * 2.0;
+    float r_distY = (get_noise(grid_uv + float2(rnd_seed * 1.9, rnd_seed * 2.0), n_type) - 0.5) * 2.0;
+
+    float2 inv_res = param_env.yz;
+
     float2 shake_offset = float2(0.0, 0.0);
-    if (constants.shake > 0.0) {
-        // 同期サイクルに応じてセルごとに異なる方向に揺らす
-        float shake_x = (rand(grid_uv + float2(constants.seed * 0.13, 12.34)) - 0.5) * 2.0;
-        float shake_y = (rand(grid_uv + float2(constants.seed * 0.17, 56.78)) - 0.5) * 2.0;
-        shake_offset = float2(shake_x, shake_y) * (constants.shake / float2(constants.tex_w, constants.tex_h));
+    if (param_fx.w > 0.0) {
+        float shake_x = (rand(grid_uv + float2(param_env.x * 0.13, 12.34)) - 0.5) * 2.0;
+        float shake_y = (rand(grid_uv + float2(param_env.x * 0.17, 56.78)) - 0.5) * 2.0;
+        shake_offset = float2(shake_x, shake_y) * (param_fx.w * inv_res);
     }
 
-    // 4. サンプリング用UVの決定 (歪み + 震え)
-    float2 dist_uv = uv + shake_offset + float2(r_distX, r_distY) * (constants.distort / float2(constants.tex_w, constants.tex_h));
+    float2 dist_uv = uv + shake_offset + float2(r_distX, r_distY) * (param_grid.z * inv_res);
 
-    // 5. テクスチャサンプリング & ブラー処理 (3x3 ボックスブラー)
     float4 c = float4(0.0, 0.0, 0.0, 0.0);
-    if (constants.blur_px > 0.0) {
-        float2 px = float2(constants.blur_px / constants.tex_w, constants.blur_px / constants.tex_h);
+    if (param_grid.w > 0.0) {
+        float2 px = param_grid.w * inv_res;
         c += srcTex.Sample(srcSmp, dist_uv);
         c += srcTex.Sample(srcSmp, dist_uv + float2( px.x,  0.0));
         c += srcTex.Sample(srcSmp, dist_uv + float2(-px.x,  0.0));
@@ -185,50 +124,83 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
         c += srcTex.Sample(srcSmp, dist_uv + float2(-px.x, -px.y));
         c += srcTex.Sample(srcSmp, dist_uv + float2( px.x, -px.y));
         c += srcTex.Sample(srcSmp, dist_uv + float2(-px.x,  px.y));
-        c /= 9.0;
+        c *= (1.0 / 9.0);
     } else {
         c = srcTex.Sample(srcSmp, dist_uv);
     }
 
     float alpha = c.a;
-    float3 rgb = c.rgb;
-
-    // 6. 色調補正の準備 (Straight Alpha化)
-    // ※AviUtl2のテクスチャはPremultiplied Alphaであるため、色を操作する前にアルファを割る必要がある
-    if (alpha > 1e-5) {
-        rgb /= alpha;
+    if (alpha <= 1.0e-5) {
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // 7. 色調の変動処理 (HSV空間)
+    float3 rgb = c.rgb / alpha;
+
+    // 色調変動
     float3 hsv = rgb2hsv(rgb);
-    hsv.x = frac(hsv.x + r_hue * constants.hue_var + 1.0); // +1.0で負値を回避
-    hsv.y = saturate(hsv.y + r_sat * constants.sat_var);
-    hsv.z = saturate(hsv.z + r_light * constants.light_var);
+    hsv.x = frac(hsv.x + r_hue * param_hsv.x + 1.0);
+    hsv.y = saturate(hsv.y + r_sat * param_hsv.y);
+    hsv.z = saturate(hsv.z + r_light * param_hsv.z);
     rgb = hsv2rgb(hsv);
 
-    // 8. 深度（ベベル）処理
+    // 深度（ベベル）
     float bevel = (1.0 - cell_uv.x - cell_uv.y);
-    rgb = saturate(rgb + bevel * (constants.depth / 100.0));
+    rgb = saturate(rgb + bevel * (param_fx.x * 0.01));
 
-    // 9. エッジ強調処理 (ピクセルスケールベース)
-    float cell_w_px = constants.tex_w / constants.grid_x;
-    float cell_h_px = constants.tex_h / constants.grid_y;
+    // エッジ強調
+    float cell_w_px = (1.0 / inv_res.x) / max(param_grid.x, 1.0);
+    float cell_h_px = (1.0 / inv_res.y) / max(param_grid.y, 1.0);
     float edge_tx = 1.5 / cell_w_px;
     float edge_ty = 1.5 / cell_h_px;
     float edge = step(cell_uv.x, edge_tx) + step(1.0 - edge_tx, cell_uv.x) +
                  step(cell_uv.y, edge_ty) + step(1.0 - edge_ty, cell_uv.y);
     edge = saturate(edge);
-    rgb = lerp(rgb, float3(0.0, 0.0, 0.0), edge * (constants.edge_emp / 100.0));
+    rgb = lerp(rgb, float3(0.0, 0.0, 0.0), edge * (param_fx.y * 0.01));
 
-    // 10. ML学習保護 (微細な空間ノイズの重畳)
-    if (constants.ml_protect > 0.5) {
-        float ml_noise = (rand(pos.xy) - 0.5) * 0.1; // ±5%
+    // ML保護ノイズ
+    if (param_fx.z > 0.5) {
+        float ml_noise = (rand(pos.xy) - 0.5) * 0.1;
         rgb = saturate(rgb + ml_noise);
     }
 
-    // 11. 最終出力 (Premultiplied Alphaに戻す)
-    rgb *= alpha;
-
-    return float4(rgb, alpha);
+    // Premultiplied Alpha + obj.alpha 反映
+    float final_a = alpha * param_env.w;
+    return float4(rgb * final_a, final_a);
 }
 ]]
+
+do
+    local w, h = obj.w, obj.h
+    local actual_grid_y = (is_square == 1) and (grid_x * (h / w)) or grid_y
+    local safe_cycle = math.max(1, math.floor(sync_cycle))
+    local total_seed = math.floor(obj.frame / safe_cycle) + seed_val
+
+    obj.pixelshader(
+        "grid_noise_animator",
+        "object",
+        { "object" },
+        {
+            grid_x,
+            actual_grid_y,
+            distort,
+            blur_px,
+
+            hue_var / 360.0,
+            sat_var * 0.01,
+            light_var * 0.01,
+            (noise_type == 1) and 1.0 or 0.0,
+
+            depth,
+            edge_emp,
+            (ml_protect == 1) and 1.0 or 0.0,
+            shake,
+
+            total_seed,
+            1.0 / w,
+            1.0 / h,
+            obj.alpha
+        },
+        "copy",
+        "clamp"
+    )
+end
