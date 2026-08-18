@@ -1,0 +1,157 @@
+--label:変形
+--information:ニュートンフラクタル変形 v1.0 (AviUtl2 GPU Shader)
+--filter
+
+--group:基本幾何設定
+--track@power:歪み強度,-100.0,100.0,20.0,0.1
+--track@zoom:ズーム,0.01,100.0,1.8,0.01
+--track@pos_x:中心X,-20.0,20.0,0.0,0.01
+--track@pos_y:中心Y,-20.0,20.0,0.0,0.01
+--trackgroup@pos_x,pos_y:中心座標
+--group:
+
+--group:多項式・反復設定
+--track@degree:多項式次数,2.0,8.0,3.0,1.0
+--track@relaxation:緩和係数,0.1,3.0,1.0,0.01
+--track@iteration:反復回数,1.0,50.0,15.0,0.01
+--track@rot_spd:回転速度,-10.0,10.0,0.0,0.01
+--group:
+
+--group:描画・カラー設定
+--select@render_mode:描画モード=0,変形のみ=0,模様を合成=1
+--color@fractal_col:模様色,0xffaa00
+--hide@fractal_col:render_mode==0
+--group:
+
+obj.setanchor("pos_x,pos_y", 0, "line")
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@ps_newton_distort:
+cbuffer Params : register(b0) {
+    float4 param_geom;   // x: zoom, y: pos_x, z: pos_y, w: power
+    float4 param_poly;   // x: degree, y: relaxation, z: c_r, w: c_i
+    float4 param_render; // x: iteration, y: render_mode, zw: resolution
+    float4 param_color;  // rgb: blend_col * alpha, a: obj_alpha
+};
+
+Texture2D srcTex : register(t0);
+SamplerState srcSmp : register(s0);
+
+float4 ps_newton_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 res = param_render.zw;
+    float zoom_val = max(param_geom.x, 0.0001);
+    
+    // アスペクト比補正と中心座標オフセットの適用
+    float2 p = (uv - 0.5) * 2.0;
+    p.x *= res.x / res.y;
+    p = (p / zoom_val) + param_geom.yz;
+
+    float2 z = p;
+    float p_deg = max(param_poly.x, 1.0);
+    float p_minus_1 = p_deg - 1.0;
+    float relax = param_poly.y;
+    float2 c = param_poly.zw;
+    
+    float iter_f = param_render.x;
+    int max_i = ceil(iter_f);
+    
+    float n = 0.0;
+    
+    [loop]
+    for (int i = 0; i < 50; i++) {
+        if (i >= max_i) break;
+        
+        // 極座標変換による z^(p-1) の計算
+        float r = length(z);
+        if (r < 0.00001) break;
+        
+        float theta = atan2(z.y, z.x);
+        float r_pow = pow(r, p_minus_1);
+        float2 z_pow = float2(cos(p_minus_1 * theta), sin(p_minus_1 * theta)) * r_pow;
+        
+        // 分母 w = p * z^(p-1)
+        float2 w = z_pow * p_deg;
+        float w_len_sq = dot(w, w);
+        if (w_len_sq < 0.000001) break;
+        
+        // 複素除算 c / w
+        float2 c_div_w = float2(
+            (c.x * w.x + c.y * w.y) / w_len_sq,
+            (c.y * w.x - c.x * w.y) / w_len_sq
+        );
+        
+        // ニュートン反復式: z_next = (1 - relax/p)*z + relax*(c / (p*z^(p-1)))
+        float factor = 1.0 - (relax / p_deg);
+        float2 next_z = z * factor + c_div_w * relax;
+        
+        // 最後の反復ステップ（小数端数）の補間
+        if (i == max_i - 1 && frac(iter_f) > 0.001) {
+            float t = frac(iter_f);
+            z = lerp(z, next_z, t);
+            n += t;
+        } else {
+            z = next_z;
+            n += 1.0;
+        }
+        
+        if (distance(next_z, z) < 0.0001) break;
+    }
+    
+    // 収束差分ベクトルによるUV座標の歪曲
+    float2 distort = (z - p) * (param_geom.w * 0.01);
+    float2 new_uv = uv + distort;
+    
+    float4 col = srcTex.Sample(srcSmp, new_uv);
+    
+    // 根（アトラクタ）の境界模様合成処理
+    if (param_render.y > 0.5 && col.a > 0.0) {
+        float angle_attr = atan2(z.y, z.x);
+        float pattern = 0.5 + 0.5 * sin(angle_attr * p_deg + n * 0.5);
+        float alpha = saturate(n / 10.0);
+        
+        float3 frac_col = param_color.rgb * pattern;
+        col.rgb = lerp(col.rgb, frac_col * col.a, alpha * 0.6);
+    }
+    
+    // Premultiplied Alpha 適用
+    return col * param_color.a;
+}
+]]
+
+do
+    local sin = math.sin
+    local cos = math.cos
+
+    -- 定数Cの回転アニメーション
+    local c_r = 1.0
+    local c_i = 0.0
+    if rot_spd ~= 0.0 then
+        local angle = obj.time * rot_spd
+        c_r = cos(angle)
+        c_i = sin(angle)
+    end
+
+    local r_val, g_val, b_val = RGB(fractal_col)
+    local obj_alpha = obj.alpha
+
+    local fr = (r_val / 255.0) * obj_alpha
+    local fg = (g_val / 255.0) * obj_alpha
+    local fb = (b_val / 255.0) * obj_alpha
+
+    obj.pixelshader(
+        "ps_newton_distort",
+        "object",
+        { "object" },
+        {
+            zoom, pos_x, pos_y, power,
+            degree, relaxation, c_r, c_i,
+            iteration, (render_mode == 1) and 1.0 or 0.0, obj.w, obj.h,
+            fr, fg, fb, obj_alpha
+        },
+        "copy",
+        "mirror"
+    )
+end

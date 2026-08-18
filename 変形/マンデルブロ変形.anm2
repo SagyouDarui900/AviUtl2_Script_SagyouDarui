@@ -1,0 +1,116 @@
+--label:変形
+--information:マンデルブロ歪み v2.0 (GPU最適化版)
+--filter
+
+--group:基本設定
+--track@zoom:ズーム,0.01,100.0,2.5,0.01
+--track@pos_x:X座標,-20.0,20.0,0.0,0.01
+--track@pos_y:Y座標,-20.0,20.0,0.0,0.01
+--trackgroup@pos_x,pos_y:座標
+--track@power:歪み強度,-100.0,100.0,10.0,0.1
+--track@iteration:反復回数,1.0,100.0,15.0,0.01
+--group:
+
+--group:描画・カラー設定
+--select@render_mode:描画モード=0,変形のみ=0,フラクタル模様を合成=1
+--color@base_col:合成色,0xFFFFFF
+--hide@base_col:render_mode==0
+--group:
+
+obj.setanchor("pos_x,pos_y", 0, "line")
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@ps_mandelbrot_distort:
+cbuffer Params : register(b0) {
+    float4 param_geom;   // x: zoom, y: pos_x, z: pos_y, w: power
+    float4 param_render; // x: iteration, y: render_mode, zw: resolution
+    float4 param_color;  // rgb: base_col * alpha, a: obj_alpha
+};
+
+Texture2D srcTex : register(t0);
+SamplerState srcSmp : register(s0);
+
+float4 ps_mandelbrot_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 res = param_render.zw;
+    float zoom_val = max(param_geom.x, 0.0001);
+    
+    float2 p = (uv - 0.5) * 2.0; 
+    p.x *= res.x / res.y;
+    p /= zoom_val;
+    
+    float2 z = float2(0.0, 0.0);
+    float2 c = p + param_geom.yz;
+    float n = 0.0;
+    float d = 0.0;
+    
+    float iter_f = param_render.x;
+    int max_i = ceil(iter_f);
+    
+    [loop]
+    for (int i = 0; i < 100; i++) {
+        if (i >= max_i) break;
+        
+        float2 next_z = float2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y);
+        
+        if (i == max_i - 1 && frac(iter_f) > 0.001) {
+            float t = frac(iter_f);
+            z = lerp(z, next_z, t);
+            d = dot(z, z);
+            n += t;
+            if (d > 4.0) break;
+        } else {
+            z = next_z;
+            d = dot(z, z);
+            n += 1.0;
+            if (d > 4.0) break;
+        }
+    }
+    
+    // 複素数座標を用いたUV座標の歪曲
+    float2 distort = z * (param_geom.w * 0.01);
+    float2 new_uv = uv + distort;
+    
+    float4 col = srcTex.Sample(srcSmp, new_uv);
+    
+    // フラクタル模様の合成
+    if (param_render.y > 0.5 && col.a > 0.0) {
+        if (n < iter_f) {
+            float alpha = saturate(n / 10.0);
+            float sn = n;
+            if (d > 4.0) {
+                sn = n - log2(max(0.0001, log2(max(d, 0.0001)) * 0.5));
+            }
+            
+            float3 frac_col = param_color.rgb * (0.6 + 0.4 * cos(6.2831853 * (sn / 20.0)));
+            col.rgb = lerp(col.rgb, frac_col * col.a, alpha * 0.5);
+        }
+    }
+    
+    return col * param_color.a;
+}
+]]
+
+do
+    local r, g, b = RGB(base_col)
+    local obj_alpha = obj.alpha
+
+    local c_r = (r / 255.0) * obj_alpha
+    local c_g = (g / 255.0) * obj_alpha
+    local c_b = (b / 255.0) * obj_alpha
+
+    obj.pixelshader(
+        "ps_mandelbrot_distort",
+        "object",
+        { "object" },
+        {
+            zoom, pos_x, pos_y, power,
+            iteration, (render_mode == 1) and 1.0 or 0.0, obj.w, obj.h,
+            c_r, c_g, c_b, obj_alpha
+        },
+        "copy",
+        "mirror"
+    )
+end

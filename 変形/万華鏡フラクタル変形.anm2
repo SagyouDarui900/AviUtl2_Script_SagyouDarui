@@ -1,0 +1,167 @@
+--label:変形
+--information:万華鏡フラクタル変形 v1.0 (KIFS GPU Shader)
+--filter
+
+--group:基本幾何設定
+--select@sym_type:対称タイプ=0,ヘキサフレーク(6角)=0,コッホ雪片(3角)=1,ペンタフレーク(5角)=2,四角格子(4角)=3
+--track@power:歪み強度,-100.0,100.0,20.0,0.1
+--track@zoom:ズーム,0.01,100.0,1.2,0.01
+--track@pos_x:中心X,-20.0,20.0,0.0,0.01
+--track@pos_y:中心Y,-20.0,20.0,0.0,0.01
+--trackgroup@pos_x,pos_y:中心座標
+--group:
+
+--group:フラクタル・折り畳み設定
+--track@iteration:反復回数,1.0,20.0,5.0,0.01
+--track@scale_factor:スケール倍率,1.0,5.0,2.0,0.01
+--track@offset_val:オフセット,0.0,5.0,1.0,0.01
+--track@fold_rot:折り畳み回転,-360.0,360.0,0.0,0.1
+--track@rot_spd:回転速度,-10.0,10.0,0.0,0.01
+--group:
+
+--group:描画・カラー設定
+--select@render_mode:描画モード=0,変形のみ=0,模様を合成=1
+--color@fractal_col:模様色,0xffffff
+--hide@fractal_col:render_mode==0
+--group:
+
+obj.setanchor("pos_x,pos_y", 0, "line")
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@ps_kifs_distort:
+cbuffer Params : register(b0) {
+    float4 param_geom;   // x: zoom, y: pos_x, z: pos_y, w: power
+    float4 param_kifs;   // x: sym_type, y: scale_factor, z: offset_val, w: iteration
+    float4 param_render; // x: render_mode, y: rot_angle, zw: resolution
+    float4 param_color;  // rgb: blend_col * alpha, a: obj_alpha
+};
+
+Texture2D srcTex : register(t0);
+SamplerState srcSmp : register(s0);
+
+// 平面フォールディング関数 (法線 n に対する鏡映)
+float2 fold(float2 p, float2 n) {
+    float d = dot(p, n);
+    return p - 2.0 * min(0.0, d) * n;
+}
+
+float4 ps_kifs_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 res = param_render.zw;
+    float zoom_val = max(param_geom.x, 0.0001);
+
+    // アスペクト比補正と中心座標オフセットの適用
+    float2 p = (uv - 0.5) * 2.0;
+    p.x *= res.x / res.y;
+    p = (p / zoom_val) + param_geom.yz;
+
+    float2 orig_p = p;
+
+    int sym = (int)param_kifs.x;
+    float scale = param_kifs.y;
+    float offset = param_kifs.z;
+    float iter_f = param_kifs.w;
+    int max_i = ceil(iter_f);
+
+    float rot = param_render.y;
+    float2x2 rot_mat = float2x2(cos(rot), -sin(rot), sin(rot), cos(rot));
+
+    // 各対称性に応じたフォールディング法線ベクトル
+    float2 n_tri1 = float2(cos(3.14159265 / 3.0), sin(3.14159265 / 3.0));
+    float2 n_hex1 = float2(cos(3.14159265 / 6.0), sin(3.14159265 / 6.0));
+    float2 n_pent1 = float2(cos(3.14159265 / 5.0), sin(3.14159265 / 5.0));
+    float2 n_pent2 = float2(cos(3.14159265 * 3.0 / 5.0), sin(3.14159265 * 3.0 / 5.0));
+
+    float min_dist = 1000.0;
+    float n_accum = 0.0;
+
+    [loop]
+    for (int i = 0; i < 20; i++) {
+        if (i >= max_i) break;
+
+        float2 next_p = p;
+
+        if (sym == 0) {
+            // ヘキサフレーク (6回対称フォールディング)
+            next_p = abs(next_p);
+            next_p = fold(next_p, n_hex1);
+            next_p = fold(next_p, float2(n_hex1.y, -n_hex1.x));
+            next_p = mul(rot_mat, next_p) * scale - float2(offset, 0.0);
+        } else if (sym == 1) {
+            // コッホ雪片 (3回対称フォールディング)
+            next_p.x = abs(next_p.x);
+            next_p = fold(next_p, n_tri1);
+            next_p = mul(rot_mat, next_p) * scale - float2(offset, 0.0);
+        } else if (sym == 2) {
+            // ペンタフレーク (5回対称フォールディング)
+            next_p.x = abs(next_p.x);
+            next_p = fold(next_p, n_pent1);
+            next_p = fold(next_p, n_pent2);
+            next_p = mul(rot_mat, next_p) * scale - float2(0.0, offset);
+        } else {
+            // 四角格子 / カーペット (4回対称直交フォールディング)
+            next_p = abs(next_p);
+            if (next_p.x < next_p.y) next_p = next_p.yx;
+            next_p = mul(rot_mat, next_p) * scale - float2(offset, offset);
+        }
+
+        min_dist = min(min_dist, length(next_p));
+
+        // 最後の反復ステップ（小数端数）の線形補間
+        if (i == max_i - 1 && frac(iter_f) > 0.001) {
+            float t = frac(iter_f);
+            p = lerp(p, next_p, t);
+            n_accum += t;
+        } else {
+            p = next_p;
+            n_accum += 1.0;
+        }
+    }
+
+    // 空間折り畳み差分ベクトルによるUV座標の歪曲
+    float2 distort = (p - orig_p) * (param_geom.w * 0.01);
+    float2 new_uv = uv + distort;
+
+    float4 col = srcTex.Sample(srcSmp, new_uv);
+
+    // フラクタル境界ラインの合成
+    if (param_render.x > 0.5 && col.a > 0.0) {
+        float line_pat = 0.5 + 0.5 * cos(min_dist * 10.0);
+        float alpha = saturate(n_accum / 8.0);
+        float3 frac_col = param_color.rgb * line_pat;
+        col.rgb = lerp(col.rgb, frac_col * col.a, alpha * 0.7);
+    }
+
+    // Premultiplied Alpha 適用
+    return col * param_color.a;
+}
+]]
+
+do
+    local rad = math.rad
+    local rot_base = rad(fold_rot)
+    local total_rot = rot_base + ((rot_spd ~= 0.0) and (obj.time * rot_spd) or 0.0)
+
+    local r_val, g_val, b_val = RGB(fractal_col)
+    local obj_alpha = obj.alpha
+
+    local fr = (r_val / 255.0) * obj_alpha
+    local fg = (g_val / 255.0) * obj_alpha
+    local fb = (b_val / 255.0) * obj_alpha
+
+    obj.pixelshader(
+        "ps_kifs_distort",
+        "object",
+        { "object" },
+        {
+            zoom, pos_x, pos_y, power,
+            sym_type, scale_factor, offset_val, iteration,
+            (render_mode == 1) and 1.0 or 0.0, total_rot, obj.w, obj.h,
+            fr, fg, fb, obj_alpha
+        },
+        "copy",
+        "mirror"
+    )
+end
