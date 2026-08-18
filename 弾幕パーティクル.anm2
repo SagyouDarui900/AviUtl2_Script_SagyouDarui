@@ -1,0 +1,202 @@
+--label:アニメーション効果
+--information:パーティクル(弾幕)
+
+--group:基本設定,true
+--track@count:総弾数,1,32768,200,1
+--track@life:寿命,0.1,20.0,2.0,0.1
+--track@size:基本サイズ(%),1.0,1000.0,50.0,0.1
+--group:
+
+--group:発射パターン(2D/3D),true
+--track@ways:WAY数,1,100,5,1
+--track@way_angle:WAY角,0.0,360.0,15.0,0.1
+--track@z_way_angle:Z偏角(3D),-180.0,180.0,0.0,0.1
+--track@rings:全方位分割,1,100,1,1
+--track@spin_emit:発射回転/秒,-3600.0,3600.0,0.0,0.1
+--check@aim_target:ターゲットを狙う,1
+--value@target_pos:ターゲット位置,{0, 300}
+--hide@target_pos:aim_target==0
+--group:
+
+--group:弾の軌道・特殊,true
+--track@speed:初速,-5000.0,5000.0,400.0,0.1
+--track@accel:加速度,-1000.0,1000.0,0.0,0.1
+--track@curve:カーブ,-720.0,720.0,0.0,0.1
+--track@gravity:重力,-2000.0,2000.0,0.0,0.1
+--track@wobble_amp:波打ち幅,-1000.0,1000.0,0.0,0.1
+--track@wobble_freq:波打ち周期,0.0,50.0,0.0,0.1
+--track@jitter:ばらつき(散弾),0,100,0,1
+--group:
+
+--group:見た目・サイズ変化,true
+--track@scale_in:開始サイズ(%),0,500,0,1
+--track@scale_out:終了サイズ(%),0,500,0,1
+--track@stretch:速度伸縮(レーザー),0,200,0,1
+--color@col:着色,0xFFFFFF
+--check@is_circle:円形で切り抜く,0
+--select@blend:合成=1,通常=0,加算=1,減算=2,乗算=3,スクリーン=4
+--group:
+
+--[[pixelshader@make_circle_ps:
+cbuffer Params : register(b0) {
+    float4 tint_circle; // rgb: tint, a: is_circle
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 make_circle_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 tex_col = tex.Sample(samp, uv);
+    
+    // 円形切り抜き (アンチエイリアス処理)
+    if (tint_circle.a > 0.5) {
+        float2 d = uv - 0.5;
+        float dist = length(d);
+        float fw = max(fwidth(dist), 0.0001);
+        float mask = 1.0 - smoothstep(0.5 - fw, 0.5 + fw, dist);
+        tex_col *= mask;
+    }
+    
+    tex_col.rgb *= tint_circle.rgb;
+    return tex_col;
+}
+]]
+
+do
+    local sin = math.sin
+    local cos = math.cos
+    local atan2 = math.atan2
+    local deg = math.deg
+    local abs = math.abs
+    local floor = math.floor
+    local max = math.max
+    local pi = math.pi
+    local deg2rad = pi / 180.0
+    local half_pi = pi * 0.5
+
+    local blend_modes = { "none", "add", "sub", "mul", "screen" }
+    obj.setoption("blend", blend_modes[blend + 1] or "none")
+
+    local r, g, b = RGB(col)
+    local circle_flag = (is_circle == 1) and 1.0 or 0.0
+
+    -- 弾テクスチャの前処理（円形切り抜き・着色）
+    obj.pixelshader(
+        "make_circle_ps",
+        "object",
+        { "object" },
+        { r / 255.0, g / 255.0, b / 255.0, circle_flag },
+        "copy",
+        "clamp"
+    )
+
+    local aim_angle_deg = 90.0
+    if aim_target == 1 then
+        obj.setanchor("target_pos", 1, "line")
+        local tx = (type(target_pos) == "table" and target_pos[1]) and target_pos[1] or 0.0
+        local ty = (type(target_pos) == "table" and target_pos[2]) and target_pos[2] or 300.0
+        aim_angle_deg = deg(atan2(ty, tx))
+    end
+
+    local t_now = obj.time
+    local a_base = obj.alpha
+    local safe_life = max(life, 0.001)
+
+    local w_ways = max(1, floor(ways))
+    local w_rings = max(1, floor(rings))
+    local bullets_per_wave = w_ways * w_rings
+
+    local total_waves = max(1, floor(count / bullets_per_wave))
+    local active_count = total_waves * bullets_per_wave
+    local base_size_ratio = size * 0.01
+
+    for i = 1, active_count do
+        local seed = i * 17
+        local rand1 = obj.rand1(seed, 0) - 0.5
+        local rand2 = obj.rand1(seed + 1, 0) - 0.5
+
+        local wave_idx = floor((i - 1) / bullets_per_wave)
+        local idx_in_wave = (i - 1) % bullets_per_wave
+        local ring_idx = floor(idx_in_wave / w_ways)
+        local way_idx = idx_in_wave % w_ways
+
+        local offset_time = (wave_idx / total_waves) * safe_life
+        local age = (t_now + offset_time) % safe_life
+        local progress = age / safe_life
+        local emit_time = t_now - age
+
+        -- フェード & サイズアニメーション
+        local alpha = a_base
+        local current_scale = 1.0
+
+        if progress < 0.1 then
+            local p_in = progress * 10.0
+            alpha = alpha * p_in
+            current_scale = (scale_in * 0.01) + (1.0 - (scale_in * 0.01)) * p_in
+        elseif progress > 0.8 then
+            local p_out = (progress - 0.8) * 5.0
+            alpha = alpha * (1.0 - p_out)
+            current_scale = 1.0 + ((scale_out * 0.01) - 1.0) * p_out
+        end
+
+        if alpha > 0.001 then
+            local j_ang = rand1 * jitter
+            local j_spd = rand2 * (jitter * 0.02) * speed
+
+            -- 1. 角度の計算
+            local base_angle = emit_time * spin_emit
+            local ring_angle = (360.0 / w_rings) * ring_idx
+            local way_offset = (way_idx - (w_ways - 1) * 0.5) * way_angle
+
+            local initial_angle_deg = aim_angle_deg + base_angle + ring_angle + way_offset + j_ang
+            local current_angle_deg = initial_angle_deg + curve * age
+            local current_angle_rad = current_angle_deg * deg2rad
+
+            -- 2. Z軸偏角 (Pitch)
+            local pitch_deg = (way_idx - (w_ways - 1) * 0.5) * z_way_angle
+            local pitch_rad = pitch_deg * deg2rad
+
+            -- 3. 距離と座標
+            local cur_speed = speed + j_spd
+            local age_sq = age * age
+            local dist = cur_speed * age + 0.5 * accel * age_sq
+
+            local dist_xy = dist * cos(pitch_rad)
+            local pz = dist * sin(pitch_rad)
+
+            local px = cos(current_angle_rad) * dist_xy
+            local py = sin(current_angle_rad) * dist_xy
+
+            -- 重力
+            py = py + 0.5 * gravity * age_sq
+
+            -- 波打ち (Wobble)
+            if wobble_amp ~= 0.0 and wobble_freq ~= 0.0 then
+                local wobble = sin(age * wobble_freq * pi) * wobble_amp
+                local nx = cos(current_angle_rad + half_pi)
+                local ny = sin(current_angle_rad + half_pi)
+                px = px + nx * wobble
+                py = py + ny * wobble
+            end
+
+            -- 4. 速度による伸縮 (レーザー効果)
+            local vel_mag = abs(cur_speed + accel * age)
+            local stretch_factor = 1.0 + (vel_mag / 500.0) * (stretch * 0.1)
+            if stretch_factor > 20.0 then
+                stretch_factor = 20.0
+            end
+
+            local s_rand = 1.0 + rand1 * (jitter * 0.005)
+            local base_zoom = base_size_ratio * s_rand * current_scale
+
+            obj.sx = base_zoom * stretch_factor
+            obj.sy = base_zoom / max(1.0, 1.0 + (stretch_factor - 1.0) * 0.3)
+
+            obj.draw(px, py, pz, 1.0, alpha, 0, 0, current_angle_deg)
+        end
+    end
+
+    -- オブジェクト拡縮パラメータの復元
+    obj.sx = 1.0
+    obj.sy = 1.0
+end
