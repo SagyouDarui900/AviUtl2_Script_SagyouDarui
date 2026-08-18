@@ -1,5 +1,5 @@
 --label:カスタムオブジェクト
---information:波紋リング v3.2 (GPU最適化版)
+--information:2色ループ図形
 
 --group:形状・基本設定
 --track@size:全体サイズ,10,10000,2000,1
