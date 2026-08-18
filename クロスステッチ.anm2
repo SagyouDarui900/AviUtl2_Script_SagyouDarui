@@ -1,0 +1,194 @@
+--label:画面効果
+--information:クロスステッチ・ハッチング
+--filter
+
+--group:パターン設定
+--select@param_mode:モード=0,クロスステッチ=0,クロスハッチング=1,ミックス=2
+--track@param_size:サイズ,2.0,100.0,10.0,0.1
+--track@param_thickness:線の太さ,1.0,20.0,1.0,0.1
+--track@param_angle:角度,-360.0,360.0,0.0,0.1
+--check@param_invert:反転/白黒化,0
+--group:
+
+--group:中心座標設定
+--track@param_cx:中心X,-2000.0,2000.0,0.0,0.1
+--track@param_cy:中心Y,-2000.0,2000.0,0.0,0.1
+--trackgroup@param_cx,param_cy:中心
+--group:
+
+obj.setanchor("param_cx,param_cy", 0, "line")
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@cross_pattern_ps:
+cbuffer Params : register(b0) {
+    float4 param_geom;   // x: size, y: thickness, z: cos_a, w: sin_a
+    float4 param_center; // xy: center_px, zw: resolution
+    float4 param_state;  // x: mode, y: invert, z: obj_alpha, w: unused
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float get_mod(float a, float b) {
+    return a - floor(a / b) * b;
+}
+
+float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 res = param_center.zw;
+    float2 pPos = uv * res;
+    float2 center = param_center.xy;
+
+    float c = param_geom.z;
+    float s = param_geom.w;
+    float2x2 rot = float2x2(c, -s, s, c);
+    float2x2 invRot = float2x2(c, s, -s, c);
+
+    // 中心基準のローカル座標
+    float2 localPos = mul(rot, pPos - center);
+
+    float sz = max(2.0, floor(param_geom.x));
+    float thick = max(1.0, floor(param_geom.y));
+    float mode = param_state.x;
+    float invert_flag = param_state.y;
+    float obj_alpha = param_state.z;
+
+    // -------------------------------------------------------------
+    // モード0: クロスステッチ
+    // -------------------------------------------------------------
+    if (mode < 0.5) {
+        float2 localCellPos = floor(localPos / sz) * sz;
+        int2 rem = (int2)floor(localPos - localCellPos);
+        bool isStitch = (abs(rem.x - rem.y) < thick) || (abs(rem.x - ((int)sz - 1 - rem.y)) < thick);
+
+        float2 localSamplePos = localCellPos + sz * 0.5;
+        float2 invSamplePos = mul(invRot, localSamplePos) + center;
+        float2 sampleUV = invSamplePos / res;
+
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float4 texColor = tex.Sample(samp, sampleUV);
+        if (texColor.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float3 straightRGB = texColor.rgb / texColor.a;
+        float3 stitchColor = saturate(straightRGB * 1.4);
+        float3 invertStitchColor = float3(0.2, 0.15, 0.05);
+
+        float3 outRGB = float3(0.0, 0.0, 0.0);
+        if (isStitch) {
+            outRGB = (invert_flag > 0.5) ? invertStitchColor : stitchColor;
+        } else {
+            outRGB = (invert_flag > 0.5) ? stitchColor : float3(0.0, 0.0, 0.0);
+        }
+
+        float finalA = texColor.a * obj_alpha;
+        return float4(outRGB * finalA, finalA);
+    }
+    // -------------------------------------------------------------
+    // モード1: クロスハッチング
+    // -------------------------------------------------------------
+    else if (mode < 1.5) {
+        float4 texColor = tex.Sample(samp, uv);
+        if (texColor.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float3 straightRGB = texColor.rgb / texColor.a;
+        float lum = dot(straightRGB, float3(0.2126, 0.7152, 0.0722));
+
+        float offset = sz * 0.5;
+        float line1 = get_mod(localPos.x + localPos.y, sz);
+        float line2 = get_mod(localPos.x - localPos.y, sz);
+        float line3 = get_mod(localPos.x + localPos.y - offset, sz);
+        float line4 = get_mod(localPos.x - localPos.y - offset, sz);
+
+        bool isHatch = false;
+        if (lum < 1.0 && line1 < thick) isHatch = true;
+        if (lum < 0.7 && line2 < thick) isHatch = true;
+        if (lum < 0.5 && line3 < thick) isHatch = true;
+        if (lum < 0.3 && line4 < thick) isHatch = true;
+
+        float3 outRGB = float3(0.0, 0.0, 0.0);
+        if (invert_flag > 0.5) {
+            outRGB = isHatch ? float3(0.0, 0.0, 0.0) : float3(1.0, 1.0, 1.0);
+        } else {
+            outRGB = isHatch ? float3(0.0, 0.0, 0.0) : straightRGB;
+        }
+
+        float finalA = texColor.a * obj_alpha;
+        return float4(outRGB * finalA, finalA);
+    }
+    // -------------------------------------------------------------
+    // モード2: ミックス
+    // -------------------------------------------------------------
+    else {
+        float2 localCellPos = floor(localPos / sz) * sz;
+        float2 localSamplePos = localCellPos + sz * 0.5;
+        float2 invSamplePos = mul(invRot, localSamplePos) + center;
+        float2 sampleUV = invSamplePos / res;
+
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float4 texColor = tex.Sample(samp, sampleUV);
+        if (texColor.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+
+        float3 straightRGB = texColor.rgb / texColor.a;
+        float lum = dot(straightRGB, float3(0.2126, 0.7152, 0.0722));
+
+        int2 rem = (int2)floor(localPos - localCellPos);
+        bool isStitch = (abs(rem.x - rem.y) < thick) || (abs(rem.x - ((int)sz - 1 - rem.y)) < thick);
+
+        float offset = sz * 0.5;
+        float line1 = get_mod(localPos.x + localPos.y, sz);
+        float line2 = get_mod(localPos.x - localPos.y, sz);
+        float line3 = get_mod(localPos.x + localPos.y - offset, sz);
+        float line4 = get_mod(localPos.x - localPos.y - offset, sz);
+
+        bool isHatch = false;
+        if (lum < 1.0 && line1 < thick) isHatch = true;
+        if (lum < 0.7 && line2 < thick) isHatch = true;
+        if (lum < 0.5 && line3 < thick) isHatch = true;
+        if (lum < 0.3 && line4 < thick) isHatch = true;
+
+        float3 stitchColor = saturate(straightRGB * 1.4);
+        float3 outRGB = float3(0.0, 0.0, 0.0);
+
+        if (isStitch) {
+            outRGB = (invert_flag > 0.5) ? float3(1.0, 1.0, 1.0) : stitchColor;
+            if (isHatch) {
+                outRGB = float3(0.0, 0.0, 0.0);
+            }
+        }
+
+        float finalA = texColor.a * obj_alpha;
+        return float4(outRGB * finalA, finalA);
+    }
+}
+]]
+
+do
+    local rad_val = math.rad(param_angle)
+    local cos_a = math.cos(rad_val)
+    local sin_a = math.sin(rad_val)
+
+    local w, h = obj.w, obj.h
+    local cx = w * 0.5 + param_cx
+    local cy = h * 0.5 + param_cy
+
+    obj.pixelshader(
+        "cross_pattern_ps",
+        "object",
+        { "object" },
+        {
+            param_size, param_thickness, cos_a, sin_a,
+            cx, cy, w, h,
+            param_mode, (param_invert == 1) and 1.0 or 0.0, obj.alpha, 0.0
+        },
+        "copy",
+        "clamp"
+    )
+end
