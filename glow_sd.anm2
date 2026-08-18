@@ -1,4 +1,5 @@
 --label:光効果
+--information:グロー_sd
 --filter
 
 --group:抽出・露出
@@ -29,211 +30,255 @@
 --select@blend_mode:合成モード=0,加算=0,スクリーン=1
 --group:
 
+if obj.w <= 0 or obj.h <= 0 or radius <= 0 then
+    return
+end
+
 --[[pixelshader@extract_ps:
-struct Constants {
-    float threshold;
-    float smooth_val;
-    float exposure;
-    float highlight;
+cbuffer Params : register(b0) {
+    float4 param_extract; // x: threshold, y: smooth_val, z: exposure, w: highlight
 };
-cbuffer constants : register(b0) { Constants constants; }
+
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
-float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
+float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 col = srcTex.Sample(srcSmp, uv);
-    float luma = max(max(col.r, col.g), col.b);
-    if (luma <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
-    
-    float t = constants.threshold;
-    float s = max(0.001, constants.smooth_val);
+    if (col.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Straight RGB に変換して知覚輝度を計算
+    float3 straight_rgb = col.rgb / col.a;
+    float luma = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722));
+
+    float t = param_extract.x;
+    float s = max(0.001, param_extract.y);
     float weight = smoothstep(t - s, t + s, luma);
-    
-    float3 out_rgb = col.rgb * weight * constants.exposure * constants.highlight;
-    return float4(out_rgb, col.a * weight * constants.exposure);
+
+    float exp_val = param_extract.z;
+    float hl_val = param_extract.w;
+
+    float3 out_rgb = col.rgb * (weight * exp_val * hl_val);
+    float out_a = col.a * (weight * exp_val);
+
+    return float4(out_rgb, out_a);
 }
 ]]
 
 --[[pixelshader@downsample_ps:
-struct Constants {
-    float inv_w;
-    float inv_h;
-    float spread;
-    float dummy;
+cbuffer Params : register(b0) {
+    float4 param_down; // xy: inv_res, z: spread, w: unused
 };
-cbuffer constants : register(b0) { Constants constants; }
+
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
-float4 downsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
-    float2 halfpixel = float2(constants.inv_w, constants.inv_h) * constants.spread * 0.5;
+float4 downsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 halfpixel = param_down.xy * (param_down.z * 0.5);
+    
+    // 13-tap ダウンサンプリング
     float4 sum = srcTex.Sample(srcSmp, uv) * 4.0;
     sum += srcTex.Sample(srcSmp, uv - halfpixel);
     sum += srcTex.Sample(srcSmp, uv + halfpixel);
     sum += srcTex.Sample(srcSmp, uv + float2(halfpixel.x, -halfpixel.y));
     sum += srcTex.Sample(srcSmp, uv - float2(halfpixel.x, -halfpixel.y));
-    return sum / 8.0;
+
+    return sum * 0.125;
 }
 ]]
 
 --[[pixelshader@upsample_ps:
-struct Constants {
-    float inv_w;
-    float inv_h;
-    float spread;
-    float weight;
-    float rad_r;
-    float rad_g;
-    float rad_b;
-    float dummy;
+cbuffer Params : register(b0) {
+    float4 param_up;    // xy: inv_res, z: spread, w: weight
+    float4 param_color; // rgb: color_weight, w: unused
 };
-cbuffer constants : register(b0) { Constants constants; }
+
 Texture2D srcTex : register(t0);
 Texture2D accumTex : register(t1);
 SamplerState srcSmp : register(s0);
 
-float4 upsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
-    float2 halfpixel = float2(constants.inv_w, constants.inv_h) * constants.spread * 0.5;
-    
+float4 upsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 halfpixel = param_up.xy * (param_up.z * 0.5);
+
+    // 9-tap テントフィルタ アップサンプリング
     float4 sum = srcTex.Sample(srcSmp, uv) * 4.0;
     sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x * 2.0, 0.0));
-    sum += srcTex.Sample(srcSmp, uv + float2(halfpixel.x * 2.0, 0.0));
-    sum += srcTex.Sample(srcSmp, uv + float2(0.0, halfpixel.y * 2.0));
+    sum += srcTex.Sample(srcSmp, uv + float2( halfpixel.x * 2.0, 0.0));
+    sum += srcTex.Sample(srcSmp, uv + float2(0.0,  halfpixel.y * 2.0));
     sum += srcTex.Sample(srcSmp, uv + float2(0.0, -halfpixel.y * 2.0));
-    sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x, halfpixel.y)) * 2.0;
-    sum += srcTex.Sample(srcSmp, uv + float2(halfpixel.x, halfpixel.y)) * 2.0;
-    sum += srcTex.Sample(srcSmp, uv + float2(halfpixel.x, -halfpixel.y)) * 2.0;
+    sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x,  halfpixel.y)) * 2.0;
+    sum += srcTex.Sample(srcSmp, uv + float2( halfpixel.x,  halfpixel.y)) * 2.0;
+    sum += srcTex.Sample(srcSmp, uv + float2( halfpixel.x, -halfpixel.y)) * 2.0;
     sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x, -halfpixel.y)) * 2.0;
-    
-    float4 blur = sum / 16.0;
-    float3 color_weight = float3(constants.rad_r, constants.rad_g, constants.rad_b) * constants.weight;
-    blur.rgb *= color_weight;
-    blur.a *= constants.weight;
-    
+
+    float4 blur = sum * 0.0625;
+    float3 color_w = param_color.rgb * param_up.w;
+    blur.rgb *= color_w;
+    blur.a *= param_up.w;
+
     float4 acc = accumTex.Sample(srcSmp, uv);
     return blur + acc;
 }
 ]]
 
 --[[pixelshader@composite_ps:
-struct Constants {
-    float intensity;
-    float tone_map;
-    float blend_mode;
-    float dummy;
+cbuffer Params : register(b0) {
+    float4 param_comp; // x: intensity, y: tone_map, z: blend_mode, w: obj_alpha
 };
-cbuffer constants : register(b0) { Constants constants; }
+
 Texture2D origTex : register(t0);
 Texture2D bloomTex : register(t1);
 SamplerState srcSmp : register(s0);
 
 float3 ACESFilm(float3 x) {
-    float a = 2.51f;
-    float b = 0.03f;
-    float c = 2.43f;
-    float d = 0.59f;
-    float e = 0.14f;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
-float3 safe_screen(float3 a, float3 b) {
-    float3 clamp_a = min(a, 1.0);
-    float3 clamp_b = min(b, 1.0);
-    return a + b - clamp_a * clamp_b;
-}
-
-float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
+float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 orig = origTex.Sample(srcSmp, uv);
     float4 bloom = bloomTex.Sample(srcSmp, uv);
-    
-    float3 bloom_rgb = bloom.rgb * constants.intensity;
+
+    float3 bloom_rgb = bloom.rgb * param_comp.x;
     float3 out_rgb;
-    
-    if (constants.blend_mode > 0.5) {
-        out_rgb = safe_screen(orig.rgb, bloom_rgb);
+
+    if (param_comp.z > 0.5) {
+        // スクリーン合成
+        float3 c_orig = min(orig.rgb, 1.0);
+        float3 c_bloom = min(bloom_rgb, 1.0);
+        out_rgb = orig.rgb + bloom_rgb - (c_orig * c_bloom);
     } else {
+        // 加算合成
         out_rgb = orig.rgb + bloom_rgb;
     }
-    
-    if (constants.tone_map == 1.0) {
+
+    if (param_comp.y == 1.0) {
         out_rgb = ACESFilm(out_rgb);
-    } else if (constants.tone_map == 2.0) {
+    } else if (param_comp.y == 2.0) {
         out_rgb = out_rgb / (1.0 + out_rgb);
     }
-    
-    float a = min(1.0, orig.a + bloom.a * constants.intensity);
-    return float4(out_rgb, a);
+
+    float out_a = min(1.0, orig.a + bloom.a * param_comp.x) * param_comp.w;
+    return float4(out_rgb * param_comp.w, out_a);
 }
 ]]
 
-local max_passes = 8
-local raw_passes = math.floor(math.log(math.max(1, radius)) / math.log(2.0))
-local passes = math.max(0, math.min(max_passes, raw_passes))
+do
+    local floor = math.floor
+    local log = math.log
+    local max = math.max
+    local min = math.min
+    local sqrt = math.sqrt
 
-if passes > 0 then
-    local obj_id = obj.id or 0
-    local eff_id = obj.effect_id or 0
-    local pre = "glow_sd_" .. tostring(obj_id) .. "_" .. tostring(eff_id) .. "_"
-    local w, h = obj.w, obj.h
-    
-    obj.setoption("drawtarget", "tempbuffer", w, h)
-    obj.pixelshader("extract_ps", "tempbuffer", {"object"}, {threshold, smooth_val, exposure, highlight}, "copy", "clamp")
-    obj.copybuffer("cache:" .. pre .. "d_0", "tempbuffer")
-    
-    local widths = {[0] = w}
-    local heights = {[0] = h}
-    local actual_passes = 0
-    
-    for i = 1, passes do
-        local next_w = math.max(1, math.floor(widths[i-1] / 2))
-        local next_h = math.max(1, math.floor(heights[i-1] / 2))
-        
-        if next_w < 2 and next_h < 2 then
-            break
-        end
-        
-        widths[i] = next_w
-        heights[i] = next_h
-        actual_passes = i
-        
-        obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
-        local cb_down = {1.0 / widths[i-1], 1.0 / heights[i-1], spread, 0.0}
-        obj.pixelshader("downsample_ps", "tempbuffer", {"cache:" .. pre .. "d_" .. (i-1)}, cb_down, "copy", "clamp")
-        obj.copybuffer("cache:" .. pre .. "d_" .. i, "tempbuffer")
-    end
-    
-    if actual_passes > 0 then
-        obj.copybuffer("cache:" .. pre .. "accum", "cache:" .. pre .. "d_" .. actual_passes)
-        
-        for i = actual_passes - 1, 0, -1 do
-            obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
-            
-            local depth_val = i + 1.0
-            local step_weight = 1.0
-            if falloff > 0.0 then
-                step_weight = 1.0 / math.max(0.001, depth_val ^ falloff)
-            end
-            if core_boost > 0.0 then
-                if i == 0 then step_weight = step_weight + core_boost end
-                if i == 1 then step_weight = step_weight + (core_boost * 0.5) end
-                if i == 2 then step_weight = step_weight + (core_boost * 0.25) end
-            end
-            
-            local cb_up = {1.0 / widths[i+1], 1.0 / heights[i+1], spread, step_weight, rad_r, rad_g, rad_b, 0.0}
-            obj.pixelshader("upsample_ps", "tempbuffer", {"cache:" .. pre .. "d_" .. i, "cache:" .. pre .. "accum"}, cb_up, "copy", "clamp")
-            obj.copybuffer("cache:" .. pre .. "accum", "tempbuffer")
-        end
-        
-        local tm = tone_map or 0
-        local bm = blend_mode or 0
-        local norm_factor = 1.0
-        if normalize == 1 or normalize == true then
-            norm_factor = 1.0 / math.max(1.0, math.sqrt(actual_passes))
-        end
-        local inten = (intensity or 1.0) * norm_factor
-        
+    local max_passes = 8
+    local raw_passes = floor(log(max(1, radius)) / log(2.0))
+    local passes = max(0, min(max_passes, raw_passes))
+
+    if passes > 0 then
+        local w = obj.w
+        local h = obj.h
+
+        -- 1. 輝度抽出パス
         obj.setoption("drawtarget", "tempbuffer", w, h)
-        obj.pixelshader("composite_ps", "tempbuffer", {"object", "cache:" .. pre .. "accum"}, {inten, tm, bm, 0.0}, "copy", "clamp")
-        obj.copybuffer("object", "tempbuffer")
+        obj.pixelshader(
+            "extract_ps",
+            "tempbuffer",
+            { "object" },
+            { threshold, smooth_val, exposure, highlight },
+            "copy",
+            "clamp"
+        )
+        obj.copybuffer("cache:bloom_d0", "tempbuffer")
+
+        local widths = { [0] = w }
+        local heights = { [0] = h }
+        local actual_passes = 0
+
+        -- 2. ダウンサンプリングループ
+        for i = 1, passes do
+            local next_w = max(1, floor(widths[i - 1] * 0.5))
+            local next_h = max(1, floor(heights[i - 1] * 0.5))
+
+            if next_w < 2 and next_h < 2 then
+                break
+            end
+
+            widths[i] = next_w
+            heights[i] = next_h
+            actual_passes = i
+
+            obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
+            obj.pixelshader(
+                "downsample_ps",
+                "tempbuffer",
+                { "cache:bloom_d" .. (i - 1) },
+                { 1.0 / widths[i - 1], 1.0 / heights[i - 1], spread, 0.0 },
+                "copy",
+                "clamp"
+            )
+            obj.copybuffer("cache:bloom_d" .. i, "tempbuffer")
+        end
+
+        -- 3. アップサンプリング＆合成ループ
+        if actual_passes > 0 then
+            obj.copybuffer("cache:bloom_accum", "cache:bloom_d" .. actual_passes)
+
+            for i = actual_passes - 1, 0, -1 do
+                obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
+
+                local depth_val = i + 1.0
+                local step_weight = 1.0
+                if falloff > 0.0 then
+                    step_weight = 1.0 / max(0.001, depth_val ^ falloff)
+                end
+
+                if core_boost > 0.0 then
+                    if i == 0 then
+                        step_weight = step_weight + core_boost
+                    elseif i == 1 then
+                        step_weight = step_weight + (core_boost * 0.5)
+                    elseif i == 2 then
+                        step_weight = step_weight + (core_boost * 0.25)
+                    end
+                end
+
+                obj.pixelshader(
+                    "upsample_ps",
+                    "tempbuffer",
+                    { "cache:bloom_d" .. i, "cache:bloom_accum" },
+                    {
+                        1.0 / widths[i + 1], 1.0 / heights[i + 1], spread, step_weight,
+                        rad_r, rad_g, rad_b, 0.0
+                    },
+                    "copy",
+                    "clamp"
+                )
+                obj.copybuffer("cache:bloom_accum", "tempbuffer")
+            end
+
+            local norm_factor = 1.0
+            if normalize == 1 then
+                norm_factor = 1.0 / max(1.0, sqrt(actual_passes))
+            end
+            local final_intensity = intensity * norm_factor
+
+            -- 4. 元画像との最終コンポジット
+            obj.setoption("drawtarget", "tempbuffer", w, h)
+            obj.pixelshader(
+                "composite_ps",
+                "tempbuffer",
+                { "object", "cache:bloom_accum" },
+                { final_intensity, tone_map, blend_mode, obj.alpha },
+                "copy",
+                "clamp"
+            )
+            obj.copybuffer("object", "tempbuffer")
+            obj.setoption("drawtarget", "framebuffer")
+        end
     end
 end
