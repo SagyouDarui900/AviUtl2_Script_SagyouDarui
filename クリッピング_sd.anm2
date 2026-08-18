@@ -1,122 +1,148 @@
 --label:クリッピング
---separator:上方向
---track@clip_top:上::クリッピング(%),0,100,0,0.1
---track@angle_top:上角度::角度,-360,360,0,0.1
---separator:下方向
---track@clip_bottom:下::クリッピング(%),0,100,0,0.1
---track@angle_bottom:下角度::角度,-360,360,0,0.1
+--filter
+
+--group:上方向設定
+--track@clip_top:上::クリッピング(%),0.0,100.0,0.0,0.1
+--track@angle_top:上角度::角度,-360.0,360.0,0.0,0.1
+--group:
+
+--group:下方向設定
 --check@sync_tb:上下同期(下を上に),0
---separator:左方向
---track@clip_left:左::クリッピング(%),0,100,0,0.1
---track@angle_left:左角度::角度,-360,360,0,0.1
---separator:右方向
---track@clip_right:右::クリッピング(%),0,100,0,0.1
---track@angle_right:右角度::角度,-360,360,0,0.1
+--track@clip_bottom:下::クリッピング(%),0.0,100.0,0.0,0.1
+--track@angle_bottom:下角度::角度,-360.0,360.0,0.0,0.1
+--hide@clip_bottom:sync_tb==1
+--hide@angle_bottom:sync_tb==1
+--group:
+
+--group:左方向設定
+--track@clip_left:左::クリッピング(%),0.0,100.0,0.0,0.1
+--track@angle_left:左角度::角度,-360.0,360.0,0.0,0.1
+--group:
+
+--group:右方向設定
 --check@sync_lr:左右同期(右を左に),0
+--track@clip_right:右::クリッピング(%),0.0,100.0,0.0,0.1
+--track@angle_right:右角度::角度,-360.0,360.0,0.0,0.1
+--hide@clip_right:sync_lr==1
+--hide@angle_right:sync_lr==1
+--group:
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+local c_top = clip_top
+local a_top = angle_top
+local c_bottom = (sync_tb == 1) and c_top or clip_bottom
+local a_bottom = (sync_tb == 1) and a_top or angle_bottom
+
+local c_left = clip_left
+local a_left = angle_left
+local c_right = (sync_lr == 1) and c_left or clip_right
+local a_right = (sync_lr == 1) and a_left or angle_right
+
+-- 全クリッピングが無効な場合は処理をスキップ
+if c_top <= 0.0 and c_bottom <= 0.0 and c_left <= 0.0 and c_right <= 0.0 then
+    return
+end
 
 --[[pixelshader@clipping_sd_ps:
+cbuffer Params : register(b0) {
+    float4 plane_top;    // xy: normal, z: dist_threshold, w: is_active
+    float4 plane_bottom; // xy: normal, z: dist_threshold, w: is_active
+    float4 plane_left;   // xy: normal, z: dist_threshold, w: is_active
+    float4 plane_right;  // xy: normal, z: dist_threshold, w: is_active
+    float4 render_size;  // xy: obj_size, zw: unused
+};
+
 Texture2D t0 : register(t0);
 SamplerState s0 : register(s0);
 
-// ==========================================
-// 定数バッファの定義 (Lua側から渡される値)
-// ==========================================
-cbuffer b0 : register(b0) {
-    float4 clip_amounts; // x: 上, y: 下, z: 左, w: 右 (0.0 ～ 1.0の正規化値)
-    float4 angles;       // x: 上, y: 下, z: 左, w: 右 (ラジアン角)
-    float2 obj_size;     // x: 幅(ピクセル), y: 高さ(ピクセル)
+float clip_plane(float2 p, float4 plane) {
+    if (plane.w < 0.5) return 1.0;
+    
+    // 法線方向の距離計算
+    float d = dot(p, plane.xy) - plane.z;
+    float fw = max(fwidth(d), 0.0001);
+    return 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
 }
 
 float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 color = t0.Sample(s0, uv);
-    
-    // 完全に透明なピクセルの場合は計算をスキップ (GPU最適化)
-    if (color.a == 0.0) return color;
+    if (color.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
 
-    float w = obj_size.x;
-    float h = obj_size.y;
-    
-    // UV座標(0.0~1.0)を、中心を原点(0,0)としたピクセル単位のローカル座標へ変換
-    float2 p = float2((uv.x - 0.5) * w, (uv.y - 0.5) * h);
-    
+    // 中心原点のローカルピクセル座標
+    float2 p = (uv - 0.5) * render_size.xy;
+
     float alpha_mult = 1.0;
-    
-    // ==========================================
-    // 上辺のクリッピング
-    // ==========================================
-    // 回転の基準点 (上端から指定パーセント下がった位置の中央)
-    float2 p_top = float2(0.0, -h * 0.5 + h * clip_amounts.x);
-    // 法線ベクトル (削られる方向を向く。角度に応じて回転させる)
-    float2 n_top = float2(sin(angles.x), -cos(angles.x));
-    // SDF(符号付き距離関数)を利用して、ピクセル境界に滑らかなアンチエイリアスを適用
-    alpha_mult *= saturate(0.5 - dot(p - p_top, n_top));
-    
-    // ==========================================
-    // 下辺のクリッピング
-    // ==========================================
-    float2 p_bottom = float2(0.0, h * 0.5 - h * clip_amounts.y);
-    float2 n_bottom = float2(-sin(angles.y), cos(angles.y));
-    alpha_mult *= saturate(0.5 - dot(p - p_bottom, n_bottom));
-    
-    // ==========================================
-    // 左辺のクリッピング
-    // ==========================================
-    float2 p_left = float2(-w * 0.5 + w * clip_amounts.z, 0.0);
-    float2 n_left = float2(-cos(angles.z), -sin(angles.z));
-    alpha_mult *= saturate(0.5 - dot(p - p_left, n_left));
-    
-    // ==========================================
-    // 右辺のクリッピング
-    // ==========================================
-    float2 p_right = float2(w * 0.5 - w * clip_amounts.w, 0.0);
-    float2 n_right = float2(cos(angles.w), sin(angles.w));
-    alpha_mult *= saturate(0.5 - dot(p - p_right, n_right));
-    
-    // AviUtl2は乗算済みアルファ(Premultiplied Alpha)空間のため、RGBとAの両方に同じ倍率を乗算する
+    alpha_mult *= clip_plane(p, plane_top);
+    alpha_mult *= clip_plane(p, plane_bottom);
+    alpha_mult *= clip_plane(p, plane_left);
+    alpha_mult *= clip_plane(p, plane_right);
+
+    if (alpha_mult <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Premultiplied Alpha 適用
     return color * alpha_mult;
 }
 ]]
 
--- ==========================================
--- ユーザー設定値の取得と加工
--- ==========================================
--- グローバル空間を汚染しないよう、ローカル変数へ格納する
-local c_top    = clip_top
-local c_bottom = clip_bottom
-local c_left   = clip_left
-local c_right  = clip_right
+do
+    local rad = math.rad
+    local sin = math.sin
+    local cos = math.cos
 
-local a_top    = angle_top
-local a_bottom = angle_bottom
-local a_left   = angle_left
-local a_right  = angle_right
+    local w = obj.w
+    local h = obj.h
 
--- 同期オプションの処理
--- (デフォルトを0に設定しているため、チェックボックスON時は1が代入される)
-if sync_tb == 1 then
-    c_bottom = c_top
-    a_bottom = a_top
+    -- 1. 上辺プレーン (法線, 距離閾値, 有効フラグ)
+    local rad_t = rad(a_top)
+    local n_top_x = sin(rad_t)
+    local n_top_y = -cos(rad_t)
+    local p_top_y = -h * 0.5 + h * (c_top * 0.01)
+    local d_top = p_top_y * n_top_y
+    local act_t = (c_top > 0.0 or a_top ~= 0.0) and 1.0 or 0.0
+
+    -- 2. 下辺プレーン
+    local rad_b = rad(a_bottom)
+    local n_bot_x = -sin(rad_b)
+    local n_bot_y = cos(rad_b)
+    local p_bot_y = h * 0.5 - h * (c_bottom * 0.01)
+    local d_bot = p_bot_y * n_bot_y
+    local act_b = (c_bottom > 0.0 or a_bottom ~= 0.0) and 1.0 or 0.0
+
+    -- 3. 左辺プレーン
+    local rad_l = rad(a_left)
+    local n_left_x = -cos(rad_l)
+    local n_left_y = -sin(rad_l)
+    local p_left_x = -w * 0.5 + w * (c_left * 0.01)
+    local d_left = p_left_x * n_left_x
+    local act_l = (c_left > 0.0 or a_left ~= 0.0) and 1.0 or 0.0
+
+    -- 4. 右辺プレーン
+    local rad_r = rad(a_right)
+    local n_right_x = cos(rad_r)
+    local n_right_y = sin(rad_r)
+    local p_right_x = w * 0.5 - w * (c_right * 0.01)
+    local d_right = p_right_x * n_right_x
+    local act_r = (c_right > 0.0 or a_right ~= 0.0) and 1.0 or 0.0
+
+    obj.pixelshader(
+        "clipping_sd_ps",
+        "object",
+        { "object" },
+        {
+            n_top_x, n_top_y, d_top, act_t,
+            n_bot_x, n_bot_y, d_bot, act_b,
+            n_left_x, n_left_y, d_left, act_l,
+            n_right_x, n_right_y, d_right, act_r,
+            w, h, 0.0, 0.0
+        },
+        "copy",
+        "clamp"
+    )
 end
-
-if sync_lr == 1 then
-    c_right = c_left
-    a_right = a_left
-end
-
--- 高速化のため、頻出する関数とオブジェクト情報をローカル変数へ
-local math_rad = math.rad
-local w, h = obj.w, obj.h
-
--- ピクセルシェーダー(HLSL)の定数バッファ(cbuffer)に渡す配列データを作成
--- ※cbufferの16バイト(float4)アライメント規則に合わせるため、末尾に0.0のダミー値(パディング)を追加
-local constants = {
-    c_top / 100.0, c_bottom / 100.0, c_left / 100.0, c_right / 100.0, -- clip_amounts (float4)
-    math_rad(a_top), math_rad(a_bottom), math_rad(a_left), math_rad(a_right), -- angles (float4)
-    w, h, 0.0, 0.0 -- obj_size (float2) + アライメント用パディング(float2)
-}
-
--- ==========================================
--- 描画処理 (GPUオフロード)
--- ==========================================
--- "object" を対象として、自身のテクスチャを読み込み、ピクセルシェーダーで書き換える
-obj.pixelshader("clipping_sd_ps", "object", {"object"}, constants)
