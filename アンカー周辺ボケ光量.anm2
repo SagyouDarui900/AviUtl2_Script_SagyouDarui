@@ -1,0 +1,128 @@
+--label:ぼかし
+--filter
+--information:アンカー周辺ボケ光量
+
+--group:中心座標,true
+--track@center_x:中心X,-4000,4000,0,1
+--track@center_y:中心Y,-4000,4000,0,1
+--trackgroup@center_x,center_y:中心座標
+--value@anchor_pos:画面操作アンカー,{}
+--group:
+
+--group:範囲・ぼかし設定,true
+--track@size:サイズ,0,2000,300,1
+--track@feather:境界のぼかし,0,100,50,1
+--track@blur_max:ぼかし,0,200,30,1
+--track@curve:減衰カーブ,0.1,5.0,2.0,0.1
+--group:
+
+--group:光量・色設定,true
+--track@light:光量,0,200,50,1
+--color@light_color:光の色,0xffffff
+--group:
+
+if (blur_max <= 0 and light <= 0) or obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@peripheral_blur_ps:
+    cbuffer params : register(b0) {
+        float4 p_anchor; // xy: anchor (px), zw: inv_dim (1/w, 1/h)
+        float4 p_geom;   // x: inner_radius, y: outer_radius, z: blur_max, w: curve
+        float4 p_color;  // xyz: light_color * light_intensity (0-1), w: light_intensity
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float rand(float2 co) {
+        return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
+    }
+
+    float4 peripheral_blur_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        // 画像中心(0,0)基準のピクセル座標
+        float2 coord = (uv - 0.5) * (1.0 / p_anchor.zw);
+        float dist = length(coord - p_anchor.xy);
+
+        // 中心から周辺への強度計算
+        float normalized_dist = smoothstep(p_geom.x, p_geom.y, dist);
+        float strength = pow(normalized_dist, p_geom.w);
+        float current_blur = strength * p_geom.z;
+
+        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+
+        if (current_blur <= 0.5) {
+            float4 samp_col = tex.SampleLevel(samp, uv, 0);
+            float safe_a = max(samp_col.a, 0.00001);
+            sum = float4(samp_col.rgb / safe_a, samp_col.a);
+        } else {
+            // フィボナッチ・スパイラルサンプリング (64タップ)
+            const int SAMPLES = 64;
+            const float golden_angle = 2.39996323;
+            float noise = rand(uv) * 6.2831853;
+            float total_weight = 0.0;
+
+            [loop]
+            for (int i = 0; i < SAMPLES; i++) {
+                float r = sqrt(((float)i + 0.5) * (1.0 / (float)SAMPLES));
+                float theta = (float)i * golden_angle + noise;
+
+                float2 offset = float2(cos(theta), sin(theta)) * (r * current_blur);
+                float2 sample_uv = saturate(uv + offset * p_anchor.zw);
+
+                float weight = exp(-3.0 * r * r);
+                float4 samp_col = tex.SampleLevel(samp, sample_uv, 0);
+
+                float safe_a = max(samp_col.a, 0.00001);
+                float3 straight_rgb = samp_col.rgb / safe_a;
+
+                sum += float4(straight_rgb, samp_col.a) * weight;
+                total_weight += weight;
+            }
+            sum /= max(total_weight, 0.00001);
+        }
+
+        // 光量（ビネット）の加算
+        float3 vignette = p_color.rgb * strength;
+        float3 out_rgb = sum.rgb + vignette;
+
+        // Premultiplied Alpha で出力
+        return float4(out_rgb * sum.a, sum.a);
+    }
+]]
+
+obj.setanchor("anchor_pos", 1, "line", "color", 0xffc800)
+
+local cx = center_x
+local cy = center_y
+if anchor_pos and #anchor_pos >= 2 then
+    cx = cx + (anchor_pos[1] or 0)
+    cy = cy + (anchor_pos[2] or 0)
+end
+
+local f_val = feather * 0.01
+local max_dist = math.max(obj.w, obj.h) * 0.7
+local inner_radius = size * (1.0 - f_val * 0.8)
+local outer_radius = size + max_dist * (0.2 + f_val * 1.5)
+
+local r, g, b = RGB(light_color)
+local light_scale = light * 0.01
+
+local constants = {
+    cx,
+    cy,
+    1.0 / obj.w,
+    1.0 / obj.h,
+
+    inner_radius,
+    outer_radius,
+    blur_max,
+    curve,
+
+    (r / 255.0) * light_scale,
+    (g / 255.0) * light_scale,
+    (b / 255.0) * light_scale,
+    light_scale
+}
+
+obj.pixelshader("peripheral_blur_ps", "object", {"object"}, constants, "copy", "clamp")
