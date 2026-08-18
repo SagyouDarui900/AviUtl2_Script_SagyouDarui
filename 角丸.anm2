@@ -1,0 +1,79 @@
+--label:クリッピング
+--information:角丸クリッピング
+--filter
+
+--group:クリッピング設定
+--track@radius:丸み,0,2000,50,1
+--check@invert:反転,0
+--group:
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+-- 丸みが0以下の場合はシェーダーを実行せず即時終了
+if radius <= 0 then
+    if invert == 1 then
+        obj.alpha = 0
+    end
+    return
+end
+
+--[[pixelshader@round_corner_ps:
+cbuffer Params : register(b0) {
+    float4 param_geom; // xy: half_size, z: clamped_radius, w: invert_flag
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 round_corner_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 color = tex.Sample(samp, uv);
+    if (color.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    float2 half_size = param_geom.xy;
+    float r = param_geom.z;
+    float invert_flag = param_geom.w;
+
+    float2 p = abs(uv * (half_size * 2.0) - half_size);
+    
+    // 符号付き距離関数 (SDF) の計算
+    float2 d = p - half_size + r;
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+
+    // ピクセル空間適応型アンチエイリアス
+    float fw = max(fwidth(dist), 0.0001);
+    float alpha_mult = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, dist);
+
+    if (invert_flag > 0.5) {
+        alpha_mult = 1.0 - alpha_mult;
+    }
+
+    if (alpha_mult <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Premultiplied Alpha 適用
+    return color * alpha_mult;
+}
+]]
+
+do
+    local half_w = obj.w * 0.5
+    local half_h = obj.h * 0.5
+    local max_r = (half_w < half_h) and half_w or half_h
+    local clamped_r = (radius < max_r) and radius or max_r
+
+    obj.pixelshader(
+        "round_corner_ps",
+        "object",
+        { "object" },
+        {
+            half_w, half_h, clamped_r, (invert == 1) and 1.0 or 0.0
+        },
+        "copy",
+        "clamp"
+    )
+end
