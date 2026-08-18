@@ -1,0 +1,94 @@
+--label:カスタムオブジェクト
+--information:アイリスアウト
+
+--group:トランジション設定
+--track@rate_val:進捗(%),0,100,0,0.1
+--track@blur_val:ぼかし,0,100,5,0.1
+--check@reverse:反転,0
+--group:
+
+--group:位置・配色設定
+--value@pos:中心,{0,0}
+--color@bg_color:背景色,0x000000
+--group:
+
+obj.setanchor("pos", 1, "line")
+
+--[[pixelshader@iris_out_obj:
+cbuffer Params : register(b0) {
+    float4 shape_param; // x: rate, y: aspect, z: center_u, w: center_v
+    float4 edge_param;  // x: blur_amt, y: max_dist, zw: unused
+    float4 bg_color;    // rgb: col * alpha, a: alpha
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 iris_out_obj(float4 pos_sv : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 col = tex.Sample(samp, uv);
+    
+    // 中心からのアスペクト比補正済み距離
+    float2 p = uv - shape_param.zw;
+    p.x *= shape_param.y;
+    float dist = length(p);
+    
+    float rate = shape_param.x;
+    float max_dist = edge_param.y;
+    float blur_amt = edge_param.x;
+    
+    // 現在の開口半径
+    float current_r = (1.0 - rate) * (max_dist + blur_amt * 2.0) - blur_amt;
+    
+    // 境界のアンチエイリアス幅を確保
+    float fw = max(fwidth(dist), 0.0001);
+    float half_blur = max(blur_amt, fw * 0.5);
+    
+    // 円の内側: 0.0 (透明) / 外側: 1.0 (背景色)
+    float mask = smoothstep(current_r - half_blur, current_r + half_blur, dist);
+    
+    // 乗算済みアルファによるブレンド
+    float4 over_col = bg_color * mask;
+    return over_col + col * (1.0 - over_col.a);
+}
+]]
+
+local rate = rate_val * 0.01
+if reverse == 1 then
+    rate = 1.0 - rate
+end
+
+local screen_w = (obj.screen_w and obj.screen_w > 0) and obj.screen_w or 1920
+local screen_h = (obj.screen_h and obj.screen_h > 0) and obj.screen_h or 1080
+local aspect = screen_w / screen_h
+
+local anchor_x = (type(pos) == "table" and pos[1]) and pos[1] or 0
+local anchor_y = (type(pos) == "table" and pos[2]) and pos[2] or 0
+
+local center_u = 0.5 + ((anchor_x + obj.x + obj.ox) / screen_w)
+local center_v = 0.5 + ((anchor_y + obj.y + obj.oy) / screen_h)
+
+-- 画面四隅のうち中心から最も遠い距離をCPU側で算出
+local du = math.max(center_u, 1.0 - center_u) * aspect
+local dv = math.max(center_v, 1.0 - center_v)
+local max_dist = math.sqrt(du * du + dv * dv)
+
+local blur_amt = (blur_val * 0.01) * 0.5
+
+local obj_alpha = obj.alpha
+local r, g, b = RGB(bg_color)
+local c_r = (r / 255.0) * obj_alpha
+local c_g = (g / 255.0) * obj_alpha
+local c_b = (b / 255.0) * obj_alpha
+
+obj.pixelshader(
+    "iris_out_obj",
+    "framebuffer",
+    { "framebuffer" },
+    {
+        rate, aspect, center_u, center_v,
+        blur_amt, max_dist, 0.0, 0.0,
+        c_r, c_g, c_b, obj_alpha
+    },
+    "copy",
+    "clamp"
+)

@@ -1,0 +1,238 @@
+--label:アニメーション効果
+--information:アンカーを中心に公転・自転するアニメーション効果
+
+--group:公転設定
+--select@speed_mode:速度指定=0,角度/秒=0,BPM同期=1
+--track@speed:公転速度[deg/s],-3600,3600,90,1
+--track@bpm:BPM,1,1000,120,0.1
+--track@beat:1周の拍数,0.1,256,4,0.1
+--track@angle:初期角度,-360,360,0,1
+--track@distance:距離調整,-2000,2000,0,1
+--select@dir:回転方向=0,時計回り(右)=0,反時計回り(左)=1
+--select@shape:軌道形状=0,円=0,正方形=1
+--track@orbit_angle:軌道の傾き,-360,360,0,1
+--hide@speed:speed_mode==1
+--hide@bpm:speed_mode==0
+--hide@beat:speed_mode==0
+
+--group:本体設定
+--track@spin:自転速度[deg/s],-3600,3600,0,1
+--track@obj_scale:本体拡大率[%],0,1000,100,1
+--select@obj_anchor:基準点=4,左上=0,上中=1,右上=2,中左=3,中央=4,中右=5,左下=6,下中=7,右下=8
+--check@sync_rot:公転に同期,false
+--value@center_pos:中心座標,{0, 0}
+
+--group:軌跡の表示設定,false
+--select@orbit_mode:軌跡モード=0,なし=0,残像スタンプ=1,実線=2
+--color@orbit_color:線の色,0xffffff
+--track@orbit_width:線の太さ,1,100,4,1
+--track@orbit_alpha:軌跡の不透明度[%],0,100,50,1
+--group:
+
+local math = math
+local rad, cos, sin = math.rad, math.cos, math.sin
+local abs, max, sqrt, atan2, floor = math.abs, math.max, math.sqrt, math.atan2, math.floor
+
+-----------------------------------------------------------
+-- 1. オブジェクトの基準点オフセット算出
+-----------------------------------------------------------
+local hw = (obj.w or 0) * 0.5
+local hh = (obj.h or 0) * 0.5
+
+-- 基準点インデックス(0~8)からオフセットを算術計算
+local cx_ofs = (obj_anchor % 3 - 1) * hw
+local cy_ofs = (floor(obj_anchor / 3) - 1) * hh
+
+local scale_factor = obj_scale * 0.01
+local zx = (obj.zoom or 1.0) * (obj.sx or 1.0) * scale_factor
+local zy = (obj.zoom or 1.0) * (obj.sy or 1.0) * scale_factor
+
+if obj.aspect then
+    if obj.aspect > 0 then
+        zy = zy * (1.0 - obj.aspect)
+    elseif obj.aspect < 0 then
+        zx = zx * (1.0 + obj.aspect)
+    end
+end
+
+local ofs_x = cx_ofs * zx
+local ofs_y = cy_ofs * zy
+
+local original_rz = obj.rz or 0
+local r_rad = rad(original_rz)
+local r_cos = cos(r_rad)
+local r_sin = sin(r_rad)
+
+-- 基準点の現在座標
+local base_x = (obj.ox or 0) + (ofs_x * r_cos - ofs_y * r_sin)
+local base_y = (obj.oy or 0) + (ofs_x * r_sin + ofs_y * r_cos)
+
+-----------------------------------------------------------
+-- 2. 軌道半径と初期位置の計算
+-----------------------------------------------------------
+obj.setanchor("center_pos", 1, "arm", "color", 0x00ffff)
+
+local cx = (type(center_pos) == "table" and center_pos[1]) or 0
+local cy = (type(center_pos) == "table" and center_pos[2]) or 0
+
+local dx = base_x - cx
+local dy = base_y - cy
+
+local dir_mult = (dir == 1) and -1 or 1
+
+local orbit_rad = rad(orbit_angle)
+local o_cos = cos(orbit_rad)
+local o_sin = sin(orbit_rad)
+
+-- 軌道の傾きを考慮したローカル座標
+local local_dx = dx * o_cos + dy * o_sin
+local local_dy = -dx * o_sin + dy * o_cos
+
+local init_rad = atan2(local_dy, local_dx)
+local base_radius = sqrt(local_dx * local_dx + local_dy * local_dy)
+local base_sq_radius = max(abs(local_dx), abs(local_dy))
+
+local radius = max(0, base_radius + distance)
+local sq_radius = max(0, base_sq_radius + distance)
+
+-----------------------------------------------------------
+-- 3. 回転角度の計算
+-----------------------------------------------------------
+local calc_speed = speed
+if speed_mode == 1 then
+    local safe_bpm = max(0.1, bpm)
+    local safe_beat = max(0.01, beat)
+    calc_speed = (safe_bpm * 6.0) / safe_beat
+end
+
+local rot_deg = (calc_speed * dir_mult) * obj.time + angle
+local rot_rad = rad(rot_deg)
+
+-----------------------------------------------------------
+-- 4. 軌跡の描画処理
+-----------------------------------------------------------
+local original_ox = obj.ox or 0
+local original_oy = obj.oy or 0
+local original_cx = obj.cx or 0
+local original_cy = obj.cy or 0
+local original_alpha = obj.alpha or 1.0
+
+if orbit_mode == 1 then
+    -- 残像スタンプ描画
+    obj.cx = original_cx + cx_ofs
+    obj.cy = original_cy + cy_ofs
+
+    local stamp_count = 48
+    local stamp_alpha = original_alpha * (orbit_alpha * 0.01)
+    local draw_zoom = (obj.zoom or 1.0) * scale_factor
+
+    for i = 0, stamp_count - 1 do
+        local stamp_deg = angle + (i * (360.0 / stamp_count))
+        local stamp_local_rad = init_rad + rad(stamp_deg)
+        local l_cos = cos(stamp_local_rad)
+        local l_sin = sin(stamp_local_rad)
+        
+        local lx, ly
+        if shape == 0 then
+            lx = radius * l_cos
+            ly = radius * l_sin
+        else
+            local max_cs = max(abs(l_cos), abs(l_sin))
+            local inv_max_cs = (max_cs > 0.00001) and (1.0 / max_cs) or 0.0
+            lx = sq_radius * (l_cos * inv_max_cs)
+            ly = sq_radius * (l_sin * inv_max_cs)
+        end
+        
+        local target_x = cx + (lx * o_cos - ly * o_sin)
+        local target_y = cy + (lx * o_sin + ly * o_cos)
+        
+        local stamp_rz = original_rz + orbit_angle
+        if sync_rot then
+            stamp_rz = stamp_rz + stamp_deg
+        end
+        
+        obj.ox = target_x
+        obj.oy = target_y
+        obj.rz = stamp_rz
+        obj.draw(0, 0, 0, draw_zoom, stamp_alpha, obj.rx or 0, obj.ry or 0, obj.rz)
+    end
+    
+    obj.ox = original_ox
+    obj.oy = original_oy
+    obj.rz = original_rz
+    obj.cx = original_cx
+    obj.cy = original_cy
+
+elseif orbit_mode == 2 then
+    -- 実線描画
+    local buf_clean = "cache:orbit_backup"
+    obj.copybuffer(buf_clean, "object")
+    
+    local fig_name = (shape == 1) and "四角形" or "円"
+    local fig_size = max(1, (shape == 1 and sq_radius or radius) * 2)
+    
+    obj.load("figure", fig_name, orbit_color, fig_size, orbit_width)
+    
+    local orig_aspect = obj.aspect
+    local orig_zoom = obj.zoom
+    local orig_sx, orig_sy, orig_sz = obj.sx, obj.sy, obj.sz
+    
+    obj.ox = cx
+    obj.oy = cy
+    obj.cx = 0
+    obj.cy = 0
+    obj.aspect = 0
+    obj.zoom = 1.0
+    obj.sx, obj.sy, obj.sz = 1.0, 1.0, 1.0
+    obj.rz = orbit_angle
+    
+    obj.draw(0, 0, 0, 1.0, original_alpha * (orbit_alpha * 0.01), 0, 0, obj.rz)
+    
+    obj.copybuffer("object", buf_clean)
+    obj.ox = original_ox
+    obj.oy = original_oy
+    obj.rz = original_rz
+    obj.cx = original_cx
+    obj.cy = original_cy
+    obj.aspect = orig_aspect
+    obj.zoom = orig_zoom
+    obj.sx, obj.sy, obj.sz = orig_sx, orig_sy, orig_sz
+end
+
+-----------------------------------------------------------
+-- 5. 本体の座標更新および描画
+-----------------------------------------------------------
+local local_rad = init_rad + rot_rad
+local l_cos = cos(local_rad)
+local l_sin = sin(local_rad)
+
+local lx, ly
+if shape == 0 then
+    lx = radius * l_cos
+    ly = radius * l_sin
+else
+    local max_cs = max(abs(l_cos), abs(l_sin))
+    local inv_max_cs = (max_cs > 0.00001) and (1.0 / max_cs) or 0.0
+    lx = sq_radius * (l_cos * inv_max_cs)
+    ly = sq_radius * (l_sin * inv_max_cs)
+end
+
+local target_x = cx + (lx * o_cos - ly * o_sin)
+local target_y = cy + (lx * o_sin + ly * o_cos)
+
+local final_rz = original_rz + orbit_angle
+if sync_rot then
+    final_rz = final_rz + rot_deg
+end
+final_rz = final_rz + (spin * dir_mult * obj.time)
+
+obj.ox = target_x
+obj.oy = target_y
+obj.rz = final_rz
+obj.cx = original_cx + cx_ofs
+obj.cy = original_cy + cy_ofs
+obj.zoom = (obj.zoom or 1.0) * scale_factor
+
+-- 本体の明示的描画
+obj.draw(0, 0, 0, obj.zoom, original_alpha, obj.rx or 0, obj.ry or 0, obj.rz)
+obj.alpha = 0

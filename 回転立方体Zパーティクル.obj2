@@ -1,0 +1,176 @@
+--label:カスタムオブジェクト
+--information:回転立方体Z軸パーティクル
+
+--group:発生・空間設定
+--track@num:発生数,1,5000,150,1
+--track@size:サイズ,1,1000,30,1
+--track@spread:拡散範囲,0,5000,1200,1
+--track@depth:Zループ範囲,100,20000,4000,1
+--track@seed_val:シード値,0,1000,0,1
+--group:
+
+--group:アニメーション・変形
+--track@speed:Z速度,-5000,5000,600,1
+--track@rot_spd:回転速度,0,1080,90,1
+--track@swirl:渦巻き,-1080,1080,180,1
+--track@fade:出現フェード,0,100,15,1
+--track@fade_out:消失フェード,0,100,15,1
+--group:
+
+--group:カラー・描画設定
+--color@col:基準色,0x00ffff
+--track@col_var:色ばらつき,0,360,45,1
+--check@cull:裏面非表示,1
+--group:
+
+do
+    local sin = math.sin
+    local cos = math.cos
+    local floor = math.floor
+    local max = math.max
+    local pi = math.pi
+    local deg2rad = pi / 180.0
+    local half_pi = pi * 0.5
+
+    obj.setoption("culling", (cull == 1) and 1 or 0)
+
+    local count = max(floor(num), 1)
+    local base_seed = obj.id + floor(seed_val) * 10000
+    local time_sec = obj.time
+    local real_speed = -speed
+
+    local base_h, base_s, base_v = HSV(col)
+    local global_alpha = obj.alpha
+
+    local lx, ly, lz = -0.57735, -0.57735, -0.57735
+
+    -- 立方体6面の基本法線および頂点座標 (時計回り)
+    local faces_base = {
+        {  0,  0, -1,  -0.5, -0.5, -0.5,   0.5, -0.5, -0.5,   0.5,  0.5, -0.5,  -0.5,  0.5, -0.5 }, -- 手前 (-Z)
+        {  0,  0,  1,   0.5, -0.5,  0.5,  -0.5, -0.5,  0.5,  -0.5,  0.5,  0.5,   0.5,  0.5,  0.5 }, -- 奥 (+Z)
+        {  0, -1,  0,  -0.5, -0.5,  0.5,   0.5, -0.5,  0.5,   0.5, -0.5, -0.5,  -0.5, -0.5, -0.5 }, -- 上 (-Y)
+        {  0,  1,  0,  -0.5,  0.5, -0.5,   0.5,  0.5, -0.5,   0.5,  0.5,  0.5,  -0.5,  0.5,  0.5 }, -- 下 (+Y)
+        { -1,  0,  0,  -0.5, -0.5,  0.5,  -0.5, -0.5, -0.5,  -0.5,  0.5, -0.5,  -0.5,  0.5,  0.5 }, -- 左 (-X)
+        {  1,  0,  0,   0.5, -0.5, -0.5,   0.5, -0.5,  0.5,   0.5,  0.5,  0.5,   0.5,  0.5, -0.5 }  -- 右 (+X)
+    }
+
+    local fade_dist = depth * (fade * 0.01)
+    local fade_out_dist = depth * (fade_out * 0.01)
+
+    local vertices = {}
+    local v_idx = 1
+
+    for i = 1, count do
+        local seed = base_seed + i * 10
+
+        local px = (obj.rand1(seed, 0) - 0.5) * spread * 2.0
+        local py = (obj.rand1(seed + 1, 0) - 0.5) * spread * 2.0
+
+        local pz_start = obj.rand1(seed + 2, 0) * depth
+        local pz = (pz_start + time_sec * real_speed) % depth
+        local dist = (real_speed >= 0) and pz or (depth - pz)
+
+        local scale_factor = 1.0
+        local alpha_factor = 1.0
+
+        if fade_dist > 0 and dist < fade_dist then
+            local ratio = dist / fade_dist
+            scale_factor = sin(ratio * half_pi)
+            alpha_factor = ratio
+        elseif fade_out_dist > 0 and dist > depth - fade_out_dist then
+            alpha_factor = (depth - dist) / fade_out_dist
+        end
+
+        local pa = global_alpha * alpha_factor
+        local render_pz = pz - 800.0
+
+        local spx, spy = px, py
+        if swirl ~= 0 then
+            local swirl_angle = (dist / depth) * swirl * deg2rad
+            local sa_s, sa_c = sin(swirl_angle), cos(swirl_angle)
+            spx = px * sa_c - py * sa_s
+            spy = px * sa_s + py * sa_c
+        end
+
+        local psize = size * (0.5 + obj.rand1(seed + 3, 0)) * scale_factor
+
+        -- 色の決定
+        local p_h = base_h
+        local p_s = base_s
+        if col_var > 0 then
+            p_h = (base_h + (obj.rand1(seed + 10, 0) - 0.5) * col_var * 2.0) % 360.0
+            if p_s < 10.0 then
+                p_s = 80.0
+            end
+        end
+        local pr, pg, pb = RGB(HSV(p_h, p_s, base_v))
+        local pr_f = pr / 255.0
+        local pg_f = pg / 255.0
+        local pb_f = pb / 255.0
+
+        -- 回転行列の算出
+        local r_spd_x = rot_spd * (obj.rand1(seed + 4, 0) - 0.5) * 2.0
+        local r_spd_y = rot_spd * (obj.rand1(seed + 5, 0) - 0.5) * 2.0
+        local r_spd_z = rot_spd * (obj.rand1(seed + 6, 0) - 0.5) * 2.0
+
+        local rx = (obj.rand1(seed + 7, 0) * 360.0 + time_sec * r_spd_x) * deg2rad
+        local ry = (obj.rand1(seed + 8, 0) * 360.0 + time_sec * r_spd_y) * deg2rad
+        local rz = (obj.rand1(seed + 9, 0) * 360.0 + time_sec * r_spd_z) * deg2rad
+
+        local sx, cx = sin(rx), cos(rx)
+        local sy, cy = sin(ry), cos(ry)
+        local sz, cz = sin(rz), cos(rz)
+
+        local m11, m12, m13 = cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz
+        local m21, m22, m23 = cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz
+        local m31, m32, m33 = -sy, sx * cy, cx * cy
+
+        for j = 1, 6 do
+            local f = faces_base[j]
+
+            -- 法線ベクトルの回転
+            local nx = f[1] * m11 + f[2] * m12 + f[3] * m13
+            local ny = f[1] * m21 + f[2] * m22 + f[3] * m23
+            local nz = f[1] * m31 + f[2] * m32 + f[3] * m33
+
+            -- ランバート照明計算
+            local dot_val = nx * lx + ny * ly + nz * lz
+            if dot_val < 0.0 then
+                dot_val = 0.0
+            end
+            local brightness = 0.3 + 0.7 * dot_val
+
+            -- 乗算済みアルファ色
+            local fr = pr_f * brightness * pa
+            local fg = pg_f * brightness * pa
+            local fb = pb_f * brightness * pa
+
+            -- 頂点座標の回転および配置
+            local v1x = spx + (f[4] * m11 + f[5] * m12 + f[6] * m13) * psize
+            local v1y = spy + (f[4] * m21 + f[5] * m22 + f[6] * m23) * psize
+            local v1z = render_pz + (f[4] * m31 + f[5] * m32 + f[6] * m33) * psize
+
+            local v2x = spx + (f[7] * m11 + f[8] * m12 + f[9] * m13) * psize
+            local v2y = spy + (f[7] * m21 + f[8] * m22 + f[9] * m23) * psize
+            local v2z = render_pz + (f[7] * m31 + f[8] * m32 + f[9] * m33) * psize
+
+            local v3x = spx + (f[10] * m11 + f[11] * m12 + f[12] * m13) * psize
+            local v3y = spy + (f[10] * m21 + f[11] * m22 + f[12] * m23) * psize
+            local v3z = render_pz + (f[10] * m31 + f[11] * m32 + f[12] * m33) * psize
+
+            local v4x = spx + (f[13] * m11 + f[14] * m12 + f[15] * m13) * psize
+            local v4y = spy + (f[13] * m21 + f[14] * m22 + f[15] * m23) * psize
+            local v4z = render_pz + (f[13] * m31 + f[14] * m32 + f[15] * m33) * psize
+
+            vertices[v_idx]     = { v1x, v1y, v1z, fr, fg, fb, pa }
+            vertices[v_idx + 1] = { v2x, v2y, v2z, fr, fg, fb, pa }
+            vertices[v_idx + 2] = { v3x, v3y, v3z, fr, fg, fb, pa }
+            vertices[v_idx + 3] = { v4x, v4y, v4z, fr, fg, fb, pa }
+            v_idx = v_idx + 4
+        end
+    end
+
+    if #vertices > 0 then
+        obj.drawpoly(vertices, 4)
+    end
+end

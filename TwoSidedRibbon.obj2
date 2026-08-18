@@ -1,0 +1,180 @@
+--label:図形
+--information:両面リボン
+
+--group:形状設定
+--track@length:長さ,10,2000,500,1
+--track@width:幅,1,200,40,1
+--track@thick_val:厚み,0,50,5,0.1
+--track@twist:捻じれ数,-10,10,1,0.1
+--group:
+
+--group:変形・動き
+--track@wave_amp:うねり幅,0,200,50,1
+--track@wave_freq:うねり数,0,20,2,0.1
+--track@scroll:スクロール,-100,100,0,0.1
+--track@detail:詳細度,1,10,2,1
+--group:
+
+--group:カラー設定
+--color@front_col:表面色,0xFF6666
+--color@back_col:裏面色,0x6666FF
+--group:
+
+do
+    local sin = math.sin
+    local cos = math.cos
+    local ceil = math.ceil
+    local abs = math.abs
+
+    local param_len = (length <= 0) and 1 or length
+    local param_detail = (detail < 1) and 1 or detail
+
+    -- 乗算済みアルファ色分解
+    local obj_alpha = obj.alpha
+    local function get_premultiplied_rgba(col)
+        local r, g, b = RGB(col)
+        return (r / 255.0) * obj_alpha, (g / 255.0) * obj_alpha, (b / 255.0) * obj_alpha, obj_alpha
+    end
+
+    local fr, fg, fb, fa = get_premultiplied_rgba(front_col)
+    local br, bg, bb, ba = get_premultiplied_rgba(back_col)
+
+    -- 分割数計算
+    local complexity = abs(wave_freq) + abs(twist)
+    local base_segments = ceil(param_len * 0.5)
+    local adaptive_segments = base_segments + (complexity * 20)
+    local segments = ceil(adaptive_segments * param_detail)
+    if segments > 5000 then segments = 5000 end
+
+    -- 定数事前計算
+    local offset = obj.time * scroll * 0.1
+    local pi2 = math.pi * 2.0
+    local inv_segments = 1.0 / segments
+    local half_wid = width * 0.5
+    local half_thick = thick_val * 0.5
+    local amp_half = wave_amp * 0.5
+    local freq_pi2 = wave_freq * pi2
+    local twist_pi2 = twist * pi2
+
+    -- 頂点配列
+    local vertices = {}
+    local v_idx = 1
+
+    local function push_quad_raw(x1, y1, z1, nx1, ny1, nz1,
+                                 x2, y2, z2, nx2, ny2, nz2,
+                                 x3, y3, z3, nx3, ny3, nz3,
+                                 x4, y4, z4, nx4, ny4, nz4,
+                                 cr, cg, cb, ca)
+        vertices[v_idx]     = { x1, y1, z1, cr, cg, cb, ca, nx1, ny1, nz1 }
+        vertices[v_idx + 1] = { x2, y2, z2, cr, cg, cb, ca, nx2, ny2, nz2 }
+        vertices[v_idx + 2] = { x3, y3, z3, cr, cg, cb, ca, nx3, ny3, nz3 }
+        vertices[v_idx + 3] = { x4, y4, z4, cr, cg, cb, ca, nx4, ny4, nz4 }
+        v_idx = v_idx + 4
+    end
+
+    -- 断面座標算出関数
+    local function calculate_slice(t)
+        local st = t + offset
+        local x = (t - 0.5) * param_len
+        local y = sin(st * freq_pi2) * wave_amp
+        local z = cos(st * freq_pi2) * amp_half
+
+        local tw = st * twist_pi2
+        local cos_tw = cos(tw)
+        local sin_tw = sin(tw)
+
+        local wy = cos_tw * half_wid
+        local wz = sin_tw * half_wid
+
+        local ny = -sin_tw
+        local nz = cos_tw
+
+        local thick_y = ny * half_thick
+        local thick_z = nz * half_thick
+
+        local side_ny = cos_tw
+        local side_nz = sin_tw
+
+        return {
+            p_top_x = x, p_top_y = y + wy + thick_y, p_top_z = z + wz + thick_z,
+            p_bot_x = x, p_bot_y = y - wy + thick_y, p_bot_z = z - wz + thick_z,
+            b_top_x = x, b_top_y = y + wy - thick_y, b_top_z = z + wz - thick_z,
+            b_bot_x = x, b_bot_y = y - wy - thick_y, b_bot_z = z - wz - thick_z,
+            ny = ny, nz = nz,
+            side_ny = side_ny, side_nz = side_nz
+        }
+    end
+
+    local current_slice = calculate_slice(0)
+    local start_slice = current_slice
+
+    -- 始端キャップ（厚みがある場合）
+    if half_thick > 0 then
+        push_quad_raw(
+            start_slice.p_top_x, start_slice.p_top_y, start_slice.p_top_z, -1, 0, 0,
+            start_slice.b_top_x, start_slice.b_top_y, start_slice.b_top_z, -1, 0, 0,
+            start_slice.b_bot_x, start_slice.b_bot_y, start_slice.b_bot_z, -1, 0, 0,
+            start_slice.p_bot_x, start_slice.p_bot_y, start_slice.p_bot_z, -1, 0, 0,
+            fr, fg, fb, fa
+        )
+    end
+
+    -- メッシュ生成ループ
+    for i = 1, segments do
+        local next_slice = calculate_slice(i * inv_segments)
+
+        -- 表面
+        push_quad_raw(
+            current_slice.p_top_x, current_slice.p_top_y, current_slice.p_top_z, 0, current_slice.ny, current_slice.nz,
+            next_slice.p_top_x,    next_slice.p_top_y,    next_slice.p_top_z,    0, next_slice.ny,    next_slice.nz,
+            next_slice.p_bot_x,    next_slice.p_bot_y,    next_slice.p_bot_z,    0, next_slice.ny,    next_slice.nz,
+            current_slice.p_bot_x, current_slice.p_bot_y, current_slice.p_bot_z, 0, current_slice.ny, current_slice.nz,
+            fr, fg, fb, fa
+        )
+
+        -- 裏面
+        push_quad_raw(
+            current_slice.b_bot_x, current_slice.b_bot_y, current_slice.b_bot_z, 0, -current_slice.ny, -current_slice.nz,
+            next_slice.b_bot_x,    next_slice.b_bot_y,    next_slice.b_bot_z,    0, -next_slice.ny,    -next_slice.nz,
+            next_slice.b_top_x,    next_slice.b_top_y,    next_slice.b_top_z,    0, -next_slice.ny,    -next_slice.nz,
+            current_slice.b_top_x, current_slice.b_top_y, current_slice.b_top_z, 0, -current_slice.ny, -current_slice.nz,
+            br, bg, bb, ba
+        )
+
+        -- 側面1 (上側)
+        push_quad_raw(
+            current_slice.p_top_x, current_slice.p_top_y, current_slice.p_top_z, 0, current_slice.side_ny, current_slice.side_nz,
+            current_slice.b_top_x, current_slice.b_top_y, current_slice.b_top_z, 0, current_slice.side_ny, current_slice.side_nz,
+            next_slice.b_top_x,    next_slice.b_top_y,    next_slice.b_top_z,    0, next_slice.side_ny,    next_slice.side_nz,
+            next_slice.p_top_x,    next_slice.p_top_y,    next_slice.p_top_z,    0, next_slice.side_ny,    next_slice.side_nz,
+            fr, fg, fb, fa
+        )
+
+        -- 側面2 (下側)
+        push_quad_raw(
+            current_slice.p_bot_x, current_slice.p_bot_y, current_slice.p_bot_z, 0, -current_slice.side_ny, -current_slice.side_nz,
+            next_slice.p_bot_x,    next_slice.p_bot_y,    next_slice.p_bot_z,    0, -next_slice.side_ny,    -next_slice.side_nz,
+            next_slice.b_bot_x,    next_slice.b_bot_y,    next_slice.b_bot_z,    0, -next_slice.side_ny,    -next_slice.side_nz,
+            current_slice.b_bot_x, current_slice.b_bot_y, current_slice.b_bot_z, 0, -current_slice.side_ny, -current_slice.side_nz,
+            fr, fg, fb, fa
+        )
+
+        current_slice = next_slice
+    end
+
+    -- 終端キャップ（厚みがある場合）
+    if half_thick > 0 then
+        push_quad_raw(
+            current_slice.p_top_x, current_slice.p_top_y, current_slice.p_top_z, 1, 0, 0,
+            current_slice.p_bot_x, current_slice.p_bot_y, current_slice.p_bot_z, 1, 0, 0,
+            current_slice.b_bot_x, current_slice.b_bot_y, current_slice.b_bot_z, 1, 0, 0,
+            current_slice.b_top_x, current_slice.b_top_y, current_slice.b_top_z, 1, 0, 0,
+            fr, fg, fb, fa
+        )
+    end
+
+    obj.setoption("culling", 1)
+    if #vertices > 0 then
+        obj.drawpoly(vertices, 4)
+    end
+end

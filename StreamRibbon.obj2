@@ -1,0 +1,132 @@
+--label:図形
+--information:ストリームリボン
+
+--group:基本設定
+--track@lines:本数,1,50,5,1
+--track@thickness:太さ,1,200,30,1
+--color@base_col:基本色,0x00aaff
+--track@seed:シード,0,1000,0,1
+--group:
+
+--group:形状・動き
+--track@amplitude:うねり強,0,500,100,1
+--track@frequency:うねり数,1,50,10,0.1
+--track@vary_thick:太さ変化,0,100,80,1
+--track@scroll:流速,-200,200,20,1
+--group:
+
+do
+    local math = math
+    local sin, cos, max, sqrt, ceil = math.sin, math.cos, math.max, math.sqrt, math.ceil
+    local pi = math.pi
+    local two_pi = pi * 2.0
+    local rand1 = obj.rand1
+
+    local v_thick_rate = vary_thick * 0.01
+
+    -- オブジェクトの回転・移動を考慮したマージン付き描画幅
+    local render_w = (obj.screen_w or 1920) * 1.5
+    local step = 10
+    local segments = ceil(render_w / step) + 4
+    local inv_segments = 1.0 / segments
+
+    -- 色分解 (AviUtl2標準関数)
+    local r_raw, g_raw, b_raw = RGB(base_col)
+    local r_base = r_raw / 255.0
+    local g_base = g_raw / 255.0
+    local b_base = b_raw / 255.0
+    local a0 = obj.alpha or 1.0
+
+    local time = obj.time
+    local w1_k = frequency * two_pi
+    local w2_k = frequency * pi * 1.5
+
+    -- 乱数取得ヘルパー
+    local function random(s, idx)
+        return rand1(s + idx * 123.45, 0)
+    end
+
+    local render_list = {}
+    local r_idx = 1
+
+    for i = 1, lines do
+        local line_seed = seed + i * 100
+        
+        local base_y = (random(line_seed, 1) - 0.5) * amplitude * 1.5
+        local phase = random(line_seed, 2) * 10.0
+        local my_thick = thickness * (0.5 + random(line_seed, 3))
+        local my_spd = scroll * (0.8 + random(line_seed, 4) * 0.4)
+        local scroll_offset = time * my_spd * 0.05
+        local my_alpha = a0 * (0.5 + random(line_seed, 5) * 0.5)
+        
+        -- 乗算済みアルファ (Premultiplied Alpha) の適用
+        local my_r = r_base * my_alpha
+        local my_g = g_base * my_alpha
+        local my_b = b_base * my_alpha
+        
+        local prev_t_x, prev_t_y
+        local prev_b_x, prev_b_y
+        
+        for j = 0, segments do
+            local t = j * inv_segments
+            local x = t * render_w - render_w * 0.5
+            local input_t = t - scroll_offset
+            
+            -- サイン波の合成位置
+            local p1 = input_t * w1_k + phase + line_seed
+            local p2 = input_t * w2_k + phase * 1.3
+            local cy = base_y + sin(p1) * amplitude + sin(p2) * (amplitude * 0.5)
+            
+            -- 太さ計算
+            local w = my_thick
+            if v_thick_rate > 0 then
+                local vary = sin(input_t * frequency * 2.0 + phase * 0.5 + line_seed * 2.0)
+                local rate = 1.0 - (vary * 0.5 + 0.5) * v_thick_rate
+                w = w * rate
+            end
+            local half_w = max(0.25, w * 0.5)
+            
+            -- 接線ベクトル (dx/dt, dy/dt) の解析的算出
+            local dx_dt = render_w
+            local dy_dt = amplitude * (w1_k * cos(p1) + 0.5 * w2_k * cos(p2))
+            local len = sqrt(dx_dt * dx_dt + dy_dt * dy_dt)
+            local inv_len = (len > 0.0) and (1.0 / len) or 0.0
+            
+            -- 単位法線ベクトル (-dy/dt, dx/dt) / len
+            local nx = -dy_dt * inv_len
+            local ny = dx_dt * inv_len
+            
+            local curr_t_x = x + nx * half_w
+            local curr_t_y = cy + ny * half_w
+            local curr_b_x = x - nx * half_w
+            local curr_b_y = cy - ny * half_w
+            
+            if j > 0 then
+                -- 28要素形式（座標12値 + 頂点カラー16値）
+                render_list[r_idx] = {
+                    prev_t_x, prev_t_y, 0,
+                    curr_t_x, curr_t_y, 0,
+                    curr_b_x, curr_b_y, 0,
+                    prev_b_x, prev_b_y, 0,
+                    my_r, my_g, my_b, my_alpha,
+                    my_r, my_g, my_b, my_alpha,
+                    my_r, my_g, my_b, my_alpha,
+                    my_r, my_g, my_b, my_alpha
+                }
+                r_idx = r_idx + 1
+            end
+            
+            prev_t_x = curr_t_x
+            prev_t_y = curr_t_y
+            prev_b_x = curr_b_x
+            prev_b_y = curr_b_y
+        end
+    end
+
+    if #render_list > 0 then
+        obj.setoption("culling", 0)
+        obj.drawpoly(render_list)
+    end
+
+    obj.alpha = 0
+end

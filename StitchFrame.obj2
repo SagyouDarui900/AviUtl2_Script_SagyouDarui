@@ -1,0 +1,142 @@
+--label:図形
+--information:ストリームリボン
+
+--group:形状設定
+--track@amplitude:うねり幅,0,500,100,1
+--track@frequency:うねり数,1,50,5,0.1
+--track@thickness:最大太さ,1,300,50,1
+--track@sharpness:鋭さ(強弱),1,100,10,1
+--group:
+
+--group:動き設定
+--track@phase_wave:波の位相,-100,100,0,0.1
+--track@phase_thick:太さ位相,-100,100,0,0.1
+--track@scroll:流速,-200,200,0,1
+--group:
+
+--group:配色設定
+--select@color_mode:配色=1,単色=0,グラデーション=1,2色=2
+--color@color1:色1,0x00aaff
+--color@color2:色2,0xffaaff
+--select@grad_mode:変化パターン=0,波の上下(山と谷)=0,波の進行(往復)=1
+--hide@color2:color_mode==0
+--hide@grad_mode:color_mode==0
+--group:
+
+--group:詳細設定
+--track@detail:分割密度,50,200,100,1
+--group:
+
+do
+    local sin = math.sin
+    local cos = math.cos
+    local abs = math.abs
+    local max = math.max
+    local sqrt = math.sqrt
+    local floor = math.floor
+    local pi = math.pi
+    local two_pi = pi * 2.0
+
+    local screen_w = (obj.screen_w and obj.screen_w > 0) and obj.screen_w or 1920
+    local base_segments = floor(screen_w / 4)
+    local segments = floor(base_segments * (detail * 0.01))
+    if segments < 64 then segments = 64 end
+    if segments > 2000 then segments = 2000 end
+
+    local inv_segments = 1.0 / segments
+    local dx_const = screen_w * inv_segments
+    local start_x = -screen_w * 0.5
+
+    local obj_alpha = obj.alpha
+    local r1, g1, b1 = RGB(color1)
+    local r2, g2, b2 = RGB(color2)
+    local c1_r, c1_g, c1_b = r1 / 255.0, g1 / 255.0, b1 / 255.0
+    local c2_r, c2_g, c2_b = r2 / 255.0, g2 / 255.0, b2 / 255.0
+
+    local time_offset = scroll * obj.time * 0.01
+    local wave_phase_base = phase_wave * 0.01 + time_offset
+    local thick_phase_base = phase_thick * 0.01 + time_offset
+    local wave_k = frequency * two_pi
+    local sharpness_factor = (100 - sharpness) * 0.01
+
+    -- 色算出関数 (乗算済みアルファ)
+    local function get_color(u_val)
+        local r, g, b
+        if color_mode == 0 then
+            r, g, b = c1_r, c1_g, c1_b
+        elseif color_mode == 1 then
+            r = c1_r + (c2_r - c1_r) * u_val
+            g = c1_g + (c2_g - c1_g) * u_val
+            b = c1_b + (c2_b - c1_b) * u_val
+        else
+            if u_val < 0.5 then
+                r, g, b = c1_r, c1_g, c1_b
+            else
+                r, g, b = c2_r, c2_g, c2_b
+            end
+        end
+        return r * obj_alpha, g * obj_alpha, b * obj_alpha, obj_alpha
+    end
+
+    -- 断面座標および色算出関数
+    local function calc_point(t, x_pos)
+        local p_wave = t * wave_k + wave_phase_base
+        local cy = sin(p_wave) * amplitude
+
+        local p_thick = t * wave_k + thick_phase_base
+        local base_thick = (sin(p_thick) + 1.0) * 0.5
+        local factor = max(0.01, 1.0 - sharpness_factor * base_thick)
+        local half_w = thickness * factor * 0.5
+
+        local u_val
+        if grad_mode == 0 then
+            u_val = (sin(p_wave) + 1.0) * 0.5
+        else
+            u_val = 1.0 - abs((p_wave / pi) % 2.0 - 1.0)
+        end
+
+        local dx_dt = screen_w
+        local dy_dt = amplitude * wave_k * cos(p_wave)
+        local len = sqrt(dx_dt * dx_dt + dy_dt * dy_dt)
+        local inv_len = (len > 0.0) and (1.0 / len) or 0.0
+
+        local nx = -dy_dt * inv_len
+        local ny = dx_dt * inv_len
+
+        local cr, cg, cb, ca = get_color(u_val)
+
+        return {
+            top_x = x_pos + nx * half_w,
+            top_y = cy + ny * half_w,
+            bot_x = x_pos - nx * half_w,
+            bot_y = cy - ny * half_w,
+            r = cr, g = cg, b = cb, a = ca
+        }
+    end
+
+    local vertices = {}
+    local v_idx = 1
+    local current_pt = calc_point(0, start_x)
+
+    for j = 1, segments do
+        local t2 = j * inv_segments
+        local x2 = start_x + j * dx_const
+        local next_pt = calc_point(t2, x2)
+
+        vertices[v_idx]     = { current_pt.top_x, current_pt.top_y, 0, current_pt.r, current_pt.g, current_pt.b, current_pt.a }
+        vertices[v_idx + 1] = { next_pt.top_x,    next_pt.top_y,    0, next_pt.r,    next_pt.g,    next_pt.b,    next_pt.a }
+        vertices[v_idx + 2] = { next_pt.bot_x,    next_pt.bot_y,    0, next_pt.r,    next_pt.g,    next_pt.b,    next_pt.a }
+        vertices[v_idx + 3] = { current_pt.bot_x, current_pt.bot_y, 0, current_pt.r, current_pt.g, current_pt.b, current_pt.a }
+        v_idx = v_idx + 4
+
+        current_pt = next_pt
+    end
+
+    obj.setoption("culling", 0)
+    if #vertices > 0 then
+        obj.drawpoly(vertices, 4)
+    end
+
+    -- ベース画像の自動描画を抑止
+    obj.alpha = 0
+end
