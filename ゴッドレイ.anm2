@@ -1,0 +1,112 @@
+--label:光効果
+--filter
+--information:Godray
+
+--group:光源・配置,true
+--track@light_x:光源X,-2000,2000,0,1
+--track@light_y:光源Y,-2000,2000,0,1
+--trackgroup@light_x,light_y:光源
+--group:
+
+--group:光線設定,true
+--track@intensity:明るさ,0,10,1,0.01
+--track@decay:減衰率,0,1,0.95,0.001
+--track@density:密度(長さ),0,5,0.8,0.01
+--track@weight:ウェイト,0,1,0.2,0.01
+--track@samples:サンプル数,1,256,64,1
+--track@threshold:しきい値,0,1,0.5,0.01
+--group:
+
+--group:カラー・合成,true
+--color@light_color:光線カラー,0xfff0b4
+--track@original_blend:元画像の強さ,0,1,1,0.01
+--check@only_light:光のみ出力,false
+--group:
+
+-- 早期スキップ
+if intensity <= 0 or samples <= 0 or obj.w <= 0 or obj.h <= 0 then
+    if only_light then obj.alpha = 0 end
+    return
+end
+
+--[[pixelshader@godray_advanced:
+    Texture2D tex : register(t0);
+    SamplerState smp : register(s0);
+
+    cbuffer constants : register(b0) {
+        float2 light_uv;        // [0].xy: 光源UV座標
+        float  intensity;       // [0].z
+        float  decay;           // [0].w
+        
+        float  density;         // [1].x
+        float  weight;          // [1].y
+        float  samples;         // [1].z
+        float  threshold;       // [1].w
+        
+        float3 tint_color;      // [2].xyz: 光線カラー
+        float  original_blend;  // [2].w
+        
+        float  only_light;      // [3].x
+        float3 padding;         // [3].yzw: パディング
+    };
+
+    float rand(float2 co) {
+        return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
+    }
+
+    float4 godray_advanced(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        int num_samples = (int)clamp(samples, 1.0, 256.0);
+        float2 step_uv = (uv - light_uv) * (density / float(num_samples));
+
+        float jitter = rand(uv);
+        float illumination_decay = 1.0;
+        float4 accumulated = float4(0.0, 0.0, 0.0, 0.0);
+
+        [loop]
+        for (int i = 0; i < num_samples; i++) {
+            if (illumination_decay < 0.001) break;
+
+            float2 current_uv = uv - step_uv * (float(i) + jitter);
+            float4 s = tex.SampleLevel(smp, current_uv, 0);
+            
+            // Premultiplied Alpha からストレートRGBへ復元して輝度判定
+            float safe_a = max(s.a, 0.00001);
+            float3 straight_rgb = s.rgb / safe_a;
+            float lum = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722));
+            
+            float extract_val = max(0.0, lum - threshold);
+            extract_val = smoothstep(0.0, 0.2, extract_val) * extract_val;
+            
+            accumulated += s * (extract_val * illumination_decay * weight);
+            illumination_decay *= decay;
+        }
+
+        float4 original = tex.SampleLevel(smp, uv, 0);
+        float4 rays = accumulated * float4(tint_color, 1.0) * intensity;
+
+        float4 result = lerp(original * original_blend + rays, rays, only_light);
+        result.a = saturate(result.a);
+        
+        return result;
+    }
+]]
+
+-- 光源アンカー表示
+obj.setanchor("light_x,light_y", 0, "arm", "color", 0xffd700)
+
+local inv_w = 1.0 / obj.w
+local inv_h = 1.0 / obj.h
+local light_uv_x = 0.5 + light_x * inv_w
+local light_uv_y = 0.5 + light_y * inv_h
+
+local r, g, b = RGB(light_color)
+local is_only_val = only_light and 1.0 or 0.0
+
+local constants = {
+    light_uv_x, light_uv_y, intensity, decay,
+    density, weight, samples, threshold,
+    r / 255.0, g / 255.0, b / 255.0, original_blend,
+    is_only_val, 0.0, 0.0, 0.0
+}
+
+obj.pixelshader("godray_advanced", "object", {"object"}, constants, "copy", "clip")
