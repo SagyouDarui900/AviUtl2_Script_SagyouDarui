@@ -1,142 +1,133 @@
 --label:アニメーション効果
+--information:DVD Bounce
 
 --group:動作設定
---track@speed:速度,0,5000,400,1
---track@zoom_pct:サイズ(%),1,1000,100,1
+--track@speed:速度,0.0,5000.0,400.0,1.0
+--track@angle:移動角度,-360.0,360.0,45.0,0.1
+--track@zoom_pct:サイズ(%),1.0,1000.0,100.0,1.0
 --track@seed:乱数シード,0,10000,0,1
+--group:
 
 --group:領域設定
---track@box_w:領域幅(0=FHD),0,8000,1920,1
---track@box_h:領域高さ(0=FHD),0,8000,1080,1
+--track@box_w:領域幅(0=自動),0,8000,0,1
+--track@box_h:領域高さ(0=自動),0,8000,0,1
+--trackgroup@box_w,box_h:領域サイズ
+--group:
 
 --group:色設定
---track@saturation:彩度,0,100,80,1
---track@brightness:明度,0,100,100,1
---track@color_mix:着色強度(%),0,100,100,1
 --check@use_original:元の色を使用,0
+--track@saturation:彩度,0.0,100.0,80.0,0.1
+--track@brightness:明度,0.0,100.0,100.0,0.1
+--track@color_mix:着色強度(%),0.0,100.0,100.0,0.1
+--hide@saturation:use_original==1
+--hide@brightness:use_original==1
+--hide@color_mix:use_original==1
+--group:
 
---[[pixelshader@DVDBounceShader:
-    // Shader for coloring the object
-    // Note: Do not use multi-byte characters (Japanese) in this block.
+--[[pixelshader@ps_dvd_bounce:
+cbuffer Params : register(b0) {
+    float4 target_color; // rgb: target_rgb, w: mix_ratio
+};
 
-    cbuffer Params : register(b0)
-    {
-        float4 target_color; // r, g, b, mix_ratio
-        float4 resolution;   // w, h, 0, 0
-    };
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
 
-    Texture2D tex : register(t0);
-    SamplerState samp : register(s0);
-
-    float4 DVDBounceShader(float4 pos : SV_Position) : SV_Target
-    {
-        float2 uv = pos.xy / resolution.xy;
-        float4 c = tex.Sample(samp, uv);
-
-        // Keep transparent pixels
-        if (c.a <= 0.0) return c;
-
-        // Apply color mixing
-        float3 final_rgb = lerp(c.rgb, target_color.rgb, target_color.a);
-        return float4(final_rgb, c.a);
+float4 ps_dvd_bounce(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 c = tex.Sample(samp, uv);
+    if (c.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
+
+    // Straight RGB に変換してカラーブレンド
+    float3 straight_rgb = c.rgb / c.a;
+    float3 blended_rgb = lerp(straight_rgb, target_color.rgb, target_color.w);
+
+    // Premultiplied Alpha 適用
+    return float4(blended_rgb * c.a, c.a);
+}
 ]]
 
--- HSV to RGB conversion
-local function hsv_to_rgb(h, s, v)
-    local r, g, b
-    local i = math.floor(h * 6)
-    local f = h * 6 - i
-    local p = v * (1 - s)
-    local q = v * (1 - f * s)
-    local t = v * (1 - (1 - f) * s)
-    i = i % 6
-    if i == 0 then r, g, b = v, t, p
-    elseif i == 1 then r, g, b = q, v, p
-    elseif i == 2 then r, g, b = p, v, t
-    elseif i == 3 then r, g, b = p, q, v
-    elseif i == 4 then r, g, b = t, p, v
-    elseif i == 5 then r, g, b = v, p, q
+do
+    local abs = math.abs
+    local cos = math.cos
+    local sin = math.sin
+    local rad = math.rad
+    local floor = math.floor
+    local max = math.max
+
+    local w = obj.w
+    local h = obj.h
+    if w <= 0 or h <= 0 then
+        return
     end
-    return r, g, b
-end
 
--- Pseudo-random number generator
-local function pseudo_random(x)
-    return (math.sin(x * 12.9898) * 43758.5453) % 1.0
-end
+    -- 1. 解像度および境界ボックスの取得
+    local screen_w = (obj.screen_w and obj.screen_w > 0) and obj.screen_w or 1920
+    local screen_h = (obj.screen_h and obj.screen_h > 0) and obj.screen_h or 1080
 
--- Main Process
-local w, h = obj.w, obj.h
+    local bw = (box_w <= 0) and screen_w or box_w
+    local bh = (box_h <= 0) and screen_h or box_h
 
--- 1. Get Project Resolution (Safe Mode)
--- Use pcall to avoid errors in environments where obj.getoption("screen_w") fails.
-local status_w, project_w = pcall(obj.getoption, "screen_w")
-if not status_w or not project_w then project_w = 1920 end
+    -- 2. 拡大率の適用と実寸の計算
+    local cur_zoom = obj.zoom or 1.0
+    local scale_factor = zoom_pct * 0.01
+    obj.zoom = cur_zoom * scale_factor
 
-local status_h, project_h = pcall(obj.getoption, "screen_h")
-if not status_h or not project_h then project_h = 1080 end
+    local obj_w = w * (cur_zoom * scale_factor)
+    local obj_h = h * (cur_zoom * scale_factor)
 
--- 2. Setup Bounding Box
-local bw = (box_w <= 0) and project_w or box_w
-local bh = (box_h <= 0) and project_h or box_h
+    -- 3. 移動ベクトルの算出と三角波バウンス計算
+    local rad_val = rad(angle)
+    local vx = abs(cos(rad_val)) * speed
+    local vy = abs(sin(rad_val)) * speed
 
--- 3. Apply Zoom
-local scale = zoom_pct / 100.0
-obj.zoom = obj.zoom * scale
-local obj_w = w * scale
-local obj_h = h * scale
+    local range_x = max(0.0, bw - obj_w)
+    local range_y = max(0.0, bh - obj_h)
 
--- 4. Calculate Position (Triangle Wave Logic)
-local range_x = math.max(0, bw - obj_w)
-local range_y = math.max(0, bh - obj_h)
+    local initial_phase_x = (seed * 123.45) % 10000.0
+    local initial_phase_y = (seed * 678.91) % 10000.0
 
-local t = obj.time
-local initial_phase_x = (seed * 123.45) % 10000
-local initial_phase_y = (seed * 678.91) % 10000
+    local dist_x = obj.time * vx + initial_phase_x
+    local dist_y = obj.time * vy + initial_phase_y
 
-local dist_x = t * speed + initial_phase_x
-local dist_y = t * speed + initial_phase_y
+    local safe_range_x = max(1.0, range_x)
+    local safe_range_y = max(1.0, range_y)
 
--- Calculate period and bounce count
-local period_x = range_x * 2
-local period_y = range_y * 2
-if period_x <= 0 then period_x = 1 end
-if period_y <= 0 then period_y = 1 end
+    local period_x = safe_range_x * 2.0
+    local period_y = safe_range_y * 2.0
 
-local bounce_count_x = math.floor(dist_x / range_x)
-local bounce_count_y = math.floor(dist_y / range_y)
-local total_bounces = bounce_count_x + bounce_count_y
+    local bounce_count_x = floor(dist_x / safe_range_x)
+    local bounce_count_y = floor(dist_y / safe_range_y)
+    local total_bounces = bounce_count_x + bounce_count_y
 
--- Normalize position
-local norm_x = dist_x % period_x
-local norm_y = dist_y % period_y
+    local norm_x = dist_x % period_x
+    local norm_y = dist_y % period_y
 
-local pos_x = (norm_x > range_x) and (period_x - norm_x) or norm_x
-local pos_y = (norm_y > range_y) and (period_y - norm_y) or norm_y
+    local pos_x = (norm_x > range_x) and (period_x - norm_x) or norm_x
+    local pos_y = (norm_y > range_y) and (period_y - norm_y) or norm_y
 
--- Set Center Coordinates
-obj.ox = pos_x - (range_x / 2)
-obj.oy = pos_y - (range_y / 2)
+    -- 中心原点の相対座標へ加算
+    obj.ox = (obj.ox or 0.0) + (pos_x - range_x * 0.5)
+    obj.oy = (obj.oy or 0.0) + (pos_y - range_y * 0.5)
 
--- 5. Apply Color Shader
-if use_original == 0 and color_mix > 0 then
-    -- Generate random color based on bounce count
-    local color_seed = seed + total_bounces
-    local hue = math.abs(pseudo_random(color_seed))
-    
-    local sat = saturation / 100.0
-    local val = brightness / 100.0
-    
-    local r, g, b = hsv_to_rgb(hue, sat, val)
+    -- 4. 着色シェーダー処理 (バウンス回数に応じた色相変化)
+    if use_original == 0 and color_mix > 0.0 then
+        local hue = obj.rand1(seed * 1000 + total_bounces * 17, 0) * 360.0
+        local col_hex = HSV(hue, saturation, brightness)
+        local r, g, b = RGB(col_hex)
 
-    -- Apply shader
-    obj.copybuffer("cache:tmp", "object")
-    
-    local mix_ratio = color_mix / 100.0
-    
-    obj.pixelshader("DVDBounceShader", "object", "cache:tmp", {
-        r, g, b, mix_ratio,
-        w, h, 0, 0 -- Padding
-    })
+        obj.pixelshader(
+            "ps_dvd_bounce",
+            "object",
+            { "object" },
+            {
+                r / 255.0,
+                g / 255.0,
+                b / 255.0,
+                color_mix * 0.01
+            },
+            "copy",
+            "clamp"
+        )
+    end
 end
