@@ -1,0 +1,111 @@
+--label:カスタムオブジェクト
+--information:丸型星
+
+--group:形状設定
+--track@size:サイズ,1,2000,150,1
+--track@points:頂点数,3,32,5,1
+--track@inner:内側比率,0,100,60,0.1
+--track@round:角の丸み,0,2000,15,1
+--group:
+
+--group:ライン設定
+--track@line_w:ライン幅,0,500,0,0.1
+--group:
+
+--group:カラー設定
+--color@col:色,0xffffff
+--group:
+
+--[[pixelshader@ps_round_star:
+cbuffer Params : register(b0) {
+    float4 shape_param; // x: size, y: points, z: inner_ratio, w: roundness
+    float4 render_param;// x: line_w, y: canvas_w, z: canvas_h, w: unused
+    float4 color;       // rgb: col * alpha, a: alpha
+};
+
+float sdStar(float2 p, float r, float n, float innerRatio) {
+    float an = 3.14159265359 / max(n, 3.0);
+    
+    // 角度を計算して1つのセクターに折り畳む
+    float a = atan2(p.y, p.x);
+    float a_local = a - 2.0 * an * floor((a + an) / (2.0 * an));
+    float2 q = length(p) * float2(cos(a_local), abs(sin(a_local)));
+    
+    // 星の1辺との距離計算
+    float2 p1 = float2(r, 0.0);
+    float2 p2 = float2(r * innerRatio * cos(an), r * innerRatio * sin(an));
+    float2 pa = q - p1;
+    float2 ba = p2 - p1;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    float d = length(pa - ba * h);
+    
+    // 内外判定
+    float sign_val = (pa.x * ba.y - pa.y * ba.x > 0.0) ? 1.0 : -1.0;
+    return d * sign_val;
+}
+
+float4 ps_round_star(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 canvas_size = render_param.yz;
+    float2 pixel_pos = (uv - 0.5) * canvas_size;
+    
+    // 頂点を上に向けるための90度回転
+    float2 p = float2(-pixel_pos.y, pixel_pos.x);
+    
+    float size_val = shape_param.x;
+    float points_val = shape_param.y;
+    float inner_val = shape_param.z;
+    float round_val = shape_param.w;
+    float line_w_val = render_param.x;
+    
+    // 基準となる星の輪郭距離 (d=0 が外側境界)
+    float base_r = max(0.0, size_val - round_val);
+    float d = sdStar(p, base_r, points_val, inner_val) - round_val;
+    
+    // ピクセル空間適応型アンチエイリアス
+    float fw = max(fwidth(d), 0.0001);
+    float alpha = 0.0;
+    
+    if (line_w_val <= 0.0) {
+        // 塗りつぶしモード
+        alpha = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
+    } else {
+        // ラインモード (中抜き)
+        float outer_alpha = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
+        float inner_alpha = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d + line_w_val);
+        alpha = saturate(outer_alpha - inner_alpha);
+    }
+    
+    return color * alpha;
+}
+]]
+
+if size <= 0 then
+    return
+end
+
+local r_outer = size + round + 10
+local canvas_size = math.ceil(r_outer * 2)
+
+if canvas_size <= 0 then
+    return
+end
+
+local obj_alpha = obj.alpha
+local r, g, b = RGB(col)
+local c_r = (r / 255.0) * obj_alpha
+local c_g = (g / 255.0) * obj_alpha
+local c_b = (b / 255.0) * obj_alpha
+
+-- オブジェクトバッファを直接生成・初期化
+obj.clearbuffer("object", canvas_size, canvas_size)
+
+obj.pixelshader(
+    "ps_round_star",
+    "object",
+    {},
+    {
+        size, points, inner * 0.01, round,
+        line_w, canvas_size, canvas_size, 0.0,
+        c_r, c_g, c_b, obj_alpha
+    }
+)
