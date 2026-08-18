@@ -1,0 +1,130 @@
+--label:変形
+--information:エッシャードロステ効果
+--filter
+
+--group:ドロステ幾何設定
+--track@zoom:ズーム進行,-10.0,10.0,0.0,0.01
+--track@scale_fac:スケール比,1.1,20.0,4.0,0.1
+--track@strands:螺旋巻き数,-10,10,1,1
+--track@radius:描画半径,0.01,5.0,0.5,0.01
+--check@repeat_edge:境界リピート,1
+--group:
+
+--group:中心座標
+--track@cx:中心X,-2000.0,2000.0,0.0,0.1
+--track@cy:中心Y,-2000.0,2000.0,0.0,0.1
+--trackgroup@cx,cy:中心座標
+--group:
+
+--group:自動進行設定
+--check@auto_move:自動進行,0
+--track@auto_spd:進行速度,-10.0,10.0,1.0,0.01
+--hide@auto_spd:auto_move==0
+--group:
+
+obj.setanchor("cx,cy", 0, "line")
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@ps_escher_droste:
+cbuffer Params : register(b0) {
+    float4 param_geom;   // x: period, y: c2(cos^2), z: cs(cos*sin), w: log_radius
+    float4 param_center; // x: ncx, y: ncy, z: aspect, w: zoom_offset
+    float4 param_render; // x: repeat_flg, y: obj_alpha, zw: unused
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 ps_escher_droste(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 center = float2(0.5, 0.5) + param_center.xy;
+    float2 p = uv - center;
+    
+    float aspect = param_center.z;
+    p.x *= aspect;
+
+    float r = max(length(p), 0.000001);
+    float a = atan2(p.y, p.x);
+
+    float period = param_geom.x;
+    float2 w = float2(log(r), a);
+
+    // 事前計算された回転・相似拡大行列による変換
+    float c2 = param_geom.y;
+    float cs = param_geom.z;
+    float nx = w.x * c2 - w.y * cs;
+    float ny = w.x * cs + w.y * c2;
+
+    // ズーム進行の適用
+    nx -= param_center.w;
+
+    // 周期モジュロ演算（自己相似ループ）
+    float log_r = param_geom.w;
+    float norm_x = nx - log_r;
+    nx = norm_x - ceil(norm_x / period) * period + log_r;
+
+    // 指数写像による逆変換
+    float nr = exp(nx);
+    float2 np = nr * float2(cos(ny), sin(ny));
+    np.x /= aspect;
+
+    float2 nuv = np + center;
+
+    // 境界外処理
+    if (param_render.x > 0.5) {
+        nuv = frac(nuv);
+    } else {
+        if (nuv.x < 0.0 || nuv.x > 1.0 || nuv.y < 0.0 || nuv.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+
+    float4 col = tex.Sample(samp, nuv);
+    return col * param_render.y;
+}
+]]
+
+do
+    local log = math.log
+    local atan2 = math.atan2
+    local cos = math.cos
+    local sin = math.sin
+    local max = math.max
+    local pi = math.pi
+
+    local w, h = obj.w, obj.h
+    local aspect = w / h
+
+    local current_zoom = zoom
+    if auto_move == 1 then
+        current_zoom = current_zoom + obj.time * auto_spd
+    end
+
+    local safe_scale = max(scale_fac, 1.001)
+    local period = max(log(safe_scale), 0.0001)
+    local angle = atan2(2.0 * pi * strands, period)
+    local cos_a = cos(angle)
+    local sin_a = sin(angle)
+    local c2 = cos_a * cos_a
+    local cs = cos_a * sin_a
+    local log_radius = log(max(radius, 0.0001))
+    local zoom_offset = current_zoom * period
+
+    local ncx = cx / w
+    local ncy = cy / h
+
+    obj.pixelshader(
+        "ps_escher_droste",
+        "object",
+        { "object" },
+        {
+            period, c2, cs, log_radius,
+            ncx, ncy, aspect, zoom_offset,
+            (repeat_edge == 1) and 1.0 or 0.0, obj.alpha, 0.0, 0.0
+        },
+        "copy",
+        (repeat_edge == 1) and "loop" or "clip"
+    )
+end
