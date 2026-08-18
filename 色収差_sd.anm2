@@ -1,50 +1,39 @@
 --label:画面効果
+--information:色ズレ(色収差)
 --filter
 
---track@amount:ズレ量/強さ,-2000,2000,10,0.1
---track@angle:角度(平行用),-360,360,0,0.1
---track@center_x:中心X,-4000,4000,0,1
---track@center_y:中心Y,-4000,4000,0,1
+--group:基本設定
+--track@amount:ズレ量/強さ,-2000.0,2000.0,10.0,0.1
+--track@angle:角度(平行用),-360.0,360.0,0.0,0.1
+--track@center_x:中心X,-4000.0,4000.0,0.0,1.0
+--track@center_y:中心Y,-4000.0,4000.0,0.0,1.0
 --trackgroup@center_x,center_y:中心座標
+--group:
+
 --group:詳細設定
---track@quality:品質(サンプル数),1,64,8,1
+--track@quality:品質(サンプル数),2,64,8,1
 --select@mode:モード=0,平行ズレ=0,放射ズレ(倍率)=1,回転ズレ=2
 --select@color_order:配色=0,赤(+)・青(-)=0,緑(+)・赤(-)=1,青(+)・緑(-)=2,赤(+)・緑(-)=3,緑(+)・青(-)=4,青(+)・赤(-)=5
 --check@hide_orig:元画像を表示しない,0
---track@mix_rate:元画像ブレンド,0,100,0,0.1
+--track@mix_rate:元画像ブレンド(%),0.0,100.0,0.0,0.1
 --group:
 
 obj.setanchor("center_x,center_y", 1, "line")
 
-local q = math.floor(math.max(1, quality))
-
-if amount == 0.0 or q < 2 then
+if obj.w <= 0 or obj.h <= 0 or amount == 0.0 then
     return
 end
 
-local angle_rad = math.rad(angle)
-local hide_orig_val = (hide_orig == 1 or hide_orig == true) and 1.0 or 0.0
-
 --[[pixelshader@omni_chromatic_aberration:
+cbuffer Params : register(b0) {
+    float4 param_geom;   // x: amount, y: cos_a, z: sin_a, w: quality
+    float4 param_mode;   // x: mode, y: color_order, z: hide_orig, w: mix_rate
+    float4 param_center; // x: center_px_x, y: center_px_y, z: obj_alpha, w: unused
+    float4 param_res;    // xy: resolution (w, h), zw: inv_res (1/w, 1/h)
+};
+
 Texture2D tex : register(t0);
 SamplerState smp : register(s0);
-
-cbuffer Constants : register(b0) {
-    float amount;
-    float angle_rad;
-    float center_x;
-    float center_y;
-    
-    float quality;
-    float mode;
-    float color_order;
-    float hide_orig;
-    
-    float mix_rate;
-    float tex_w;
-    float tex_h;
-    float padding;
-};
 
 float3 get_color_weight(int order, float t, float hide) {
     if (hide > 0.5 && abs(t) < 0.001) {
@@ -75,31 +64,52 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
     float3 sum_a   = float3(0.0, 0.0, 0.0);
     float3 sum_w   = float3(0.0, 0.0, 0.0);
 
-    int q = (int)quality;
-    int order = (int)(color_order + 0.5);
-    float2 tex_dim = float2(max(tex_w, 1.0), max(tex_h, 1.0));
+    int q = (int)param_geom.w;
+    int order = (int)(param_mode.y + 0.5);
+    float amount_val = param_geom.x;
+    float mode_val = param_mode.x;
+    float hide_val = param_mode.z;
+
+    float2 res = param_res.xy;
+    float2 inv_res = param_res.zw;
+    float2 center_px = param_center.xy;
+
+    // ピクセル座標空間における中心からのベクトル
+    float2 p_px = uv * res;
+    float2 d_px = p_px - center_px;
+
+    float step_factor = (q > 1) ? (2.0 / float(q - 1)) : 0.0;
 
     [loop]
     for (int i = 0; i < q; ++i) {
-        float t = (2.0 * float(i) / float(q - 1) - 1.0);
-        
-        float2 offset_uv = float2(0.0, 0.0);
-        if (mode < 0.5) {
-            float2 dir = float2(cos(angle_rad), sin(angle_rad));
-            offset_uv = dir * amount * t / tex_dim;
-        } else if (mode < 1.5) {
-            float2 center = float2(tex_dim.x * 0.5 + center_x, tex_dim.y * 0.5 + center_y);
-            float2 pfc = uv * tex_dim - center;
-            offset_uv = pfc * (amount * 0.001) * t / tex_dim;
+        float t = float(i) * step_factor - 1.0;
+        float2 sample_uv = uv;
+
+        if (mode_val < 0.5) {
+            // 平行ズレ (ピクセル距離ベース)
+            float2 dir = float2(param_geom.y, param_geom.z);
+            sample_uv = uv + (dir * (amount_val * t)) * inv_res;
+        } else if (mode_val < 1.5) {
+            // 放射ズレ (中心を基準とした倍率スケーリング)
+            float scale_factor = 1.0 + (amount_val * 0.001) * t;
+            float2 target_px = center_px + d_px * scale_factor;
+            sample_uv = target_px * inv_res;
         } else {
-            float2 center = float2(tex_dim.x * 0.5 + center_x, tex_dim.y * 0.5 + center_y);
-            float2 pfc = uv * tex_dim - center;
-            float2 dir = float2(-pfc.y, pfc.x);
-            offset_uv = dir * (amount * 0.001) * t / tex_dim;
+            // 回転ズレ (ピクセル空間での真円回転)
+            float rot_angle = (amount_val * 0.001) * t;
+            float cos_r = cos(rot_angle);
+            float sin_r = sin(rot_angle);
+
+            float2 rotated_d = float2(
+                d_px.x * cos_r - d_px.y * sin_r,
+                d_px.x * sin_r + d_px.y * cos_r
+            );
+            float2 target_px = center_px + rotated_d;
+            sample_uv = target_px * inv_res;
         }
         
-        float4 smp_col = tex.Sample(smp, uv + offset_uv);
-        float3 cw = get_color_weight(order, t, hide_orig);
+        float4 smp_col = tex.Sample(smp, sample_uv);
+        float3 cw = get_color_weight(order, t, hide_val);
         
         sum_col += smp_col.rgb * cw;
         sum_a   += float3(smp_col.a, smp_col.a, smp_col.a) * cw;
@@ -118,23 +128,113 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
     
     final_color.a = max(out_a_r, max(out_a_g, out_a_b));
     
-    return lerp(final_color, orig, mix_rate * 0.01);
+    float mix_factor = param_mode.w * 0.01;
+    float4 result = lerp(final_color, orig, mix_factor);
+
+    return result * param_center.z;
 }
 ]]
 
-local constants = {
-    amount,
-    angle_rad,
-    center_x,
-    center_y,
-    q,
-    tonumber(mode) or 0,
-    tonumber(color_order) or 0,
-    hide_orig_val,
-    mix_rate,
-    obj.w,
-    obj.h,
-    0.0
-}
+do
+    local abs = math.abs
+    local max = math.max
+    local ceil = math.ceil
+    local floor = math.floor
+    local rad = math.rad
+    local cos = math.cos
+    local sin = math.sin
+    local sqrt = math.sqrt
 
-obj.pixelshader("omni_chromatic_aberration", "object", {"object"}, constants, "copy", "clamp")
+    local q = floor(max(quality, 2))
+    local angle_rad = rad(angle)
+    local cos_a = cos(angle_rad)
+    local sin_a = sin(angle_rad)
+
+    local ex_x = 0
+    local ex_y = 0
+
+    local orig_w = obj.w
+    local orig_h = obj.h
+
+    -- 領域拡張幅の幾何学的算出
+    if mode == 0 then
+        local max_shift = abs(amount)
+        ex_x = ceil(abs(cos_a) * max_shift) + 2
+        ex_y = ceil(abs(sin_a) * max_shift) + 2
+    elseif mode == 1 then
+        local hw = orig_w * 0.5
+        local hh = orig_h * 0.5
+        local cx_rel = center_x
+        local cy_rel = center_y
+
+        local d1 = sqrt((-hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
+        local d2 = sqrt(( hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
+        local d3 = sqrt(( hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
+        local d4 = sqrt((-hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
+        local max_dist = max(d1, max(d2, max(d3, d4)))
+
+        local max_shift = max_dist * (abs(amount) * 0.001)
+        local pad = ceil(max_shift) + 4
+        ex_x = pad
+        ex_y = pad
+    else
+        local hw = orig_w * 0.5
+        local hh = orig_h * 0.5
+        local cx_rel = center_x
+        local cy_rel = center_y
+
+        local d1 = sqrt((-hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
+        local d2 = sqrt(( hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
+        local d3 = sqrt(( hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
+        local d4 = sqrt((-hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
+        local max_dist = max(d1, max(d2, max(d3, d4)))
+
+        -- 回転による弦の長さ 2 * R * sin(theta / 2)
+        local max_theta = abs(amount) * 0.001
+        local max_shift = 2.0 * max_dist * sin(max_theta * 0.5)
+        local pad = ceil(max_shift) + 4
+        ex_x = pad
+        ex_y = pad
+    end
+
+    if ex_x > 0 or ex_y > 0 then
+        obj.effect("領域拡張", "上", ex_y, "下", ex_y, "左", ex_x, "右", ex_x)
+    end
+
+    if obj.w <= 0 or obj.h <= 0 then
+        return
+    end
+
+    -- 拡張後バッファ上の中心ピクセル座標
+    local center_px_x = obj.w * 0.5 + center_x
+    local center_px_y = obj.h * 0.5 + center_y
+
+    obj.pixelshader(
+        "omni_chromatic_aberration",
+        "object",
+        { "object" },
+        {
+            amount,
+            cos_a,
+            sin_a,
+            q,
+
+            mode,
+            color_order,
+            (hide_orig == 1) and 1.0 or 0.0,
+            mix_rate,
+
+            center_px_x,
+            center_px_y,
+            obj.alpha,
+            0.0,
+
+            obj.w,
+            obj.h,
+            1.0 / obj.w,
+            1.0 / obj.h
+        },
+        "copy",
+        "clip"
+    )
+end
