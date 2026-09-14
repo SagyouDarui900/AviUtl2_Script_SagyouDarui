@@ -1,12 +1,17 @@
 --label:クリッピング
+--information:クリッピング
 --filter
 
---group:上方向設定
+--group:基本設定,true
+--check@invert_clip:クリッピングを反転,0
+--group:
+
+--group:上方向設定,true
 --track@clip_top:上::クリッピング(%),0.0,100.0,0.0,0.1
 --track@angle_top:上角度::角度,-360.0,360.0,0.0,0.1
 --group:
 
---group:下方向設定
+--group:下方向設定,true
 --check@sync_tb:上下同期(下を上に),0
 --track@clip_bottom:下::クリッピング(%),0.0,100.0,0.0,0.1
 --track@angle_bottom:下角度::角度,-360.0,360.0,0.0,0.1
@@ -14,12 +19,12 @@
 --hide@angle_bottom:sync_tb==1
 --group:
 
---group:左方向設定
+--group:左方向設定,true
 --track@clip_left:左::クリッピング(%),0.0,100.0,0.0,0.1
 --track@angle_left:左角度::角度,-360.0,360.0,0.0,0.1
 --group:
 
---group:右方向設定
+--group:右方向設定,true
 --check@sync_lr:左右同期(右を左に),0
 --track@clip_right:右::クリッピング(%),0.0,100.0,0.0,0.1
 --track@angle_right:右角度::角度,-360.0,360.0,0.0,0.1
@@ -41,39 +46,40 @@ local a_left = angle_left
 local c_right = (sync_lr == 1) and c_left or clip_right
 local a_right = (sync_lr == 1) and a_left or angle_right
 
--- 全クリッピングが無効な場合は処理をスキップ
-if c_top <= 0.0 and c_bottom <= 0.0 and c_left <= 0.0 and c_right <= 0.0 then
+local act_t = (c_top > 0.0 or a_top ~= 0.0) and 1.0 or 0.0
+local act_b = (c_bottom > 0.0 or a_bottom ~= 0.0) and 1.0 or 0.0
+local act_l = (c_left > 0.0 or a_left ~= 0.0) and 1.0 or 0.0
+local act_r = (c_right > 0.0 or a_right ~= 0.0) and 1.0 or 0.0
+
+if act_t + act_b + act_l + act_r == 0.0 then
     return
 end
 
 --[[pixelshader@clipping_sd_ps:
 cbuffer Params : register(b0) {
-    float4 plane_top;    // xy: normal, z: dist_threshold, w: is_active
-    float4 plane_bottom; // xy: normal, z: dist_threshold, w: is_active
-    float4 plane_left;   // xy: normal, z: dist_threshold, w: is_active
-    float4 plane_right;  // xy: normal, z: dist_threshold, w: is_active
-    float4 render_size;  // xy: obj_size, zw: unused
+    float4 plane_top;
+    float4 plane_bottom;
+    float4 plane_left;
+    float4 plane_right;
+    float4 render_size;
 };
 
 Texture2D t0 : register(t0);
 SamplerState s0 : register(s0);
 
 float clip_plane(float2 p, float4 plane) {
-    if (plane.w < 0.5) return 1.0;
-    
-    // 法線方向の距離計算
     float d = dot(p, plane.xy) - plane.z;
     float fw = max(fwidth(d), 0.0001);
-    return 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
+    float clip_val = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
+    return lerp(1.0, clip_val, plane.w);
 }
 
-float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     float4 color = t0.Sample(s0, uv);
     if (color.a <= 0.0) {
-        return float4(0.0, 0.0, 0.0, 0.0);
+        return color;
     }
 
-    // 中心原点のローカルピクセル座標
     float2 p = (uv - 0.5) * render_size.xy;
 
     float alpha_mult = 1.0;
@@ -82,11 +88,8 @@ float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
     alpha_mult *= clip_plane(p, plane_left);
     alpha_mult *= clip_plane(p, plane_right);
 
-    if (alpha_mult <= 0.0) {
-        return float4(0.0, 0.0, 0.0, 0.0);
-    }
+    alpha_mult = abs(render_size.z - alpha_mult);
 
-    // Premultiplied Alpha 適用
     return color * alpha_mult;
 }
 ]]
@@ -95,41 +98,28 @@ do
     local rad = math.rad
     local sin = math.sin
     local cos = math.cos
-
     local w = obj.w
     local h = obj.h
 
-    -- 1. 上辺プレーン (法線, 距離閾値, 有効フラグ)
     local rad_t = rad(a_top)
     local n_top_x = sin(rad_t)
     local n_top_y = -cos(rad_t)
-    local p_top_y = -h * 0.5 + h * (c_top * 0.01)
-    local d_top = p_top_y * n_top_y
-    local act_t = (c_top > 0.0 or a_top ~= 0.0) and 1.0 or 0.0
+    local d_top = (-h * 0.5 + h * (c_top * 0.01)) * n_top_y
 
-    -- 2. 下辺プレーン
     local rad_b = rad(a_bottom)
     local n_bot_x = -sin(rad_b)
     local n_bot_y = cos(rad_b)
-    local p_bot_y = h * 0.5 - h * (c_bottom * 0.01)
-    local d_bot = p_bot_y * n_bot_y
-    local act_b = (c_bottom > 0.0 or a_bottom ~= 0.0) and 1.0 or 0.0
+    local d_bot = (h * 0.5 - h * (c_bottom * 0.01)) * n_bot_y
 
-    -- 3. 左辺プレーン
     local rad_l = rad(a_left)
     local n_left_x = -cos(rad_l)
     local n_left_y = -sin(rad_l)
-    local p_left_x = -w * 0.5 + w * (c_left * 0.01)
-    local d_left = p_left_x * n_left_x
-    local act_l = (c_left > 0.0 or a_left ~= 0.0) and 1.0 or 0.0
+    local d_left = (-w * 0.5 + w * (c_left * 0.01)) * n_left_x
 
-    -- 4. 右辺プレーン
     local rad_r = rad(a_right)
     local n_right_x = cos(rad_r)
     local n_right_y = sin(rad_r)
-    local p_right_x = w * 0.5 - w * (c_right * 0.01)
-    local d_right = p_right_x * n_right_x
-    local act_r = (c_right > 0.0 or a_right ~= 0.0) and 1.0 or 0.0
+    local d_right = (w * 0.5 - w * (c_right * 0.01)) * n_right_x
 
     obj.pixelshader(
         "clipping_sd_ps",
@@ -140,7 +130,7 @@ do
             n_bot_x, n_bot_y, d_bot, act_b,
             n_left_x, n_left_y, d_left, act_l,
             n_right_x, n_right_y, d_right, act_r,
-            w, h, 0.0, 0.0
+            w, h, (invert_clip == 1) and 1.0 or 0.0, 0.0
         },
         "copy",
         "clamp"
