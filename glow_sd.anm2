@@ -2,283 +2,419 @@
 --information:グロー_sd
 --filter
 
---group:抽出・露出
+--group:抽出・露出,true
+--select@luma_type:抽出基準=1,Rec.709(実写向け)=0,最大値(イラスト向け)=1
 --track@threshold:抽出閾値,0.0,5.0,0.2,0.01
---track@smooth_val:閾値平滑化,0.0,2.0,0.2,0.01
+--track@softness:閾値の柔らかさ,0.0,1.0,0.5,0.01
 --track@exposure:発光強度,0.0,20.0,1.0,0.01
---track@highlight:ハイライト強調,0.0,20.0,1.0,0.01
+--track@highlight:ハイライト強調,0.0,10.0,1.0,0.01
 --group:
 
---group:拡散・減衰
---track@radius:拡散半径,0,4000,500,1
---track@spread:拡散幅,0.1,5.0,1.0,0.01
---track@falloff:減衰指数,0.0,5.0,1.0,0.01
---track@core_boost:芯の強調,0.0,10.0,0.0,0.01
+--group:拡散・減衰,false
+--track@radius:拡散半径,0,500,100,1
+--track@spread:サンプリング幅,0.1,5.0,1.0,0.01
+--track@aspect:縦横拡散比,-1.0,1.0,0.0,0.01
+--track@falloff:減衰の滑らかさ,0.5,4.0,2.0,0.01
+--track@core_boost:芯の強調,0.0,5.0,0.0,0.01
 --group:
 
---group:色波長減衰補正
---track@rad_r:赤減衰補正,0.0,3.0,1.0,0.01
---track@rad_g:緑減衰補正,0.0,3.0,1.0,0.01
---track@rad_b:青減衰補正,0.0,3.0,1.0,0.01
---trackgroup@rad_r,rad_g,rad_b:波長減衰補正
+--group:カラー・オプション,false
+--check@preserve_hue:色相・彩度を維持,1
+--check@color_override:単色グロー化,0
+--color@glow_color:グロー色,0xffffff
+--track@rad_r:赤拡散補正,0.0,2.0,1.0,0.01
+--track@rad_g:緑拡散補正,0.0,2.0,1.0,0.01
+--track@rad_b:青拡散補正,0.0,2.0,1.0,0.01
+--trackgroup@rad_r,rad_g,rad_b:波長拡散補正
+--hide@glow_color:color_override==0
 --group:
 
---group:出力・トーンマップ
+--group:出力・合成,false
 --track@intensity:合成強度,0.0,20.0,1.0,0.01
---check@normalize:パス数正規化,1
---select@tone_map:トーンマップ=0,なし=0,ACES=1,Reinhard=2
+--select@tone_map:トーン制御=1,なし=0,フィルムロールオフ=1,ACES=2,Reinhard=3,Uncharted 2=4,AgX=5
+--track@highlight_roll:ハイライト圧縮,0.1,10.0,1.0,0.01
 --select@blend_mode:合成モード=0,加算=0,スクリーン=1
+--hide@highlight_roll:tone_map==0
 --group:
 
-if obj.w <= 0 or obj.h <= 0 or radius <= 0 then
+local floor = math.floor
+local ceil = math.ceil
+local log = math.log
+local max = math.max
+local min = math.min
+
+if obj.w <= 0 or obj.h <= 0 or intensity <= 0 or radius <= 0 then
     return
 end
 
+local max_w, max_h = obj.getinfo("image_max")
+if not obj.getinfo("filter") then
+    local pad_amount = radius * spread * 2.0
+    local pad_x = floor(max(min(pad_amount, (max_w - obj.w) / 2), 0))
+    local pad_y = floor(max(min(pad_amount, (max_h - obj.h) / 2), 0))
+    if pad_x > 0 or pad_y > 0 then
+        obj.effect("領域拡張", "上", pad_y, "下", pad_y, "左", pad_x, "右", pad_x, "塗りつぶし", 0)
+    end
+end
+
+local w = floor(obj.w)
+local h = floor(obj.h)
+
+local asp_x = (aspect > 0.0) and 1.0 or (1.0 + aspect)
+local asp_y = (aspect < 0.0) and 1.0 or (1.0 - aspect)
+
 --[[pixelshader@extract_ps:
 cbuffer Params : register(b0) {
-    float4 param_extract; // x: threshold, y: smooth_val, z: exposure, w: highlight
+    float4 param_ext;
+    float4 param_col;
+    float4 param_opt;
 };
 
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
-float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float4 col = srcTex.Sample(srcSmp, uv);
-    if (col.a <= 0.0) {
+float3 srgb2linear(float3 c) {
+    float3 c_pos = max(c, 0.0);
+    return lerp(c_pos / 12.92, pow((c_pos + 0.055) / 1.055, 2.4), step(0.04045, c_pos));
+}
+
+float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float4 col = srcTex.SampleLevel(srcSmp, uv, 0.0);
+    if (col.a <= 1e-5) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Straight RGB に変換して知覚輝度を計算
-    float3 straight_rgb = col.rgb / col.a;
-    float luma = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722));
+    float safe_a = max(col.a, 1e-5);
+    float3 straight_rgb = col.rgb / safe_a;
+    float3 linear_rgb = srgb2linear(straight_rgb);
+    
+    float luma = 0.0;
+    if (param_opt.x > 0.5) {
+        luma = max(max(linear_rgb.r, linear_rgb.g), linear_rgb.b);
+    } else {
+        luma = dot(linear_rgb, float3(0.2126, 0.7152, 0.0722));
+    }
 
-    float t = param_extract.x;
-    float s = max(0.001, param_extract.y);
-    float weight = smoothstep(t - s, t + s, luma);
+    float th = param_ext.x;
+    float knee = max(th * saturate(param_ext.y), 1e-4);
+    float soft = luma - th + knee;
+    
+    float soft_sq = (soft * soft) / (4.0 * knee);
+    float extracted_luma = max(0.0, (soft < 2.0 * knee) ? soft_sq : (luma - th));
 
-    float exp_val = param_extract.z;
-    float hl_val = param_extract.w;
+    if (extracted_luma <= 0.0 || luma <= 1e-5) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
 
-    float3 out_rgb = col.rgb * (weight * exp_val * hl_val);
-    float out_a = col.a * (weight * exp_val);
+    float weight = extracted_luma / luma;
+    float exp_val = param_ext.z;
+    float hl_val = param_ext.w;
+    
+    float boost = 1.0 + max(0.0, luma - 1.0) * (hl_val - 1.0);
+    boost = boost / (1.0 + max(0.0, boost - 10.0) * 0.1); 
 
-    return float4(out_rgb, out_a);
+    float3 base_color = lerp(linear_rgb, param_col.yzw * luma, param_col.x);
+    float3 glow_rad = base_color * (weight * exp_val * boost);
+
+    return float4(glow_rad * col.a, col.a * weight);
 }
 ]]
 
 --[[pixelshader@downsample_ps:
 cbuffer Params : register(b0) {
-    float4 param_down; // xy: inv_res, z: spread, w: unused
+    float4 param_down;
 };
 
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
-float4 downsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float2 halfpixel = param_down.xy * (param_down.z * 0.5);
-    
-    // 13-tap ダウンサンプリング
-    float4 sum = srcTex.Sample(srcSmp, uv) * 4.0;
-    sum += srcTex.Sample(srcSmp, uv - halfpixel);
-    sum += srcTex.Sample(srcSmp, uv + halfpixel);
-    sum += srcTex.Sample(srcSmp, uv + float2(halfpixel.x, -halfpixel.y));
-    sum += srcTex.Sample(srcSmp, uv - float2(halfpixel.x, -halfpixel.y));
+float4 downsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float2 t = param_down.xy * param_down.zw;
+    float x = t.x;
+    float y = t.y;
 
-    return sum * 0.125;
+    float4 a = srcTex.SampleLevel(srcSmp, float2(uv.x - 2.0*x, uv.y - 2.0*y), 0.0);
+    float4 b = srcTex.SampleLevel(srcSmp, float2(uv.x,         uv.y - 2.0*y), 0.0);
+    float4 c = srcTex.SampleLevel(srcSmp, float2(uv.x + 2.0*x, uv.y - 2.0*y), 0.0);
+    float4 d = srcTex.SampleLevel(srcSmp, float2(uv.x - 2.0*x, uv.y),         0.0);
+    float4 e = srcTex.SampleLevel(srcSmp, float2(uv.x,         uv.y),         0.0);
+    float4 f = srcTex.SampleLevel(srcSmp, float2(uv.x + 2.0*x, uv.y),         0.0);
+    float4 g = srcTex.SampleLevel(srcSmp, float2(uv.x - 2.0*x, uv.y + 2.0*y), 0.0);
+    float4 h = srcTex.SampleLevel(srcSmp, float2(uv.x,         uv.y + 2.0*y), 0.0);
+    float4 i = srcTex.SampleLevel(srcSmp, float2(uv.x + 2.0*x, uv.y + 2.0*y), 0.0);
+    float4 j = srcTex.SampleLevel(srcSmp, float2(uv.x - x, uv.y - y), 0.0);
+    float4 k = srcTex.SampleLevel(srcSmp, float2(uv.x + x, uv.y - y), 0.0);
+    float4 l = srcTex.SampleLevel(srcSmp, float2(uv.x - x, uv.y + y), 0.0);
+    float4 m = srcTex.SampleLevel(srcSmp, float2(uv.x + x, uv.y + y), 0.0);
+
+    float4 sum = e * 0.125;
+    sum += (a + c + g + i) * 0.03125;
+    sum += (b + d + f + h) * 0.0625;
+    sum += (j + k + l + m) * 0.125;
+
+    return sum;
 }
 ]]
 
 --[[pixelshader@upsample_ps:
 cbuffer Params : register(b0) {
-    float4 param_up;    // xy: inv_res, z: spread, w: weight
-    float4 param_color; // rgb: color_weight, w: unused
+    float4 param_up;
+    float4 param_color;
+    float4 param_extra;
 };
 
-Texture2D srcTex : register(t0);
-Texture2D accumTex : register(t1);
+Texture2D lowerTex : register(t0);
+Texture2D currentTex : register(t1);
 SamplerState srcSmp : register(s0);
 
-float4 upsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float2 halfpixel = param_up.xy * (param_up.z * 0.5);
+float4 upsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float2 t = param_up.xy * param_up.zw;
+    float x = t.x;
+    float y = t.y;
 
-    // 9-tap テントフィルタ アップサンプリング
-    float4 sum = srcTex.Sample(srcSmp, uv) * 4.0;
-    sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x * 2.0, 0.0));
-    sum += srcTex.Sample(srcSmp, uv + float2( halfpixel.x * 2.0, 0.0));
-    sum += srcTex.Sample(srcSmp, uv + float2(0.0,  halfpixel.y * 2.0));
-    sum += srcTex.Sample(srcSmp, uv + float2(0.0, -halfpixel.y * 2.0));
-    sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x,  halfpixel.y)) * 2.0;
-    sum += srcTex.Sample(srcSmp, uv + float2( halfpixel.x,  halfpixel.y)) * 2.0;
-    sum += srcTex.Sample(srcSmp, uv + float2( halfpixel.x, -halfpixel.y)) * 2.0;
-    sum += srcTex.Sample(srcSmp, uv + float2(-halfpixel.x, -halfpixel.y)) * 2.0;
+    float4 a = lowerTex.SampleLevel(srcSmp, float2(uv.x - x, uv.y - y), 0.0);
+    float4 b = lowerTex.SampleLevel(srcSmp, float2(uv.x,     uv.y - y), 0.0);
+    float4 c = lowerTex.SampleLevel(srcSmp, float2(uv.x + x, uv.y - y), 0.0);
+    float4 d = lowerTex.SampleLevel(srcSmp, float2(uv.x - x, uv.y),     0.0);
+    float4 e = lowerTex.SampleLevel(srcSmp, float2(uv.x,     uv.y),     0.0);
+    float4 f = lowerTex.SampleLevel(srcSmp, float2(uv.x + x, uv.y),     0.0);
+    float4 g = lowerTex.SampleLevel(srcSmp, float2(uv.x - x, uv.y + y), 0.0);
+    float4 h = lowerTex.SampleLevel(srcSmp, float2(uv.x,     uv.y + y), 0.0);
+    float4 i = lowerTex.SampleLevel(srcSmp, float2(uv.x + x, uv.y + y), 0.0);
 
-    float4 blur = sum * 0.0625;
-    float3 color_w = param_color.rgb * param_up.w;
-    blur.rgb *= color_w;
-    blur.a *= param_up.w;
+    float4 blur = e * 0.25;
+    blur += (b + d + f + h) * 0.125;
+    blur += (a + c + g + i) * 0.0625;
 
-    float4 acc = accumTex.Sample(srcSmp, uv);
-    return blur + acc;
+    blur.rgb *= param_color.rgb;
+
+    float4 cur = currentTex.Load(int3(pos.xy, 0));
+    return (cur * param_color.w) + (blur * param_extra.x);
 }
 ]]
 
 --[[pixelshader@composite_ps:
 cbuffer Params : register(b0) {
-    float4 param_comp; // x: intensity, y: tone_map, z: blend_mode, w: obj_alpha
+    float4 param_comp;
+    float4 param_extra;
 };
 
 Texture2D origTex : register(t0);
 Texture2D bloomTex : register(t1);
 SamplerState srcSmp : register(s0);
 
-float3 ACESFilm(float3 x) {
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
+float3 srgb2linear(float3 c) {
+    float3 c_pos = max(c, 0.0);
+    return lerp(c_pos / 12.92, pow((c_pos + 0.055) / 1.055, 2.4), step(0.04045, c_pos));
+}
+
+float3 linear2srgb(float3 c) {
+    float3 c_pos = max(c, 0.0);
+    return lerp(c_pos * 12.92, 1.055 * pow(c_pos, 1.0 / 2.4) - 0.055, step(0.0031308, c_pos));
+}
+
+float3 tm_aces_fitted(float3 x) {
+    float a = 2.51; float b = 0.03; float c = 2.43; float d = 0.59; float e = 0.14;
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
-float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float4 orig = origTex.Sample(srcSmp, uv);
-    float4 bloom = bloomTex.Sample(srcSmp, uv);
+float3 tm_hable_partial(float3 x) {
+    float a = 0.15; float b = 0.50; float c = 0.10; float d = 0.20; float e = 0.02; float f = 0.30;
+    return max(0.0, ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f);
+}
 
-    float3 bloom_rgb = bloom.rgb * param_comp.x;
-    float3 out_rgb;
+float3 tm_uncharted2(float3 x, float white_point) {
+    float3 curr = tm_hable_partial(x * 2.0);
+    float3 white_scale = 1.0 / max(1e-5, tm_hable_partial(float3(white_point, white_point, white_point)));
+    return saturate(curr * white_scale);
+}
 
-    if (param_comp.z > 0.5) {
-        // スクリーン合成
-        float3 c_orig = min(orig.rgb, 1.0);
-        float3 c_bloom = min(bloom_rgb, 1.0);
-        out_rgb = orig.rgb + bloom_rgb - (c_orig * c_bloom);
-    } else {
-        // 加算合成
-        out_rgb = orig.rgb + bloom_rgb;
+float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float4 orig = origTex.SampleLevel(srcSmp, uv, 0.0);
+    float4 bloom = bloomTex.SampleLevel(srcSmp, uv, 0.0);
+
+    float orig_a = orig.a;
+    float3 orig_lin = srgb2linear(orig.rgb / max(orig_a, 1e-5)) * orig_a;
+    float3 bloom_lin = max(bloom.rgb * param_comp.x, 0.0);
+
+    float combined_a = orig_a; 
+
+    float3 add_lin = orig_lin + bloom_lin;
+    float3 scr_lin = add_lin - (saturate(orig_lin) * saturate(bloom_lin));
+    float3 combined_lin = lerp(add_lin, scr_lin, param_comp.z);
+
+    float mode = param_comp.y;
+    float roll = max(0.01, param_extra.x);
+    float luma = dot(combined_lin, float3(0.2126, 0.7152, 0.0722));
+    float3 out_lin = combined_lin;
+
+    if (mode > 0.0) {
+        if (param_extra.y > 0.5) {
+            float mapped_luma = luma;
+            if (mode == 1.0) {
+                if (luma > 1.0) mapped_luma = 1.0 + (1.0 - exp(-(luma - 1.0) * roll)) / roll;
+            } else if (mode == 2.0) {
+                float safe_x = min(luma * roll, 60.0);
+                mapped_luma = tm_aces_fitted(float3(safe_x, safe_x, safe_x)).r;
+            } else if (mode == 3.0) {
+                float w_val = max(roll * 2.0, 0.1);
+                float w2 = w_val * w_val;
+                mapped_luma = (luma * (1.0 + luma / w2)) / (1.0 + luma);
+            } else if (mode == 4.0) {
+                mapped_luma = tm_uncharted2(float3(luma, luma, luma), max(1.0, roll * 2.0)).r;
+            } else if (mode == 5.0) {
+                mapped_luma = luma / (1.0 + luma * (0.5 / max(roll, 0.1)));
+            }
+            out_lin = combined_lin * (mapped_luma / max(luma, 1e-5));
+        } else {
+            if (mode == 1.0) {
+                if (out_lin.r > 1.0) out_lin.r = 1.0 + (1.0 - exp(-(out_lin.r - 1.0) * roll)) / roll;
+                if (out_lin.g > 1.0) out_lin.g = 1.0 + (1.0 - exp(-(out_lin.g - 1.0) * roll)) / roll;
+                if (out_lin.b > 1.0) out_lin.b = 1.0 + (1.0 - exp(-(out_lin.b - 1.0) * roll)) / roll;
+            } else if (mode == 2.0) {
+                out_lin = tm_aces_fitted(min(combined_lin * roll, 60.0));
+            } else if (mode == 3.0) {
+                float w_val = max(roll * 2.0, 0.1);
+                float w2 = w_val * w_val;
+                out_lin = (combined_lin * (1.0 + combined_lin / w2)) / (1.0 + combined_lin);
+            } else if (mode == 4.0) {
+                out_lin = tm_uncharted2(combined_lin, max(1.0, roll * 2.0));
+            } else if (mode == 5.0) {
+                float3 desat_col = lerp(combined_lin, float3(luma, luma, luma), saturate((luma - 0.5) * 0.5 * roll));
+                out_lin = desat_col / (1.0 + desat_col * (0.5 / max(roll, 0.1)));
+            }
+        }
     }
 
-    if (param_comp.y == 1.0) {
-        out_rgb = ACESFilm(out_rgb);
-    } else if (param_comp.y == 2.0) {
-        out_rgb = out_rgb / (1.0 + out_rgb);
-    }
+    float safe_a = max(combined_a, 1e-5);
+    float3 base_lin = min(out_lin, safe_a);
+    float3 glow_lin = max(0.0, out_lin - safe_a);
 
-    float out_a = min(1.0, orig.a + bloom.a * param_comp.x) * param_comp.w;
-    return float4(out_rgb * param_comp.w, out_a);
+    float3 straight_base = base_lin / safe_a;
+    float3 srgb_base = linear2srgb(straight_base) * combined_a;
+    float3 srgb_glow = linear2srgb(glow_lin);
+
+    float3 out_rgb = srgb_base + srgb_glow;
+    float noise = frac(52.9829189 * frac(dot(pos.xy, float2(0.06711056, 0.00583715))));
+    out_rgb += (noise - 0.5) / 255.0;
+
+    return float4(max(out_rgb, 0.0) * param_comp.w, combined_a * param_comp.w);
 }
 ]]
 
-do
-    local floor = math.floor
-    local log = math.log
-    local max = math.max
-    local min = math.min
-    local sqrt = math.sqrt
+local max_passes = 8
+local log2_r = max(log(max(1, radius)) / log(2.0), 0.05)
+local n_full = min(floor(log2_r), max_passes)
+local frac = log2_r - n_full
+local passes = min(n_full + (frac > 0 and 1 or 0), max_passes)
 
-    local max_passes = 8
-    local raw_passes = floor(log(max(1, radius)) / log(2.0))
-    local passes = max(0, min(max_passes, raw_passes))
-
-    if passes > 0 then
-        local w = obj.w
-        local h = obj.h
-
-        -- 1. 輝度抽出パス
-        obj.setoption("drawtarget", "tempbuffer", w, h)
-        obj.pixelshader(
-            "extract_ps",
-            "tempbuffer",
-            { "object" },
-            { threshold, smooth_val, exposure, highlight },
-            "copy",
-            "clamp"
-        )
-        obj.copybuffer("cache:bloom_d0", "tempbuffer")
-
-        local widths = { [0] = w }
-        local heights = { [0] = h }
-        local actual_passes = 0
-
-        -- 2. ダウンサンプリングループ
-        for i = 1, passes do
-            local next_w = max(1, floor(widths[i - 1] * 0.5))
-            local next_h = max(1, floor(heights[i - 1] * 0.5))
-
-            if next_w < 2 and next_h < 2 then
-                break
-            end
-
-            widths[i] = next_w
-            heights[i] = next_h
-            actual_passes = i
-
-            obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
-            obj.pixelshader(
-                "downsample_ps",
-                "tempbuffer",
-                { "cache:bloom_d" .. (i - 1) },
-                { 1.0 / widths[i - 1], 1.0 / heights[i - 1], spread, 0.0 },
-                "copy",
-                "clamp"
-            )
-            obj.copybuffer("cache:bloom_d" .. i, "tempbuffer")
-        end
-
-        -- 3. アップサンプリング＆合成ループ
-        if actual_passes > 0 then
-            obj.copybuffer("cache:bloom_accum", "cache:bloom_d" .. actual_passes)
-
-            for i = actual_passes - 1, 0, -1 do
-                obj.setoption("drawtarget", "tempbuffer", widths[i], heights[i])
-
-                local depth_val = i + 1.0
-                local step_weight = 1.0
-                if falloff > 0.0 then
-                    step_weight = 1.0 / max(0.001, depth_val ^ falloff)
-                end
-
-                if core_boost > 0.0 then
-                    if i == 0 then
-                        step_weight = step_weight + core_boost
-                    elseif i == 1 then
-                        step_weight = step_weight + (core_boost * 0.5)
-                    elseif i == 2 then
-                        step_weight = step_weight + (core_boost * 0.25)
-                    end
-                end
-
-                obj.pixelshader(
-                    "upsample_ps",
-                    "tempbuffer",
-                    { "cache:bloom_d" .. i, "cache:bloom_accum" },
-                    {
-                        1.0 / widths[i + 1], 1.0 / heights[i + 1], spread, step_weight,
-                        rad_r, rad_g, rad_b, 0.0
-                    },
-                    "copy",
-                    "clamp"
-                )
-                obj.copybuffer("cache:bloom_accum", "tempbuffer")
-            end
-
-            local norm_factor = 1.0
-            if normalize == 1 then
-                norm_factor = 1.0 / max(1.0, sqrt(actual_passes))
-            end
-            local final_intensity = intensity * norm_factor
-
-            -- 4. 元画像との最終コンポジット
-            obj.setoption("drawtarget", "tempbuffer", w, h)
-            obj.pixelshader(
-                "composite_ps",
-                "tempbuffer",
-                { "object", "cache:bloom_accum" },
-                { final_intensity, tone_map, blend_mode, obj.alpha },
-                "copy",
-                "clamp"
-            )
-            obj.copybuffer("object", "tempbuffer")
-            obj.setoption("drawtarget", "framebuffer")
-        end
+local widths = { [0] = w }
+local heights = { [0] = h }
+local actual_passes = 0
+for k = 1, passes do
+    if min(widths[k - 1], heights[k - 1]) <= 4 then
+        break
     end
+    widths[k] = max(1, ceil(widths[k - 1] / 2))
+    heights[k] = max(1, ceil(heights[k - 1] / 2))
+    actual_passes = k
 end
+passes = actual_passes
+
+if passes <= 0 then
+    return
+end
+
+obj.copybuffer("cache:glow_orig", "object")
+
+local down_buf = {}
+local up_buf = {}
+for k = 0, passes do
+    down_buf[k] = "cache:glow_down_" .. k
+    up_buf[k] = "cache:glow_up_" .. k
+end
+
+local is_color_override = (color_override == 1) and 1.0 or 0.0
+local is_luma_type = (luma_type == 1) and 1.0 or 0.0
+local r, g, b = RGB(glow_color)
+local lr = (r / 255.0) ^ 2.2
+local lg = (g / 255.0) ^ 2.2
+local lb = (b / 255.0) ^ 2.2
+
+obj.clearbuffer(down_buf[0], w, h)
+obj.pixelshader(
+    "extract_ps",
+    down_buf[0],
+    "cache:glow_orig",
+    { 
+        threshold, softness, exposure, highlight,
+        is_color_override, lr, lg, lb,
+        is_luma_type, 0.0, 0.0, 0.0
+    },
+    "copy",
+    "clip"
+)
+
+for i = 1, passes do
+    obj.clearbuffer(down_buf[i], widths[i], heights[i])
+    obj.pixelshader(
+        "downsample_ps",
+        down_buf[i],
+        down_buf[i - 1],
+        { 1.0 / widths[i], 1.0 / heights[i], spread * asp_x, spread * asp_y },
+        "copy",
+        "clip"
+    )
+end
+
+local partial = (frac > 0 and passes == n_full + 1)
+local q = 2.0 ^ (2.0 - falloff)
+local total_weight = 1.0
+local coeff = 1.0
+
+for k = 1, passes do
+    coeff = coeff * q
+    total_weight = total_weight + (partial and k == passes and coeff * frac or coeff)
+end
+
+local current_src = down_buf[passes]
+
+for i = passes - 1, 0, -1 do
+    local wl = (partial and i == passes - 1) and (q * frac) or q
+    local core_scale = (i == 0) and core_boost or 1.0
+
+    local depth_ratio = (i + 1) / passes
+    local cr = 1.0 + (rad_r - 1.0) * depth_ratio
+    local cg = 1.0 + (rad_g - 1.0) * depth_ratio
+    local cb = 1.0 + (rad_b - 1.0) * depth_ratio
+
+    obj.clearbuffer(up_buf[i], widths[i], heights[i])
+    obj.pixelshader(
+        "upsample_ps",
+        up_buf[i],
+        { current_src, down_buf[i] },
+        {
+            1.0 / widths[i + 1], 1.0 / heights[i + 1], spread * asp_x, spread * asp_y,
+            cr, cg, cb, core_scale,
+            wl, 0.0, 0.0, 0.0
+        },
+        "copy",
+        "clip"
+    )
+    current_src = up_buf[i]
+end
+
+local final_intensity = intensity / max(0.001, total_weight)
+local is_preserve_hue = (preserve_hue == 1) and 1.0 or 0.0
+
+obj.pixelshader(
+    "composite_ps",
+    "object",
+    { "cache:glow_orig", current_src },
+    {
+        final_intensity, tone_map, blend_mode, obj.alpha,
+        highlight_roll, is_preserve_hue, 0.0, 0.0
+    },
+    "copy",
+    "clip"
+)
