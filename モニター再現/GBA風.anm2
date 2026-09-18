@@ -155,8 +155,7 @@ local gx, gy
 
 if is_pix then
     gy = 160
-    local dot_size = obj.h / 160
-    gx = math.max(1, math.floor(obj.w / dot_size + 0.5))
+    gx = 240
 else
     local s = math.max(scale or 4.0, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))

@@ -94,7 +94,8 @@
         if (current_barrier > 0.0) {
             float shift = angle * 0.01;
             float barrier_phase = frac(uv.x * grid_num.x + shift);
-            float barrier_slit = smoothstep(0.0, 0.15, barrier_phase) * smoothstep(1.0, 0.85, barrier_phase);
+            float barrier_slit = smoothstep(0.0, 0.15, barrier_phase) *
+                (1.0 - smoothstep(0.85, 1.0, barrier_phase));
             rgb = lerp(rgb, rgb * 0.25, (1.0 - barrier_slit) * current_barrier);
         }
 
@@ -106,9 +107,8 @@
         float dy = min(inner_uv.y, 1.0 - inner_uv.y);
         float shape = smoothstep(border_x - sm, border_x + sm, dx) * smoothstep(border_y - sm, border_y + sm, dy);
 
-        float3 out_rgb = rgb * sub_mask * shape;
         float3 matrix_color = float3(0.02, 0.02, 0.02);
-        float3 final_rgb = lerp(matrix_color, out_rgb, shape);
+        float3 final_rgb = lerp(matrix_color, rgb * sub_mask, shape);
 
         return float4(saturate(final_rgb) * original.a, original.a);
     }
@@ -120,8 +120,7 @@ local gx, gy
 
 if is_pix then
     gy = 240
-    local dot_size = obj.h / 240
-    gx = math.max(1, math.floor(obj.w / dot_size + 0.5))
+    gx = (screen == 1 or screen == 1.0) and 320 or 400
 else
     local s = math.max(scale or 4.0, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
