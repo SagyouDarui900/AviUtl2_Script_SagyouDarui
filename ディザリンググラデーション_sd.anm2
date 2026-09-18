@@ -1,6 +1,6 @@
 --label:色調整
---filter
 --information:ディザリンググラデーション
+--filter
 
 --group:グラデーション設定,true
 --track@width:幅,1,4000,500,1

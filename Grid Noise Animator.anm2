@@ -1,5 +1,5 @@
 --label:画面効果
---information:Grid Noise Animator
+--information:Grid Noise Animator v2.1 (背景透明化対応版)
 --filter
 
 --group:グリッド設定
@@ -33,6 +33,7 @@
 --track@distort:歪みpx,0.0,200.0,2.0,0.1
 --track@shake:震えpx,0.0,200.0,0.0,0.1
 --track@blur_px:ぼかしpx,0.0,100.0,1.0,0.1
+--check@transparent_bg:背景を透明化,0
 --group:
 
 if obj.w <= 0 or obj.h <= 0 then
@@ -94,6 +95,7 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
 
     float rnd_seed = param_env.x + 123.456;
     float n_type = param_hsv.w;
+    float2 seed_offset = float2(rnd_seed * 0.13, rnd_seed * 0.17);
 
     float r_hue   = (get_noise(grid_uv + float2(rnd_seed * 1.1, rnd_seed * 1.2), n_type) - 0.5) * 2.0;
     float r_sat   = (get_noise(grid_uv + float2(rnd_seed * 1.3, rnd_seed * 1.4), n_type) - 0.5) * 2.0;
@@ -159,7 +161,7 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
 
     // ML保護ノイズ
     if (param_fx.z > 0.5) {
-        float ml_noise = (rand(pos.xy) - 0.5) * 0.1;
+        float ml_noise = (rand(pos.xy + seed_offset) - 0.5) * 0.1;
         rgb = saturate(rgb + ml_noise);
     }
 
@@ -174,6 +176,7 @@ do
     local actual_grid_y = (is_square == 1) and (grid_x * (h / w)) or grid_y
     local safe_cycle = math.max(1, math.floor(sync_cycle))
     local total_seed = math.floor(obj.frame / safe_cycle) + seed_val
+    local sampler_mode = (transparent_bg == 1) and "clip" or "clamp"
 
     obj.pixelshader(
         "grid_noise_animator",
@@ -201,6 +204,6 @@ do
             obj.alpha
         },
         "copy",
-        "clamp"
+        sampler_mode
     )
 end

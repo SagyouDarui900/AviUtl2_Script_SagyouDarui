@@ -36,15 +36,18 @@ Texture2D tex : register(t0);
 SamplerState smp : register(s0);
 
 float3 get_color_weight(int order, float t, float hide) {
-    if (hide > 0.5 && abs(t) < 0.001) {
-        return float3(0.0, 0.0, 0.0);
-    }
-
     float nt = (t + 1.0) * 0.5;
     
     float w1 = max(0.0, 1.0 - abs(nt - 1.0) * 1.5) + 0.05;
     float w2 = max(0.0, 1.0 - abs(nt - 0.5) * 1.5) + 0.05;
     float w3 = max(0.0, 1.0 - abs(nt - 0.0) * 1.5) + 0.05;
+
+    if (hide > 0.5) {
+        float original_suppression = smoothstep(0.05, 0.35, abs(t));
+        w1 *= original_suppression;
+        w2 *= original_suppression;
+        w3 *= original_suppression;
+    }
     
     float3 col = float3(0.0, 0.0, 0.0);
     if (order == 0)      { col = float3(w1, w2, w3); }
@@ -138,6 +141,7 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
 do
     local abs = math.abs
     local max = math.max
+    local min = math.min
     local ceil = math.ceil
     local floor = math.floor
     local rad = math.rad
@@ -145,7 +149,7 @@ do
     local sin = math.sin
     local sqrt = math.sqrt
 
-    local q = floor(max(quality, 2))
+    local q = min(64, floor(max(quality, 2)))
     local angle_rad = rad(angle)
     local cos_a = cos(angle_rad)
     local sin_a = sin(angle_rad)
@@ -206,8 +210,10 @@ do
     end
 
     -- 拡張後バッファ上の中心ピクセル座標
-    local center_px_x = obj.w * 0.5 + center_x
-    local center_px_y = obj.h * 0.5 + center_y
+    local width = max(1, floor(obj.w))
+    local height = max(1, floor(obj.h))
+    local center_px_x = width * 0.5 + center_x
+    local center_px_y = height * 0.5 + center_y
 
     obj.pixelshader(
         "omni_chromatic_aberration",
@@ -229,10 +235,10 @@ do
             obj.alpha,
             0.0,
 
-            obj.w,
-            obj.h,
-            1.0 / obj.w,
-            1.0 / obj.h
+            width,
+            height,
+            1.0 / width,
+            1.0 / height
         },
         "copy",
         "clip"

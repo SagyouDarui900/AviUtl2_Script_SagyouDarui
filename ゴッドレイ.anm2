@@ -23,7 +23,6 @@
 --check@only_light:光のみ出力,false
 --group:
 
--- 早期スキップ
 if intensity <= 0 or samples <= 0 or obj.w <= 0 or obj.h <= 0 then
     if only_light then obj.alpha = 0 end
     return
@@ -34,20 +33,20 @@ end
     SamplerState smp : register(s0);
 
     cbuffer constants : register(b0) {
-        float2 light_uv;        // [0].xy: 光源UV座標
-        float  intensity;       // [0].z
-        float  decay;           // [0].w
+        float2 light_uv;
+        float  intensity;
+        float  decay;
         
-        float  density;         // [1].x
-        float  weight;          // [1].y
-        float  samples;         // [1].z
-        float  threshold;       // [1].w
+        float  density;
+        float  weight;
+        float  samples;
+        float  threshold;
         
-        float3 tint_color;      // [2].xyz: 光線カラー
-        float  original_blend;  // [2].w
+        float3 tint_color;
+        float  original_blend;
         
-        float  only_light;      // [3].x
-        float3 padding;         // [3].yzw: パディング
+        float  only_light;
+        float3 padding;
     };
 
     float rand(float2 co) {
@@ -69,7 +68,6 @@ end
             float2 current_uv = uv - step_uv * (float(i) + jitter);
             float4 s = tex.SampleLevel(smp, current_uv, 0);
             
-            // Premultiplied Alpha からストレートRGBへ復元して輝度判定
             float safe_a = max(s.a, 0.00001);
             float3 straight_rgb = s.rgb / safe_a;
             float lum = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722));
@@ -91,7 +89,6 @@ end
     }
 ]]
 
--- 光源アンカー表示
 obj.setanchor("light_x,light_y", 0, "arm", "color", 0xffd700)
 
 local inv_w = 1.0 / obj.w

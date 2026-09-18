@@ -1,5 +1,5 @@
 --label:光効果
---information:グロー_sd
+--information:グロー_sd (AviUtl2 Optimized / Pro Glow)
 --filter
 
 --group:抽出・露出,true
@@ -57,8 +57,8 @@ if not obj.getinfo("filter") then
     end
 end
 
-local w = floor(obj.w)
-local h = floor(obj.h)
+local w = max(1, floor(obj.w))
+local h = max(1, floor(obj.h))
 
 local asp_x = (aspect > 0.0) and 1.0 or (1.0 + aspect)
 local asp_y = (aspect < 0.0) and 1.0 or (1.0 - aspect)
@@ -361,7 +361,7 @@ for i = 1, passes do
         "downsample_ps",
         down_buf[i],
         down_buf[i - 1],
-        { 1.0 / widths[i], 1.0 / heights[i], spread * asp_x, spread * asp_y },
+        { 1.0 / widths[i - 1], 1.0 / heights[i - 1], spread * asp_x, spread * asp_y },
         "copy",
         "clip"
     )

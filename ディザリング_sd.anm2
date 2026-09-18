@@ -1,6 +1,5 @@
 --label:色調整
---filter
---information:ディザリング
+--information:ディザリング・減色フィルタ (AviUtl2 Optimized)
 
 --group:基本設定,true
 --track@pixel_size:ドットサイズ,1,128,1,1
@@ -32,14 +31,14 @@
 
 --[[pixelshader@dither_ps:
     cbuffer params : register(b0) {
-        float4 p_basic;
-        float4 p_mode;
-        float4 p_steps;
-        float4 p_rcp;
-        float4 p_col1;
-        float4 p_col2;
-        float4 p_env;
-        float4 p_scroll;
+        float4 p_basic;  // x:pixel_size, y:strength, z:intensity, w:threshold
+        float4 p_mode;   // x:matrix_type, y:color_mode, z:use_linear, w:alpha_dither
+        float4 p_steps;  // x:steps_x, y:steps_y, z:steps_z, w:step_a
+        float4 p_rcp;    // x:rcp_x, y:rcp_y, z:rcp_z, w:rcp_a
+        float4 p_col1;   // rgb: 色1, a: 1.0
+        float4 p_col2;   // rgb: 色2, a: 1.0
+        float4 p_env;    // x:time, y:width, z:height, w:rcp_pixel_size
+        float4 p_scroll; // x:scroll_x, y:scroll_y, z:0, w:0
     };
 
     Texture2D tex : register(t0);
@@ -98,9 +97,11 @@
         float2 base_res = float2(p_env.y, p_env.z);
         float2 scroll_offset = p_scroll.xy;
         
+        // オブジェクトの中心を原点(0,0)とするピクセル空間
         float2 center_px = (uv - 0.5) * base_res;
         float2 scrolled_pos = center_px - scroll_offset;
         
+        // 演算の共通化
         float2 grid_float = floor(scrolled_pos * rcp_dot);
         int2 grid_pos = (int2)grid_float;
         float2 sample_uv = uv;
@@ -189,23 +190,28 @@
     }
 ]]
 
-if intensity <= 0 then
+local max = math.max
+local floor = math.floor
+
+if obj.w <= 0 or obj.h <= 0 or intensity <= 0 then
     return
 end
 
-local t_pixel_size = math.max(1, pixel_size)
+local width = max(1, floor(obj.w))
+local height = max(1, floor(obj.h))
+local t_pixel_size = max(1, floor(pixel_size))
 local s_x, s_y, s_z
 
 if use_sep_levels == 1 then
-    s_x = math.max(1, lv_1 - 1)
-    s_y = math.max(1, lv_2 - 1)
-    s_z = math.max(1, lv_3 - 1)
+    s_x = max(1, floor(lv_1) - 1)
+    s_y = max(1, floor(lv_2) - 1)
+    s_z = max(1, floor(lv_3) - 1)
 else
-    local b_step = math.max(1, levels - 1)
+    local b_step = max(1, floor(levels) - 1)
     s_x, s_y, s_z = b_step, b_step, b_step
 end
 
-local s_a = math.max(1, levels - 1)
+local s_a = max(1, floor(levels) - 1)
 local r1, g1, b1 = RGB(col1)
 local r2, g2, b2 = RGB(col2)
 
@@ -216,7 +222,7 @@ local constants = {
     1.0 / s_x, 1.0 / s_y, 1.0 / s_z, 1.0 / s_a,
     r1 / 255.0, g1 / 255.0, b1 / 255.0, 1.0,
     r2 / 255.0, g2 / 255.0, b2 / 255.0, 1.0,
-    obj.time, obj.w, obj.h, 1.0 / t_pixel_size,
+    obj.time, width, height, 1.0 / t_pixel_size,
     scroll_x, scroll_y, 0.0, 0.0
 }
 
