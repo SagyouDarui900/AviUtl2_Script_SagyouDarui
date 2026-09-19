@@ -32,14 +32,25 @@ do
     local cos = math.cos
     local abs = math.abs
     local max = math.max
+    local min = math.min
     local sqrt = math.sqrt
     local floor = math.floor
     local pi = math.pi
     local two_pi = pi * 2.0
+    local obj_time = obj.time or 0
+    local obj_alpha = obj.alpha or 1.0
+    local param_amplitude = max(amplitude or 0, 0)
+    local param_frequency = max(frequency or 1, 0)
+    local param_thickness = max(thickness or 1, 0)
+    local param_sharpness = min(max(sharpness or 1, 1), 100)
+    local param_detail = max(detail or 100, 1)
+    local param_phase_wave = phase_wave or 0
+    local param_phase_thick = phase_thick or 0
+    local param_scroll = scroll or 0
 
     local screen_w = (obj.screen_w and obj.screen_w > 0) and obj.screen_w or 1920
     local base_segments = floor(screen_w / 4)
-    local segments = floor(base_segments * (detail * 0.01))
+    local segments = floor(base_segments * (param_detail * 0.01))
     if segments < 64 then segments = 64 end
     if segments > 2000 then segments = 2000 end
 
@@ -47,17 +58,16 @@ do
     local dx_const = screen_w * inv_segments
     local start_x = -screen_w * 0.5
 
-    local obj_alpha = obj.alpha
-    local r1, g1, b1 = RGB(color1)
-    local r2, g2, b2 = RGB(color2)
+    local r1, g1, b1 = RGB(color1 or 0)
+    local r2, g2, b2 = RGB(color2 or 0)
     local c1_r, c1_g, c1_b = r1 / 255.0, g1 / 255.0, b1 / 255.0
     local c2_r, c2_g, c2_b = r2 / 255.0, g2 / 255.0, b2 / 255.0
 
-    local time_offset = scroll * obj.time * 0.01
-    local wave_phase_base = phase_wave * 0.01 + time_offset
-    local thick_phase_base = phase_thick * 0.01 + time_offset
-    local wave_k = frequency * two_pi
-    local sharpness_factor = (100 - sharpness) * 0.01
+    local time_offset = param_scroll * obj_time * 0.01
+    local wave_phase_base = param_phase_wave * 0.01 + time_offset
+    local thick_phase_base = param_phase_thick * 0.01 + time_offset
+    local wave_k = param_frequency * two_pi
+    local sharpness_factor = (100 - param_sharpness) * 0.01
 
     -- 色算出関数 (乗算済みアルファ)
     local function get_color(u_val)
@@ -81,12 +91,12 @@ do
     -- 断面座標および色算出関数
     local function calc_point(t, x_pos)
         local p_wave = t * wave_k + wave_phase_base
-        local cy = sin(p_wave) * amplitude
+        local cy = sin(p_wave) * param_amplitude
 
         local p_thick = t * wave_k + thick_phase_base
         local base_thick = (sin(p_thick) + 1.0) * 0.5
         local factor = max(0.01, 1.0 - sharpness_factor * base_thick)
-        local half_w = thickness * factor * 0.5
+        local half_w = param_thickness * factor * 0.5
 
         local u_val
         if grad_mode == 0 then
@@ -96,7 +106,7 @@ do
         end
 
         local dx_dt = screen_w
-        local dy_dt = amplitude * wave_k * cos(p_wave)
+        local dy_dt = param_amplitude * wave_k * cos(p_wave)
         local len = sqrt(dx_dt * dx_dt + dy_dt * dy_dt)
         local inv_len = (len > 0.0) and (1.0 / len) or 0.0
 
