@@ -1,5 +1,5 @@
 --label:画面効果
---information:色ズレ(色収差)
+--information:色ズレ(色収差ラジアル)
 --filter
 
 --group:基本設定
@@ -8,7 +8,16 @@
 --track@center_x:中心X,-4000.0,4000.0,0.0,1.0
 --track@center_y:中心Y,-4000.0,4000.0,0.0,1.0
 --trackgroup@center_x,center_y:中心座標
---select@mode:モード=0,平行ズレ=0,放射ズレ(倍率)=1,回転ズレ=2
+--select@mode:モード=1,放射ズレ(倍率)=1,回転ズレ=2,平行ズレ=0
+--group:
+
+--group:ラジアル設定
+--track@radial:回転ラジアル,-3.14,3.14,0.0,0.01
+--track@scale:倍率ズレ,-1.0,1.0,0.0,0.01
+--select@scale_mode:倍率方式=0,線形=0,指数=1
+--track@radius:影響範囲,0.01,10.0,1.0,0.01
+--track@falloff:減衰強度,0.0,10.0,0.0,0.1
+--select@falloff_mode:減衰方式=0,標準累乗=0,急峻1=1,急峻2=2,急峻3=3,指数減衰=4
 --group:
 
 --group:詳細設定
@@ -680,15 +689,15 @@ do
     local sqrt = math.sqrt
 
     local safe_amount = amount or 0.0
-    local safe_falloff = 0.0
-    local safe_radius = 1.0
-    local safe_radial = 0.0
-    local safe_scale = 0.0
-    local safe_mode = 0
-    local safe_effect_mode = min(max(mode or 0, 0), 2)
+    local safe_falloff = falloff or 0.0
+    local safe_radius = radius or 1.0
+    local safe_radial = radial or 0.0
+    local safe_scale = scale or 0.0
+    local safe_falloff_mode = falloff_mode or 0
+    local safe_effect_mode = min(max(mode or 1, 0), 2)
     local safe_color_order = min(max(color_order or 0, 0), 5)
     local safe_color_space = min(max(color_space or 0, 0), 16)
-    local safe_scale_mode = 0
+    local safe_scale_mode = scale_mode or 0
     local safe_quality = max(quality or 8, 2)
     local safe_center_x = center_x or 0.0
     local safe_center_y = center_y or 0.0
@@ -796,7 +805,7 @@ do
             safe_scale,
             safe_scale_mode,
 
-            safe_mode,
+            safe_falloff_mode,
             safe_color_space,
             0.0,
             0.0
