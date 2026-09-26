@@ -112,23 +112,24 @@ float4 ring_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 ]]
 
 do
-    local s_size = math.max(math.floor(size), 10)
+    local floor = math.floor
+    local max = math.max
+    local s_size = max(floor(size), 10)
 
     local current_time = obj.time
     local phase_base = (bpm_sync == 1) and ((current_time * bpm) / 240.0 * speed) or (current_time * speed)
     local final_phase = phase_base + offset
 
     local obj_alpha = obj.alpha
-    local r1, g1, b1 = RGB(col1)
-    local r2, g2, b2 = RGB(col2)
+    local function premultiplied_color(color)
+        local r, g, b = RGB(color)
+        return r / 255.0 * obj_alpha,
+            g / 255.0 * obj_alpha,
+            b / 255.0 * obj_alpha
+    end
 
-    local c1_r = (r1 / 255.0) * obj_alpha
-    local c1_g = (g1 / 255.0) * obj_alpha
-    local c1_b = (b1 / 255.0) * obj_alpha
-
-    local c2_r = (r2 / 255.0) * obj_alpha
-    local c2_g = (g2 / 255.0) * obj_alpha
-    local c2_b = (b2 / 255.0) * obj_alpha
+    local c1_r, c1_g, c1_b = premultiplied_color(col1)
+    local c2_r, c2_g, c2_b = premultiplied_color(col2)
 
     obj.clearbuffer("object", s_size, s_size)
 
