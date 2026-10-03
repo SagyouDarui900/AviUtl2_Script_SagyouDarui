@@ -1,10 +1,10 @@
 --label:カスタムオブジェクト
---information:トルシェタイル
+--information:Truchetパターン
 
 --group:基本設定
 --track@scale:タイルサイズ,10,500,100,1
 --track@thickness:線の太さ,1,50,15,1
---select@type:模様の種類=0,円弧=0,直線=1,三角形=2
+--select@pattern_type:模様の種類=0,円弧=0,直線=1,三角形=2
 --track@seed:シード値,0,10000,1234,1
 --group:
 
@@ -28,7 +28,7 @@ cbuffer Params : register(b0) {
     float  seed;
     
     float  thickness_norm;
-    float  type;
+    float  pattern_type;
     float2 scroll;
     
     float4 color_bg;
@@ -56,14 +56,14 @@ float4 truchet_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float d = 0.0;
     float mask = 0.0;
     
-    if (type < 0.5) {
+    if (pattern_type < 0.5) {
         // 円弧 (Truchet Arcs)
         float d1 = length(f) - 0.5;
         float d2 = length(f - 1.0) - 0.5;
         d = min(abs(d1), abs(d2));
         float fw = max(fwidth(d), 0.0001);
         mask = 1.0 - smoothstep(thickness_norm - fw, thickness_norm + fw, d);
-    } else if (type < 1.5) {
+    } else if (pattern_type < 1.5) {
         // 直線 (Maze)
         float d1 = abs(f.x + f.y - 0.5) * 0.70710678;
         float d2 = abs(f.x + f.y - 1.5) * 0.70710678;
@@ -111,7 +111,7 @@ do
 
     local constants = {
         w, h, s, seed,
-        (thickness / s) * 0.5, type, scroll_x, scroll_y,
+        (thickness / s) * 0.5, pattern_type or 0, scroll_x, scroll_y,
         r_bg / 255.0, g_bg / 255.0, b_bg / 255.0, obj_alpha,
         r_fg / 255.0, g_fg / 255.0, b_fg / 255.0, obj_alpha
     }
