@@ -57,8 +57,7 @@ float ease(float t, float type) {
         return pow(2.0, -10.0 * t) * sin((t * 10.0 - 0.75) * ((2.0 * 3.14159265) / 3.0)) + 1.0;
     }
     if (type == 6.0) {
-        // 2色が交互に入れ替わる点滅処理
-        return step(0.5, t) * 0.5;
+        return step(0.5, t);
     }
     return t;
 }
