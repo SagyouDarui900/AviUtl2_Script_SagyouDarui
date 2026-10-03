@@ -67,13 +67,15 @@ end
 
 local min_dim = (size < width) and size or width
 local max_radius = min_dim * 0.5
-local radius = (edge_size * 2.0 < max_radius) and (edge_size * 2.0) or max_radius
+local radius = (edge_size < max_radius) and edge_size or max_radius
 
 local fill_mode = (line_width >= max_radius) and 1.0 or 0.0
 local is_x_mode = (is_x == 1) and 1.0 or 0.0
 
--- Xモード時は対角線長を基準にキャンバスを拡張し、外周エッジのマージンを加算
-local canvas_size = (is_x_mode > 0.5) and math.ceil(size * 1.41421356 + 2) or math.ceil(size + 2)
+-- 中抜き時の外側拡張分を含めた基本サイズの算出
+local outer_size = size + ((fill_mode < 0.5) and line_width or 0)
+-- Xモード時の対角線長基準キャンバスサイズ計算
+local canvas_size = (is_x_mode > 0.5) and math.ceil(outer_size * 1.41421356 + 4) or math.ceil(outer_size + 4)
 
 local obj_alpha = obj.alpha
 local r, g, b = RGB(col)
@@ -81,7 +83,7 @@ local c_r = (r / 255.0) * obj_alpha
 local c_g = (g / 255.0) * obj_alpha
 local c_b = (b / 255.0) * obj_alpha
 
--- 描画バッファを直接確保・初期化
+-- 描画バッファの確保と初期化
 obj.clearbuffer("object", canvas_size, canvas_size)
 
 obj.pixelshader(
