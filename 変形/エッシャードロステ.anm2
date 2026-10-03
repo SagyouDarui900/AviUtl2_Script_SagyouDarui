@@ -1,5 +1,5 @@
 --label:変形
---information:エッシャードロステ効果
+--information:エッシャードロステ効果 v2.0 (GPU最適化版)
 --filter
 
 --group:ドロステ幾何設定
@@ -7,13 +7,18 @@
 --track@scale_fac:スケール比,1.1,20.0,4.0,0.1
 --track@strands:螺旋巻き数,-10,10,1,1
 --track@radius:描画半径,0.01,5.0,0.5,0.01
---check@repeat_edge:境界リピート,1
+--select@border_mode:境界処理=0,クリッピング=0,ループ=1,ミラー=2
 --group:
 
 --group:中心座標
 --track@cx:中心X,-2000.0,2000.0,0.0,0.1
 --track@cy:中心Y,-2000.0,2000.0,0.0,0.1
 --trackgroup@cx,cy:中心座標
+--group:
+
+--group:描画品質設定
+--track@fade_center:中心フェード,0,100,5,1
+--track@fade_outer:外周フェード,0,100,100,1
 --group:
 
 --group:自動進行設定
@@ -30,9 +35,9 @@ end
 
 --[[pixelshader@ps_escher_droste:
 cbuffer Params : register(b0) {
-    float4 param_geom;   // x: period, y: c2(cos^2), z: cs(cos*sin), w: log_radius
+    float4 param_geom;   // x: period, y: cos_a, z: sin_a, w: log_radius
     float4 param_center; // x: ncx, y: ncy, z: aspect, w: zoom_offset
-    float4 param_render; // x: repeat_flg, y: obj_alpha, zw: unused
+    float4 param_render; // x: border_mode, y: obj_alpha, z: fade_center, w: fade_outer
 };
 
 Texture2D tex : register(t0);
@@ -45,44 +50,67 @@ float4 ps_escher_droste(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
     float aspect = param_center.z;
     p.x *= aspect;
 
-    float r = max(length(p), 0.000001);
+    float r = length(p);
+    if (r < 0.000001) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
     float a = atan2(p.y, p.x);
 
     float period = param_geom.x;
+    float cos_a = param_geom.y;
+    float sin_a = param_geom.z;
+
+    // 複素対数平面への写像
     float2 w = float2(log(r), a);
 
-    // 事前計算された回転・相似拡大行列による変換
-    float c2 = param_geom.y;
-    float cs = param_geom.z;
+    // ドロステ等角回転・拡大変換
+    float c2 = cos_a * cos_a;
+    float cs = cos_a * sin_a;
     float nx = w.x * c2 - w.y * cs;
     float ny = w.x * cs + w.y * c2;
 
-    // ズーム進行の適用
+    // ズーム進行
     nx -= param_center.w;
 
-    // 周期モジュロ演算（自己相似ループ）
+    // 周期モジュロ演算（連続性の維持）
     float log_r = param_geom.w;
     float norm_x = nx - log_r;
-    nx = norm_x - ceil(norm_x / period) * period + log_r;
+    float shift_count = floor(norm_x / period);
+    nx = norm_x - shift_count * period + log_r;
 
-    // 指数写像による逆変換
+    // 指数写像による実座標逆変換
     float nr = exp(nx);
     float2 np = nr * float2(cos(ny), sin(ny));
     np.x /= aspect;
 
     float2 nuv = np + center;
 
-    // 境界外処理
-    if (param_render.x > 0.5) {
+    // 境界処理モード分岐
+    if (param_render.x > 1.5) {
+        // 折り返し (Mirror)
+        float2 m = frac(nuv * 0.5) * 2.0;
+        nuv = (m > 1.0) ? (2.0 - m) : m;
+    } else if (param_render.x > 0.5) {
+        // ループ (Tile)
         nuv = frac(nuv);
     } else {
+        // 切り抜き (Clip)
         if (nuv.x < 0.0 || nuv.x > 1.0 || nuv.y < 0.0 || nuv.y > 1.0) {
             return float4(0.0, 0.0, 0.0, 0.0);
         }
     }
 
     float4 col = tex.Sample(samp, nuv);
-    return col * param_render.y;
+
+    // 中心極点フェードおよび外周フェード
+    float center_dist = length(uv - center);
+    float center_fade = smoothstep(0.0, max(param_render.z, 0.00001), center_dist);
+    float outer_fade = (param_render.w > 0.0) ? smoothstep(param_render.w, param_render.w - 0.05, center_dist) : 1.0;
+
+    float alpha = param_render.y * center_fade * saturate(outer_fade);
+
+    return col * alpha;
 }
 ]]
 
@@ -107,24 +135,25 @@ do
     local angle = atan2(2.0 * pi * strands, period)
     local cos_a = cos(angle)
     local sin_a = sin(angle)
-    local c2 = cos_a * cos_a
-    local cs = cos_a * sin_a
     local log_radius = log(max(radius, 0.0001))
     local zoom_offset = current_zoom * period
 
     local ncx = cx / w
     local ncy = cy / h
 
+    local fc = (fade_center or 5.0) * 0.001
+    local fo = (fade_outer or 100.0) * 0.01 * 0.707
+
     obj.pixelshader(
         "ps_escher_droste",
         "object",
         { "object" },
         {
-            period, c2, cs, log_radius,
+            period, cos_a, sin_a, log_radius,
             ncx, ncy, aspect, zoom_offset,
-            (repeat_edge == 1) and 1.0 or 0.0, obj.alpha, 0.0, 0.0
+            border_mode or 0, obj.alpha, fc, fo
         },
         "copy",
-        (repeat_edge == 1) and "loop" or "clip"
+        "clamp"
     )
 end
