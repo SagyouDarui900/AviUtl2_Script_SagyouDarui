@@ -1,5 +1,6 @@
 --label:色調整
---information:ディザリング・減色フィルタ (AviUtl2 Optimized)
+--information:ディザリング・減色フィルタ
+--filter
 
 --group:基本設定,true
 --track@pixel_size:ドットサイズ,1,128,1,1
@@ -42,7 +43,6 @@
     };
 
     Texture2D tex : register(t0);
-    Texture2D tex_rnd : register(t1);
     SamplerState samp : register(s0);
 
     float3 rgb2hsv(float3 c) {
@@ -61,34 +61,37 @@
     }
 
     float3 srgb2linear(float3 c) {
+        c = saturate(c);
         return lerp(c / 12.92, pow(max(c + 0.055, 0.0) / 1.055, 2.4), step(0.04045, c));
     }
 
     float3 linear2srgb(float3 c) {
+        c = saturate(c);
         return lerp(c * 12.92, 1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055, step(0.0031308, c));
     }
 
-    float get_bayer(int2 pos, int bayer_power) {
-        int mask = (1 << bayer_power) - 1;
+    float get_hash_random(int2 pos, float time) {
+        float2 p = float2(pos) + float2(time * 17.1, time * 31.7);
+        float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+        p3 += dot(p3, p3.yzx + 33.33);
+        return frac((p3.x + p3.y) * p3.z) - 0.5;
+    }
+
+    float get_bayer(int2 pos, int mode) {
+        int size = 1 << mode;
+        int mask = size - 1;
         int2 u_pos = pos & mask;
         uint d = 0;
         [unroll]
         for (int i = 0; i < 4; i++) {
-            if (i >= bayer_power) break;
-            uint bit_x = (u_pos.x >> i) & 1;
-            uint bit_y = (u_pos.y >> i) & 1;
-            uint b = ((bit_x ^ bit_y) << 1) | bit_y;
-            d |= b << ((bayer_power - 1 - i) * 2);
+            if (i >= mode) break;
+            uint bx = (u_pos.x >> i) & 1;
+            uint by = (u_pos.y >> i) & 1;
+            uint b = ((bx ^ by) << 1) | by;
+            d |= b << ((mode - 1 - i) * 2);
         }
-        float max_val = (float)(1 << (bayer_power * 2));
+        float max_val = (float)(size * size);
         return ((float)d + 0.5) / max_val - 0.5;
-    }
-
-    float get_random(int2 pos, float time) {
-        int offset_x = (int)(time * 12345.0);
-        int offset_y = (int)(time * 67890.0);
-        int3 load_pos = int3(asuint(pos.x + offset_x) & 255, asuint(pos.y + offset_y) & 255, 0);
-        return tex_rnd.Load(load_pos).r - 0.5;
     }
 
     float4 dither_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
@@ -97,11 +100,9 @@
         float2 base_res = float2(p_env.y, p_env.z);
         float2 scroll_offset = p_scroll.xy;
         
-        // オブジェクトの中心を原点(0,0)とするピクセル空間
         float2 center_px = (uv - 0.5) * base_res;
         float2 scrolled_pos = center_px - scroll_offset;
         
-        // 演算の共通化
         float2 grid_float = floor(scrolled_pos * rcp_dot);
         int2 grid_pos = (int2)grid_float;
         float2 sample_uv = uv;
@@ -111,6 +112,7 @@
             sample_uv = (quant_px + scroll_offset) / base_res + 0.5;
         }
 
+        sample_uv = saturate(sample_uv);
         float4 pixel_color = tex.SampleLevel(samp, sample_uv, 0);
         float4 orig_color = (dot_size > 1.0 && p_basic.z < 1.0) ? tex.SampleLevel(samp, uv, 0) : pixel_color;
 
@@ -119,7 +121,7 @@
         }
 
         float alpha = pixel_color.a;
-        float safe_a = max(alpha, 0.00001);
+        float safe_a = max(alpha, 1.0e-5);
         float3 rgb = pixel_color.rgb / safe_a;
 
         if (p_mode.z > 0.5) {
@@ -130,7 +132,7 @@
         int m_type = (int)p_mode.x;
 
         if (m_type == 0) {
-            dither_val = get_random(grid_pos, p_env.x);
+            dither_val = get_hash_random(grid_pos, p_env.x);
         } else if (m_type >= 1 && m_type <= 4) {
             dither_val = get_bayer(grid_pos, m_type);
         } else if (m_type == 5) {
@@ -226,4 +228,4 @@ local constants = {
     scroll_x, scroll_y, 0.0, 0.0
 }
 
-obj.pixelshader("dither_ps", "object", {"object", "random"}, constants, "copy", "clamp")
+obj.pixelshader("dither_ps", "object", {"object"}, constants, "copy", "clamp")
