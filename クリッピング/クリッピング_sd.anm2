@@ -46,10 +46,39 @@ local a_left = angle_left
 local c_right = (sync_lr == 1) and c_left or clip_right
 local a_right = (sync_lr == 1) and a_left or angle_right
 
-local act_t = (c_top > 0.0 or a_top ~= 0.0) and 1.0 or 0.0
-local act_b = (c_bottom > 0.0 or a_bottom ~= 0.0) and 1.0 or 0.0
-local act_l = (c_left > 0.0 or a_left ~= 0.0) and 1.0 or 0.0
-local act_r = (c_right > 0.0 or a_right ~= 0.0) and 1.0 or 0.0
+local function calc_plane(clip_pct, angle_deg, dir)
+    local rad = math.rad(angle_deg)
+    local sin_val = math.sin(rad)
+    local cos_val = math.cos(rad)
+    local nx, ny, dist
+    local w, h = obj.w, obj.h
+
+    if dir == "top" then
+        nx = sin_val
+        ny = -cos_val
+        dist = (-h * 0.5 + h * clip_pct * 0.01) * ny
+    elseif dir == "bottom" then
+        nx = -sin_val
+        ny = cos_val
+        dist = (h * 0.5 - h * clip_pct * 0.01) * ny
+    elseif dir == "left" then
+        nx = -cos_val
+        ny = -sin_val
+        dist = (-w * 0.5 + w * clip_pct * 0.01) * nx
+    elseif dir == "right" then
+        nx = cos_val
+        ny = sin_val
+        dist = (w * 0.5 - w * clip_pct * 0.01) * nx
+    end
+
+    local is_active = (clip_pct > 0.0 or angle_deg ~= 0.0) and 1.0 or 0.0
+    return nx, ny, dist, is_active
+end
+
+local n_top_x, n_top_y, d_top, act_t = calc_plane(c_top, a_top, "top")
+local n_bot_x, n_bot_y, d_bot, act_b = calc_plane(c_bottom, a_bottom, "bottom")
+local n_left_x, n_left_y, d_left, act_l = calc_plane(c_left, a_left, "left")
+local n_right_x, n_right_y, d_right, act_r = calc_plane(c_right, a_right, "right")
 
 if act_t + act_b + act_l + act_r == 0.0 then
     return
@@ -94,45 +123,17 @@ float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
 }
 ]]
 
-do
-    local rad = math.rad
-    local sin = math.sin
-    local cos = math.cos
-    local w = obj.w
-    local h = obj.h
-
-    local rad_t = rad(a_top)
-    local n_top_x = sin(rad_t)
-    local n_top_y = -cos(rad_t)
-    local d_top = (-h * 0.5 + h * (c_top * 0.01)) * n_top_y
-
-    local rad_b = rad(a_bottom)
-    local n_bot_x = -sin(rad_b)
-    local n_bot_y = cos(rad_b)
-    local d_bot = (h * 0.5 - h * (c_bottom * 0.01)) * n_bot_y
-
-    local rad_l = rad(a_left)
-    local n_left_x = -cos(rad_l)
-    local n_left_y = -sin(rad_l)
-    local d_left = (-w * 0.5 + w * (c_left * 0.01)) * n_left_x
-
-    local rad_r = rad(a_right)
-    local n_right_x = cos(rad_r)
-    local n_right_y = sin(rad_r)
-    local d_right = (w * 0.5 - w * (c_right * 0.01)) * n_right_x
-
-    obj.pixelshader(
-        "clipping_sd_ps",
-        "object",
-        { "object" },
-        {
-            n_top_x, n_top_y, d_top, act_t,
-            n_bot_x, n_bot_y, d_bot, act_b,
-            n_left_x, n_left_y, d_left, act_l,
-            n_right_x, n_right_y, d_right, act_r,
-            w, h, (invert_clip == 1) and 1.0 or 0.0, 0.0
-        },
-        "copy",
-        "clamp"
-    )
-end
+obj.pixelshader(
+    "clipping_sd_ps",
+    "object",
+    { "object" },
+    {
+        n_top_x, n_top_y, d_top, act_t,
+        n_bot_x, n_bot_y, d_bot, act_b,
+        n_left_x, n_left_y, d_left, act_l,
+        n_right_x, n_right_y, d_right, act_r,
+        obj.w, obj.h, (invert_clip == 1) and 1.0 or 0.0, 0.0
+    },
+    "copy",
+    "clamp"
+)
