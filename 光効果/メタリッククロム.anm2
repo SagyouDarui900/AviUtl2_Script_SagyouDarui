@@ -1,0 +1,146 @@
+--label:光効果
+--information:メタリッククロム加工
+--filter
+
+--group:形状設定
+--track@depth:深さ,0.1,200.0,50.0,0.1
+--track@smooth:滑らかさ,0.1,10.0,2.0,0.1
+--trackgroup@depth,smooth:形状設定
+--check@use_lumi:輝度凹凸,1
+
+--group:ライティング設定
+--track@light_angle:光源角度,-360.0,360.0,45.0,0.1
+--track@light_intensity:光沢強度(%),0.0,500.0,150.0,1.0
+--trackgroup@light_angle,light_intensity:ライティング
+
+--group:反射・カラー設定
+--track@shininess:鋭さ,1.0,500.0,100.0,1.0
+--track@env_strength:環境反射(%),0.0,300.0,150.0,1.0
+--trackgroup@shininess,env_strength:反射設定
+--color@metal_color:金属色,0xffffff
+--track@orig_blend:元画像合成(%),0.0,100.0,0.0,1.0
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@chrome_ps
+cbuffer Params : register(b0) {
+    float4 param_shape;  // x: depth, y: smooth_dist, zw: inv_res
+    float4 param_light;  // x: cos_a, y: sin_a, z: light_intensity, w: shininess
+    float4 param_mat;    // x: env_strength, y: orig_blend, z: use_lumi, w: obj_alpha
+    float4 color_metal;  // rgb: metal_color, w: unused
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float get_height(float2 uv) {
+    float4 c = tex.Sample(samp, uv);
+    if (param_mat.z > 0.5) {
+        float lum = dot(c.rgb, float3(0.299, 0.587, 0.114));
+        float lum_unpre = (c.a > 0.0) ? (lum / c.a) : 0.0;
+        return c.a * (0.5 + 0.5 * lum_unpre);
+    }
+    return c.a;
+}
+
+float3 get_normal(float2 uv) {
+    float2 step_uv = param_shape.zw * param_shape.y;
+    float dx = step_uv.x;
+    float dy = step_uv.y;
+
+    float h00 = get_height(uv + float2(-dx, -dy));
+    float h10 = get_height(uv + float2(0.0, -dy));
+    float h20 = get_height(uv + float2( dx, -dy));
+    float h01 = get_height(uv + float2(-dx,  0.0));
+    float h21 = get_height(uv + float2( dx,  0.0));
+    float h02 = get_height(uv + float2(-dx,  dy));
+    float h12 = get_height(uv + float2(0.0,  dy));
+    float h22 = get_height(uv + float2( dx,  dy));
+
+    float nx = -(3.0 * h20 + 10.0 * h21 + 3.0 * h22 - (3.0 * h00 + 10.0 * h01 + 3.0 * h02));
+    float ny = -(3.0 * h02 + 10.0 * h12 + 3.0 * h22 - (3.0 * h00 + 10.0 * h10 + 3.0 * h20));
+    float nz = max(0.01, 16.0 / max(0.1, param_shape.x));
+
+    return normalize(float3(nx, ny, nz));
+}
+
+float3 get_env(float3 ref) {
+    float3 sky = float3(0.55, 0.75, 0.95);
+    float3 ground = float3(0.05, 0.05, 0.05);
+    float3 base = lerp(ground, sky, smoothstep(-0.1, 0.4, ref.y));
+
+    float horizon_dark = smoothstep(0.1, 0.0, abs(ref.y + 0.05));
+    base = lerp(base, float3(0.02, 0.02, 0.02), horizon_dark);
+
+    float horizon_light = smoothstep(0.02, 0.0, abs(ref.y - 0.02));
+    float stripe1 = smoothstep(0.85, 0.98, sin(ref.x * 20.0 + ref.y * 10.0));
+    float stripe2 = smoothstep(0.92, 0.99, sin(ref.x * 12.0 - ref.y * 25.0));
+    float stripe3 = smoothstep(0.96, 1.00, sin(ref.x * 6.0 + ref.y * 5.0));
+
+    float3 lights = float3(1.0, 1.0, 1.0) * (stripe1 * 0.4 + stripe2 * 0.6 + stripe3 * 1.0);
+    return base + (horizon_light * 0.8) + lights;
+}
+
+float4 chrome_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 orig = tex.Sample(samp, uv);
+    if (orig.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    float3 norm = get_normal(uv);
+    float3 view_dir = float3(0.0, 0.0, 1.0);
+    float3 ref_dir = reflect(-view_dir, norm);
+
+    float cos_a = param_light.x;
+    float sin_a = param_light.y;
+
+    float3 rot_ref = float3(
+        ref_dir.x * cos_a - ref_dir.y * sin_a,
+        ref_dir.x * sin_a + ref_dir.y * cos_a,
+        ref_dir.z
+    );
+
+    float3 light_dir = normalize(float3(cos_a, sin_a, 0.5));
+
+    float env_str = param_mat.x;
+    float3 env = get_env(rot_ref) * env_str;
+
+    float3 half_vec = normalize(light_dir + view_dir);
+    float shininess_val = param_light.w;
+    float spec = pow(max(dot(norm, half_vec), 0.0), shininess_val);
+    float light_int = param_light.z;
+    float3 spec_col = float3(1.0, 1.0, 1.0) * (spec * light_int);
+
+    float3 metal_col = color_metal.rgb;
+    float3 final_col = metal_col * env + spec_col;
+
+    float blend = param_mat.y;
+    float3 unpre_orig = orig.rgb / orig.a;
+    final_col = lerp(final_col, final_col * unpre_orig * 2.5, blend);
+
+    float final_a = orig.a * param_mat.w;
+    return float4(final_col * final_a, final_a);
+}
+]]
+
+local rad_val = math.rad(light_angle)
+local cos_a = math.cos(rad_val)
+local sin_a = math.sin(rad_val)
+
+local mr, mg, mb = RGB(metal_color)
+
+obj.pixelshader(
+    "chrome_ps",
+    "object",
+    { "object" },
+    {
+        depth, smooth, 1.0 / obj.w, 1.0 / obj.h,
+        cos_a, sin_a, light_intensity * 0.01, math.max(1.0, shininess),
+        env_strength * 0.01, orig_blend * 0.01, (use_lumi == 1) and 1.0 or 0.0, obj.alpha,
+        mr / 255.0, mg / 255.0, mb / 255.0, 0.0
+    },
+    "copy",
+    "clamp"
+)
