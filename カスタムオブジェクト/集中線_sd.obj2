@@ -1,0 +1,226 @@
+--label:カスタムオブジェクト
+--information:集中線_sd
+
+--group:基本設定,true
+--track@density:密度,1,2000,120,1
+--track@width_base:太さ(px),1,500,25,1
+--track@radius_out:外径(X),10,4000,1000,1
+--track@gap_x:空き(X),0,2000,200,1
+--track@gap_y:空き(Y),0,2000,200,1
+--trackgroup@gap_x,gap_y:中心空き範囲
+--check@auto_aspect:画面比率に合わせる,true
+--track@center_x:中心X,-2000,2000,0,1
+--track@center_y:中心Y,-2000,2000,0,1
+--trackgroup@center_x,center_y:中心位置
+--group
+
+--group:縁取り,false
+--track@border_w:縁取り幅,0,100,0,1
+--color@border_color:縁の色,0x000000
+--group
+
+--group:ランダム・形状,false
+--track@var_w:太さ乱数%,0,100,80,1
+--track@var_l:長さ乱数%,0,100,50,1
+--track@var_g:空き乱数%,0,100,20,1
+--track@var_d:密度乱数%,0,100,50,1
+--track@var_a:不透明度乱数%,0,100,0,1
+--track@taper:テーパー%,-100,100,100,1
+--group
+
+--group:アニメーション,false
+--track@update_fps:更新FPS,0,60,12,1
+--track@patterns:パターン数,0,100,3,1
+--track@speed:回転速度,-500,500,0,0.1
+--track@seed:シード,0,1000,0,1
+--group
+
+--group:カラー・背景,false
+--color@line_color:線の色,0xFFFFFF
+--check@inverse:反転モード(白背景),false
+--group
+
+--[[pixelshader@SpeedLines_SD_PS:
+    cbuffer params : register(b0) {
+        float density;          // [0].x
+        float width_base;       // [0].y
+        float radius_out;       // [0].z
+        float border_w;         // [0].w
+        
+        float gap_x;            // [1].x
+        float gap_ratio;        // [1].y (gap_y / gap_x)
+        float var_w;            // [1].z
+        float var_l;            // [1].w
+        
+        float var_g;            // [2].x
+        float show_probability; // [2].y (Lua側で事前計算した間引き閾値)
+        float taper;            // [2].z
+        float rot_offset;       // [2].w (回転オフセット)
+        
+        float frame_seed;       // [3].x (Lua側で事前計算したアニメーションシード)
+        float canvas_size;      // [3].y
+        float inverse_flag;     // [3].z
+        float var_a;            // [3].w (不透明度乱数)
+        
+        float center_x;         // [4].x
+        float center_y;         // [4].y
+        float padding1;         // [4].z
+        float padding2;         // [4].w
+        
+        float4 line_color;      // [5]
+        float4 border_color;    // [6]
+    };
+
+    float4 hash4(float n) {
+        return frac(sin(float4(n, n + 1.0, n + 2.0, n + 3.0)) * float4(43758.5453, 22578.1459, 19642.3490, 31415.9265));
+    }
+
+    float4 SpeedLines_SD_PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 p = pos.xy - canvas_size * 0.5 - float2(center_x, center_y);
+        
+        // 楕円アスペクト補正
+        float2 p_adj = p;
+        p_adj.y /= gap_ratio;
+        
+        float r = length(p_adj);
+        float a = atan2(p_adj.y, p_adj.x) + rot_offset;
+        
+        float pixel_scale = length(float2(cos(a), sin(a) * gap_ratio));
+        float inv_scale = 1.0 / max(pixel_scale, 0.001);
+        
+        // 円周分割
+        float PI2 = 6.28318530718;
+        float seg_count = max(density, 1.0);
+        float normalized_a = fmod(fmod(a, PI2) + PI2, PI2);
+        
+        float seg_pos = normalized_a * seg_count / PI2;
+        float seg_idx = floor(seg_pos);
+        float seg_fract = frac(seg_pos);
+        
+        // 乱数と間引き判定
+        float4 h = hash4(seg_idx + frame_seed * 123.456);
+        float show_mask = step(h.z, show_probability);
+        
+        // 形状計算
+        float base_gap = gap_x * (1.0 + (h.x * 2.0 - 1.0) * var_g);
+        float current_outer = radius_out * (1.0 - h.y * var_l);
+        float dist_from_start = r - base_gap;
+        float line_length = max(current_outer - base_gap, 0.001);
+        
+        float target_pixel_width = width_base * (1.0 - h.x * var_w);
+        float t_ratio = saturate(dist_from_start / line_length);
+        
+        if (taper > 0.0) {
+            target_pixel_width *= lerp(1.0 - taper, 1.0, t_ratio);
+        } else if (taper < 0.0) {
+            target_pixel_width *= lerp(1.0, 1.0 + taper, t_ratio);
+        }
+        target_pixel_width = max(target_pixel_width, 0.001);
+        
+        float core_width_adj = target_pixel_width * inv_scale;
+        float total_width_adj = (target_pixel_width + border_w * 2.0) * inv_scale;
+        float border_w_adj = border_w * inv_scale;
+        
+        float arc_length = max(r, 0.001) * (PI2 / seg_count);
+        float core_width_ratio = core_width_adj / arc_length;
+        float total_width_ratio = total_width_adj / arc_length;
+        float aa_ratio = 1.5 / arc_length;
+        
+        // マスク生成 (芯)
+        float core_line_mask = smoothstep(core_width_ratio * 0.5 + aa_ratio, core_width_ratio * 0.5, abs(seg_fract - 0.5));
+        float core_gap_mask = smoothstep(base_gap, base_gap + 2.0 * inv_scale, r);
+        float core_end_mask = 1.0 - smoothstep(current_outer - 2.0 * inv_scale, current_outer, r);
+        float alpha_var_factor = 1.0 - h.w * var_a;
+        float core_alpha = core_line_mask * core_gap_mask * core_end_mask * show_mask * alpha_var_factor;
+        
+        // マスク生成 (縁取り)
+        float total_alpha = core_alpha;
+        if (border_w > 0.0) {
+            float total_line_mask = smoothstep(total_width_ratio * 0.5 + aa_ratio, total_width_ratio * 0.5, abs(seg_fract - 0.5));
+            float total_gap_mask = smoothstep(base_gap - border_w_adj, base_gap - border_w_adj + 2.0 * inv_scale, r);
+            float total_end_mask = 1.0 - smoothstep(current_outer + border_w_adj - 2.0 * inv_scale, current_outer + border_w_adj, r);
+            total_alpha = total_line_mask * total_gap_mask * total_end_mask * show_mask * alpha_var_factor;
+        }
+        
+        float border_alpha = saturate(total_alpha - core_alpha);
+        
+        // 色合成 (Premultiplied Alpha)
+        float4 final_color = float4(0.0, 0.0, 0.0, 0.0);
+        float4 b_col = float4(border_color.rgb * border_alpha, border_alpha);
+        float4 c_col = float4(line_color.rgb * core_alpha, core_alpha);
+        
+        final_color = c_col + b_col * (1.0 - c_col.a);
+        
+        if (inverse_flag > 0.5) {
+            float3 bg = float3(1.0, 1.0, 1.0);
+            final_color.rgb = lerp(bg, final_color.rgb, final_color.a);
+            final_color.a = 1.0;
+        }
+        
+        return final_color;
+    }
+]]
+
+local math = math
+local screen_w = obj.screen_w or 1920
+local screen_h = obj.screen_h or 1080
+local canvas_size = math.ceil(math.sqrt(screen_w * screen_w + screen_h * screen_h))
+
+-- 単一描画でキャンバス領域を確保
+obj.load("figure", "四角形", 0xffffff, canvas_size)
+
+-- 楕円比率の算出
+local final_gap_y = gap_y
+if auto_aspect then
+    final_gap_y = gap_x * (screen_h / screen_w)
+end
+local calc_gap_ratio = math.max(0.001, final_gap_y) / math.max(0.001, gap_x)
+
+-- アニメーションシードおよび間引き確率の事前計算
+local calc_frame_seed = seed
+if update_fps > 0 then
+    local cur_frame = math.floor(obj.time * update_fps)
+    if patterns > 0 then
+        cur_frame = cur_frame % math.floor(patterns)
+    end
+    calc_frame_seed = calc_frame_seed + cur_frame * 13.37
+end
+
+local global_noise = (math.sin(calc_frame_seed * 12.9898) * 43758.5453) % 1.0
+local calc_show_prob = 1.0 - (global_noise * (var_d * 0.01))
+local calc_rot_offset = obj.time * speed * 0.01
+
+local line_r, line_g, line_b = RGB(line_color)
+local border_r, border_g, border_b = RGB(border_color)
+
+local constants = {
+    density,
+    width_base,
+    radius_out,
+    border_w,
+    
+    gap_x,
+    calc_gap_ratio,
+    var_w * 0.01,
+    var_l * 0.01,
+    
+    var_g * 0.01,
+    calc_show_prob,
+    taper * 0.01,
+    calc_rot_offset,
+    
+    calc_frame_seed,
+    canvas_size,
+    inverse and 1.0 or 0.0,
+    var_a * 0.01,
+    
+    center_x,
+    center_y,
+    0.0,
+    0.0,
+    
+    line_r / 255.0, line_g / 255.0, line_b / 255.0, 1.0,
+    border_r / 255.0, border_g / 255.0, border_b / 255.0, 1.0
+}
+
+obj.pixelshader("SpeedLines_SD_PS", "object", nil, constants, "copy")
