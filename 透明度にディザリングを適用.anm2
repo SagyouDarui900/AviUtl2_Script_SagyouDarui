@@ -1,0 +1,128 @@
+--label:加工
+--information:透明度にディザリングを適用
+
+--track@pixel_size:ドットサイズ,1,128,1,1
+--track@levels:階調数,2,256,2,1
+--track@strength:ディザ強度,0,200,100,1
+--track@threshold:閾値補正,-50,50,0,1
+--select@matrix_type:パターン=3,ランダム=0,Bayer 2x2=1,Bayer 4x4=2,Bayer 8x8=3,Bayer 16x16=4,市松模様=5
+--check@bilevel:二値化,1
+--track@scroll_x:スクロールX,-200,200,0,1
+--track@scroll_y:スクロールY,-200,200,0,1
+
+--[[pixelshader@dither_alpha_ps:
+    cbuffer params : register(b0) {
+        float4 p_basic;  // x:pixel_size, y:strength, z:threshold, w:bilevel
+        float4 p_mode;   // x:matrix_type, y:levels, z:0, w:0
+        float4 p_env;    // x:time, y:width, z:height, w:rcp_pixel_size
+        float4 p_scroll; // x:scroll_x, y:scroll_y, z:0, w:0
+    };
+
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    float get_hash_random(int2 pos, float time) {
+        float2 p = float2(pos) + float2(time * 17.1, time * 31.7);
+        float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+        p3 += dot(p3, p3.yzx + 33.33);
+        return frac((p3.x + p3.y) * p3.z) - 0.5;
+    }
+
+    float get_bayer(int2 pos, int mode) {
+        int size = 1 << mode;
+        uint mask = (uint)(size - 1);
+        uint2 u_pos = (uint2)pos & mask;
+        uint d = 0;
+        for (int i = 0; i < 4; i++) {
+            if (i < mode) {
+                uint bx = (u_pos.x >> (uint)i) & 1u;
+                uint by = (u_pos.y >> (uint)i) & 1u;
+                uint b = ((bx ^ by) << 1) | by;
+                d |= b << ((uint)(mode - 1 - i) * 2u);
+            }
+        }
+        float max_val = (float)(size * size);
+        return ((float)d + 0.5) / max_val - 0.5;
+    }
+
+    float4 dither_alpha_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+        float dot_size = p_basic.x;
+        float rcp_dot = p_env.w;
+        float2 base_res = float2(p_env.y, p_env.z);
+        float2 scroll_offset = p_scroll.xy;
+        
+        float2 center_px = (uv - 0.5) * base_res;
+        float2 scrolled_pos = center_px - scroll_offset;
+        
+        float2 grid_float = floor(scrolled_pos * rcp_dot);
+        int2 grid_pos = (int2)grid_float;
+        uint2 u_grid_pos = (uint2)grid_pos;
+        float2 sample_uv = uv;
+
+        if (dot_size > 1.0) {
+            float2 quant_px = grid_float * dot_size + dot_size * 0.5;
+            sample_uv = (quant_px + scroll_offset) / base_res + 0.5;
+        }
+
+        sample_uv = saturate(sample_uv);
+        float4 pixel_color = tex.SampleLevel(samp, sample_uv, 0);
+
+        if (pixel_color.a <= 0.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float dither_val = 0.0;
+        int m_type = (int)p_mode.x;
+
+        if (m_type == 0) {
+            dither_val = get_hash_random(grid_pos, p_env.x);
+        } else if (m_type >= 1 && m_type <= 4) {
+            dither_val = get_bayer(grid_pos, m_type);
+        } else {
+            dither_val = (((u_grid_pos.x & 1u) ^ (u_grid_pos.y & 1u)) == 0u) ? -0.5 : 0.5;
+        }
+
+        float offset = dither_val * p_basic.y + p_basic.z;
+        float orig_a = pixel_color.a;
+
+        float target_a = 0.0;
+        if (p_basic.w > 0.5) {
+            target_a = step(0.5, orig_a + offset);
+        } else {
+            float steps = max(1.0, p_mode.y - 1.0);
+            float rcp_steps = 1.0 / steps;
+            target_a = saturate(round(orig_a * steps + offset) * rcp_steps);
+        }
+
+        float3 unmultiplied_rgb = (orig_a > 1.0e-5) ? (pixel_color.rgb / orig_a) : float3(0.0, 0.0, 0.0);
+        return float4(unmultiplied_rgb * target_a, target_a);
+    }
+]]
+
+local max = math.max
+local floor = math.floor
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+local width = max(1, floor(obj.w))
+local height = max(1, floor(obj.h))
+
+local safe_pixel_size = max(1, floor(pixel_size or 1))
+local safe_levels = max(2, floor(levels or 2))
+local safe_strength = (strength or 100) * 0.01
+local safe_threshold = (threshold or 0) * 0.01
+local safe_matrix_type = matrix_type or 3
+local safe_bilevel = (bilevel == 1 or bilevel == true) and 1.0 or 0.0
+local safe_scroll_x = scroll_x or 0
+local safe_scroll_y = scroll_y or 0
+
+local constants = {
+    safe_pixel_size, safe_strength, safe_threshold, safe_bilevel,
+    safe_matrix_type, safe_levels, 0.0, 0.0,
+    obj.time or 0, width, height, 1.0 / safe_pixel_size,
+    safe_scroll_x, safe_scroll_y, 0.0, 0.0
+}
+
+obj.pixelshader("dither_alpha_ps", "object", {"object"}, constants, "copy", "clamp")
