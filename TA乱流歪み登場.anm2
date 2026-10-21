@@ -1,0 +1,352 @@
+--label:切り替え効果
+
+--group:進行・順序,true
+--track@anim_time:時間[s],-5.0,5.0,0.3,0.01
+--track@interval:間隔[s],0.0,5.0,0.05,0.01
+--select@order:順番=0,前から=0,後ろから=1,ランダム=2,ランダム間隔=3,中央から=4,外側から=5
+--track@seed:シード,0,10000,0,1
+--track@fps:コマ落ちFPS,0,144,0,1,なし
+
+--group:移動・変形,true
+--track@zoom_rate:拡大率,0.0,1000.0,100.0,0.1
+--track@distance_x:X距離,-2000.0,2000.0,0.0,0.1
+--track@distance_y:Y距離,-2000.0,2000.0,0.0,0.1
+--track@distance_z:Z距離,-2000.0,2000.0,0.0,0.1
+--trackgroup@distance_x,distance_y,distance_z:距離
+--track@rotation_x:X軸回転,-720.0,720.0,0.0,0.1
+--track@rotation_y:Y軸回転,-720.0,720.0,0.0,0.1
+--track@rotation_z:Z軸回転,-720.0,720.0,0.0,0.1
+--trackgroup@rotation_x,rotation_y,rotation_z:回転
+
+--group:乱流設定,true
+--track@amount_xy:歪み強度(XY),0,1000,80,1
+--track@amount_z:Z歪み(奥行き),0,1000,0,1
+--track@mesh_div:メッシュ分割,1,32,1,1
+--track@noise_size:ノイズサイズ,10,1000,150,1
+--track@evolution_speed:展開速度,-1000,1000,100,1
+--track@complexity:複雑度,1,4,2,1
+
+--group:イージング・フェード,true
+--track@ease_num:イージング番号,0,41,0,1,なし
+--select@ease_type:加減速=0,減速(EaseOut)=0,加速(EaseIn)=1,S字(EaseInOut)=2,勢い(OutBack)=3
+--track@easing_power:加減速強さ,1.0,5.0,2.0,0.1
+--check@use_fade:フェード,true
+--group:
+
+--[[pixelshader@ae_turbulent_displace_entrance:
+struct Constants {
+  float remain;
+  float amountXY;
+  float noiseSize;
+  float evolution;
+  float complexity;
+  float width;
+  float height;
+  float seed;
+};
+
+cbuffer constants : register(b0) { Constants constants; }
+Texture2D srcTex : register(t0);
+SamplerState srcSmp : register(s0);
+
+float3 mod289(float3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+float2 mod289(float2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+float3 permute(float3 x) { return mod289(((x * 34.0) + 1.0) * x); }
+
+float simplex2d(float2 v) {
+  const float4 C = float4(0.211324865405187, 0.366025403784439,
+                         -0.577350269189626, 0.024390243902439);
+  float2 i  = floor(v + dot(v, C.yy));
+  float2 x0 = v -   i + dot(i, C.xx);
+  float2 i1 = (x0.x > x0.y) ? float2(1.0, 0.0) : float2(0.0, 1.0);
+  float4 x12 = x0.xyxy + C.xxzz;
+  x12.xy -= i1;
+
+  i = mod289(i);
+  float3 p = permute(permute(i.y + float3(0.0, i1.y, 1.0))
+                   + i.x + float3(0.0, i1.x, 1.0));
+
+  float3 m = max(0.5 - float3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
+  m = m * m;
+  m = m * m;
+
+  float3 x = 2.0 * frac(p * C.www) - 1.0;
+  float3 h = abs(x) - 0.5;
+  float3 ox = floor(x + 0.5);
+  float3 a0 = x - ox;
+
+  m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+
+  float3 g;
+  g.x  = a0.x  * x0.x  + h.x  * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+
+float fbm_simplex(float2 p, int octaves) {
+  float v = 0.0;
+  float a = 0.5;
+  [loop]
+  for (int i = 0; i < 4; ++i) {
+    if (i >= octaves) break;
+    v += a * simplex2d(p);
+    p = p * 2.0 + float2(17.13, 31.41);
+    a *= 0.5;
+  }
+  return v;
+}
+
+float4 ae_turbulent_displace_entrance(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
+  if (constants.remain <= 0.0) {
+    return srcTex.Sample(srcSmp, uv);
+  }
+
+  float2 pixel_size = float2(constants.width, constants.height);
+  float scale = max(constants.noiseSize, 1.0);
+
+  float2 p = (uv * pixel_size) / scale + float2(constants.seed, constants.seed * 1.618);
+  p += float2(constants.evolution * 0.5, constants.evolution * 0.35);
+
+  int octaves = clamp((int)constants.complexity, 1, 4);
+  float nx = fbm_simplex(p, octaves);
+  float ny = fbm_simplex(p + float2(43.12, 17.89), octaves);
+
+  float current_amount = constants.amountXY * constants.remain;
+  float2 disp = float2(nx, ny) * current_amount / pixel_size;
+  float2 sample_uv = uv + disp;
+
+  if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+    return float4(0.0, 0.0, 0.0, 0.0);
+  }
+
+  return srcTex.Sample(srcSmp, sample_uv);
+}
+]]
+
+local math = math
+local max = math.max
+local min = math.min
+local floor = math.floor
+local ceil = math.ceil
+local abs = math.abs
+local sin = math.sin
+local cos = math.cos
+
+local param_anim_time = anim_time or 0.3
+if param_anim_time == 0 then
+    return
+end
+
+local buf_w, buf_h = obj.w, obj.h
+if buf_w <= 0 or buf_h <= 0 then
+    return
+end
+
+local param_interval = max(interval or 0, 0)
+local param_seed = seed or 0
+local param_fps = max(fps or 0, 0)
+local param_amount_xy = max(amount_xy or 0, 0)
+local param_amount_z = max(amount_z or 0, 0)
+local param_mesh_div = max(mesh_div or 1, 1)
+local param_noise_size = max(noise_size or 150, 1)
+local param_evolution_speed = evolution_speed or 100
+local param_complexity = min(max(complexity or 2, 1), 4)
+local param_ease_num = floor(ease_num or 0)
+local param_easing_power = max(easing_power or 2, 1)
+local use_fade_enabled = (use_fade == 1 or use_fade == true)
+
+local easing_names = {
+    "outSine", "inSine", "inOutSine", "outInSine",
+    "outQuad", "inQuad", "inOutQuad", "outInQuad",
+    "outCubic", "inCubic", "inOutCubic", "outInCubic",
+    "outQuart", "inQuart", "inOutQuart", "outInQuart",
+    "outQuint", "inQuint", "inOutQuint", "outInQuint",
+    "outExpo", "inExpo", "inOutExpo", "outInExpo",
+    "outCirc", "inCirc", "inOutCirc", "outInCirc",
+    "outBack", "inBack", "inOutBack", "outInBack",
+    "outElastic", "inElastic", "inOutElastic", "outInElastic",
+    "outBounce", "inBounce", "inOutBounce", "outInBounce",
+    "linear"
+}
+
+local easing_status, easing_module = pcall(require, "easing")
+
+local cur_time = obj.time or 0
+if param_fps > 0 then
+    local step = 1.0 / param_fps
+    cur_time = floor(cur_time / step) * step
+end
+
+local idx = obj.index or 0
+local num = max(1, obj.num or 1)
+
+-- 1. 登場順序（ディレイインデックス）の算出
+local delay_idx = idx
+local order_type = tonumber(order) or 0
+
+if order_type == 1 then
+    delay_idx = (num - 1) - idx
+elseif order_type == 2 then
+    local order_table = {}
+    for i = 0, num - 1 do
+        local r = sin((param_seed * 1000 + i) * 12.9898) * 43758.5453
+        order_table[i + 1] = { i, r - floor(r) }
+    end
+    table.sort(order_table, function(a, b) return a[2] < b[2] end)
+    for i = 1, num do
+        if order_table[i][1] == idx then
+            delay_idx = i - 1
+            break
+        end
+    end
+elseif order_type == 3 then
+    delay_idx = abs(obj.rand(0, 100 * (num - 1), idx, param_seed)) / 100
+elseif order_type == 4 then
+    delay_idx = abs((num - 1) * 0.5 - idx)
+elseif order_type == 5 then
+    delay_idx = ((num - 1) * 0.5) - abs((num - 1) * 0.5 - idx)
+end
+
+-- 2. 時間と進行度 (progress: 0.0=登場前 -> 1.0=完了) の算出
+local duration = max(abs(param_anim_time), 0.001)
+local delay_time = delay_idx * param_interval
+local local_time = 0.0
+
+if param_anim_time > 0 then
+    local_time = cur_time - delay_time
+else
+    local_time = ((obj.totaltime or 0) - cur_time) - delay_time
+end
+
+if local_time < 0 then
+    obj.alpha = 0
+    return
+end
+
+local progress = local_time / duration
+progress = max(0.0, min(1.0, progress))
+
+if progress >= 1.0 then
+    return
+end
+
+-- 3. イージング計算 (remain: 1.0=変位最大 -> 0.0=通常定着)
+local ease_val = 0.0
+
+if param_ease_num >= 1 and param_ease_num <= 41 then
+    if easing_status and type(easing_module) == "table" then
+        local func_name = easing_names[param_ease_num]
+        if func_name and easing_module[func_name] then
+            ease_val = easing_module[func_name](progress, 0.0, 1.0, 1.0)
+        else
+            ease_val = progress
+        end
+    else
+        ease_val = progress
+    end
+else
+    local local_ease_type = tonumber(ease_type) or 0
+    if local_ease_type == 0 then
+        ease_val = 1.0 - (1.0 - progress) ^ param_easing_power
+    elseif local_ease_type == 1 then
+        ease_val = progress ^ param_easing_power
+    elseif local_ease_type == 2 then
+        if progress <= 0.5 then
+            ease_val = (2.0 * progress) ^ param_easing_power / 2.0
+        else
+            ease_val = (1.0 - (1.0 - (progress - 0.5) * 2.0) ^ param_easing_power) / 2.0 + 0.5
+        end
+    elseif local_ease_type == 3 then
+        local s = 1.70158
+        local p_sub = progress - 1.0
+        ease_val = (p_sub * p_sub * ((s + 1.0) * p_sub + s) + 1.0)
+        ease_val = max(0.0, min(1.0, ease_val))
+    end
+end
+
+ease_val = max(0.0, min(1.0, ease_val))
+local remain = 1.0 - ease_val
+
+-- 4. 領域拡張とピクセルシェーダー処理
+if param_amount_xy > 0 and remain > 0 then
+    local margin = ceil(param_amount_xy * remain + 16)
+    obj.effect("領域拡張", "上", margin, "下", margin, "右", margin, "左", margin)
+    
+    buf_w, buf_h = obj.w, obj.h
+    local evolution = (cur_time * param_evolution_speed / 100) + (idx * 1.618)
+    local seed_val = (param_seed + idx * 13.37) % 1000
+
+    obj.pixelshader("ae_turbulent_displace_entrance", "object", { "object" }, {
+        remain,
+        param_amount_xy,
+        param_noise_size,
+        evolution,
+        param_complexity,
+        buf_w,
+        buf_h,
+        seed_val,
+    })
+end
+
+-- 5. 空間移動・回転・拡大率・フェードの適用
+obj.ox = (obj.ox or 0) + (distance_x or 0) * remain
+obj.oy = (obj.oy or 0) + (distance_y or 0) * remain
+obj.oz = (obj.oz or 0) + (distance_z or 0) * remain
+obj.rx = (obj.rx or 0) + (rotation_x or 0) * remain
+obj.ry = (obj.ry or 0) + (rotation_y or 0) * remain
+obj.rz = (obj.rz or 0) + (rotation_z or 0) * remain
+obj.zoom = (obj.zoom or 1) + remain * ((zoom_rate or 100) - 100) / 100
+
+if use_fade_enabled then
+    obj.alpha = (obj.alpha or 1) * (1.0 - remain)
+end
+
+-- 6. Z軸歪み（メッシュグリッド変形）の適用
+local divs = max(1, floor(param_mesh_div))
+if divs > 1 and param_amount_z > 0 and remain > 0 then
+    local evolution = (cur_time * param_evolution_speed / 100) + (idx * 1.618)
+    local seed_val = (param_seed + idx * 13.37) % 1000
+    local half_w = buf_w * 0.5
+    local half_h = buf_h * 0.5
+    local step_w = buf_w / divs
+    local step_h = buf_h / divs
+    local vertices = {}
+
+    for y = 0, divs - 1 do
+        local y0 = -half_h + y * step_h
+        local y1 = -half_h + (y + 1) * step_h
+        local v0 = y * step_h
+        local v1 = (y + 1) * step_h
+
+        for x = 0, divs - 1 do
+            local x0 = -half_w + x * step_w
+            local x1 = -half_w + (x + 1) * step_w
+            local u0 = x * step_w
+            local u1 = (x + 1) * step_w
+
+            local nx0 = (u0 - half_w) / param_noise_size + seed_val
+            local nx1 = (u1 - half_w) / param_noise_size + seed_val
+            local ny0 = (v0 - half_h) / param_noise_size + seed_val * 1.618 + evolution * 0.5
+            local ny1 = (v1 - half_h) / param_noise_size + seed_val * 1.618 + evolution * 0.5
+
+            local z00 = (sin(nx0 * 2.0 + ny0 * 1.5) * cos(nx0 * 1.2 - ny0 * 1.8)) * param_amount_z * remain
+            local z10 = (sin(nx1 * 2.0 + ny0 * 1.5) * cos(nx1 * 1.2 - ny0 * 1.8)) * param_amount_z * remain
+            local z11 = (sin(nx1 * 2.0 + ny1 * 1.5) * cos(nx1 * 1.2 - ny1 * 1.8)) * param_amount_z * remain
+            local z01 = (sin(nx0 * 2.0 + ny1 * 1.5) * cos(nx0 * 1.2 - ny1 * 1.8)) * param_amount_z * remain
+
+            vertices[#vertices + 1] = {
+                x0, y0, z00,
+                x1, y0, z10,
+                x1, y1, z11,
+                x0, y1, z01,
+                u0, v0,
+                u1, v0,
+                u1, v1,
+                u0, v1,
+            }
+        end
+    end
+
+    obj.drawpoly(vertices)
+    obj.alpha = 0
+end
