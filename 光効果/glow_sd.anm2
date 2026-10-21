@@ -2,7 +2,7 @@
 --information:グロー_sd (AviUtl2 Optimized / Pro Glow)
 --filter
 
---group:抽出・露出,true
+--group:抽出・露出
 --select@luma_type:抽出基準=1,Rec.709(実写向け)=0,最大値(イラスト向け)=1
 --track@threshold:抽出閾値,0.0,5.0,0.2,0.01
 --track@softness:閾値の柔らかさ,0.0,1.0,0.5,0.01
@@ -10,7 +10,7 @@
 --track@highlight:ハイライト強調,0.0,10.0,1.0,0.01
 --group:
 
---group:拡散・減衰,false
+--group:拡散・減衰
 --track@radius:拡散半径,0,500,100,1
 --track@spread:サンプリング幅,0.1,5.0,1.0,0.01
 --track@aspect:縦横拡散比,-1.0,1.0,0.0,0.01
@@ -18,7 +18,7 @@
 --track@core_boost:芯の強調,0.0,5.0,0.0,0.01
 --group:
 
---group:カラー・オプション,false
+--group:カラー・オプション
 --check@preserve_hue:色相・彩度を維持,1
 --check@color_override:単色グロー化,0
 --color@glow_color:グロー色,0xffffff
@@ -29,19 +29,13 @@
 --hide@glow_color:color_override==0
 --group:
 
---group:出力・合成,false
+--group:出力・合成
 --track@intensity:合成強度,0.0,20.0,1.0,0.01
---select@tone_map:トーン制御=1,なし=0,フィルムロールオフ=1,ACES=2,Reinhard=3,Uncharted 2=4,AgX=5
+--select@tone_map:トーン制御=1,なし=0,フィルムロールオフ=1,ACES=2,Reinhard=3,Uncharted 2=4,AgX=5,S字カーブ=6,ソフトクリップ=7,Lottes Filmic=8
 --track@highlight_roll:ハイライト圧縮,0.1,10.0,1.0,0.01
 --select@blend_mode:合成モード=0,加算=0,スクリーン=1
 --hide@highlight_roll:tone_map==0
 --group:
-
-local floor = math.floor
-local ceil = math.ceil
-local log = math.log
-local max = math.max
-local min = math.min
 
 if obj.w <= 0 or obj.h <= 0 or intensity <= 0 or radius <= 0 then
     return
@@ -50,15 +44,15 @@ end
 local max_w, max_h = obj.getinfo("image_max")
 if not obj.getinfo("filter") then
     local pad_amount = radius * spread * 2.0
-    local pad_x = floor(max(min(pad_amount, (max_w - obj.w) / 2), 0))
-    local pad_y = floor(max(min(pad_amount, (max_h - obj.h) / 2), 0))
+    local pad_x = math.floor(math.max(math.min(pad_amount, (max_w - obj.w) / 2), 0))
+    local pad_y = math.floor(math.max(math.min(pad_amount, (max_h - obj.h) / 2), 0))
     if pad_x > 0 or pad_y > 0 then
         obj.effect("領域拡張", "上", pad_y, "下", pad_y, "左", pad_x, "右", pad_x, "塗りつぶし", 0)
     end
 end
 
-local w = max(1, floor(obj.w))
-local h = max(1, floor(obj.h))
+local w = math.max(1, math.floor(obj.w))
+local h = math.max(1, math.floor(obj.h))
 
 local asp_x = (aspect > 0.0) and 1.0 or (1.0 + aspect)
 local asp_y = (aspect < 0.0) and 1.0 or (1.0 - aspect)
@@ -88,12 +82,7 @@ float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     float3 straight_rgb = col.rgb / safe_a;
     float3 linear_rgb = srgb2linear(straight_rgb);
     
-    float luma = 0.0;
-    if (param_opt.x > 0.5) {
-        luma = max(max(linear_rgb.r, linear_rgb.g), linear_rgb.b);
-    } else {
-        luma = dot(linear_rgb, float3(0.2126, 0.7152, 0.0722));
-    }
+    float luma = (param_opt.x > 0.5) ? max(max(linear_rgb.r, linear_rgb.g), linear_rgb.b) : dot(linear_rgb, float3(0.2126, 0.7152, 0.0722));
 
     float th = param_ext.x;
     float knee = max(th * saturate(param_ext.y), 1e-4);
@@ -229,6 +218,68 @@ float3 tm_uncharted2(float3 x, float white_point) {
     return saturate(curr * white_scale);
 }
 
+float map_luma_tone(float luma, float mode, float roll) {
+    if (mode == 1.0) {
+        return (luma > 1.0) ? (1.0 + (1.0 - exp(-(luma - 1.0) * roll)) / roll) : luma;
+    } else if (mode == 2.0) {
+        float safe_x = min(luma * roll, 60.0);
+        return tm_aces_fitted(float3(safe_x, safe_x, safe_x)).r;
+    } else if (mode == 3.0) {
+        float w_val = max(roll * 2.0, 0.1);
+        float w2 = w_val * w_val;
+        return (luma * (1.0 + luma / w2)) / (1.0 + luma);
+    } else if (mode == 4.0) {
+        return tm_uncharted2(float3(luma, luma, luma), max(1.0, roll * 2.0)).r;
+    } else if (mode == 5.0) {
+        return luma / (1.0 + luma * (0.5 / max(roll, 0.1)));
+    } else if (mode == 6.0) {
+        float p = max(0.5, roll);
+        return pow(max(luma, 0.0), p) / (pow(max(luma, 0.0), p) + 1.0);
+    } else if (mode == 7.0) {
+        float knee = 1.0 / max(0.1, roll);
+        float over = max(luma - knee, 0.0);
+        return min(luma, knee) + over / (1.0 + over);
+    } else if (mode == 8.0) {
+        float a = max(0.1, 1.6 * roll);
+        float l_a = pow(max(luma, 0.0), a);
+        return l_a / (l_a + 0.18);
+    }
+    return luma;
+}
+
+float3 map_rgb_tone(float3 c, float mode, float roll, float luma) {
+    if (mode == 1.0) {
+        if (c.r > 1.0) c.r = 1.0 + (1.0 - exp(-(c.r - 1.0) * roll)) / roll;
+        if (c.g > 1.0) c.g = 1.0 + (1.0 - exp(-(c.g - 1.0) * roll)) / roll;
+        if (c.b > 1.0) c.b = 1.0 + (1.0 - exp(-(c.b - 1.0) * roll)) / roll;
+        return c;
+    } else if (mode == 2.0) {
+        return tm_aces_fitted(min(c * roll, 60.0));
+    } else if (mode == 3.0) {
+        float w_val = max(roll * 2.0, 0.1);
+        float w2 = w_val * w_val;
+        return (c * (1.0 + c / w2)) / (1.0 + c);
+    } else if (mode == 4.0) {
+        return tm_uncharted2(c, max(1.0, roll * 2.0));
+    } else if (mode == 5.0) {
+        float3 desat_col = lerp(c, float3(luma, luma, luma), saturate((luma - 0.5) * 0.5 * roll));
+        return desat_col / (1.0 + desat_col * (0.5 / max(roll, 0.1)));
+    } else if (mode == 6.0) {
+        float p = max(0.5, roll);
+        float3 c_p = pow(max(c, 0.0), float3(p, p, p));
+        return c_p / (c_p + 1.0);
+    } else if (mode == 7.0) {
+        float knee = 1.0 / max(0.1, roll);
+        float3 over = max(c - knee, 0.0);
+        return min(c, knee) + over / (1.0 + over);
+    } else if (mode == 8.0) {
+        float a = max(0.1, 1.6 * roll);
+        float3 c_a = pow(max(c, 0.0), float3(a, a, a));
+        return c_a / (c_a + 0.18);
+    }
+    return c;
+}
+
 float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     float4 orig = origTex.SampleLevel(srcSmp, uv, 0.0);
     float4 bloom = bloomTex.SampleLevel(srcSmp, uv, 0.0);
@@ -250,39 +301,10 @@ float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target 
 
     if (mode > 0.0) {
         if (param_extra.y > 0.5) {
-            float mapped_luma = luma;
-            if (mode == 1.0) {
-                if (luma > 1.0) mapped_luma = 1.0 + (1.0 - exp(-(luma - 1.0) * roll)) / roll;
-            } else if (mode == 2.0) {
-                float safe_x = min(luma * roll, 60.0);
-                mapped_luma = tm_aces_fitted(float3(safe_x, safe_x, safe_x)).r;
-            } else if (mode == 3.0) {
-                float w_val = max(roll * 2.0, 0.1);
-                float w2 = w_val * w_val;
-                mapped_luma = (luma * (1.0 + luma / w2)) / (1.0 + luma);
-            } else if (mode == 4.0) {
-                mapped_luma = tm_uncharted2(float3(luma, luma, luma), max(1.0, roll * 2.0)).r;
-            } else if (mode == 5.0) {
-                mapped_luma = luma / (1.0 + luma * (0.5 / max(roll, 0.1)));
-            }
+            float mapped_luma = map_luma_tone(luma, mode, roll);
             out_lin = combined_lin * (mapped_luma / max(luma, 1e-5));
         } else {
-            if (mode == 1.0) {
-                if (out_lin.r > 1.0) out_lin.r = 1.0 + (1.0 - exp(-(out_lin.r - 1.0) * roll)) / roll;
-                if (out_lin.g > 1.0) out_lin.g = 1.0 + (1.0 - exp(-(out_lin.g - 1.0) * roll)) / roll;
-                if (out_lin.b > 1.0) out_lin.b = 1.0 + (1.0 - exp(-(out_lin.b - 1.0) * roll)) / roll;
-            } else if (mode == 2.0) {
-                out_lin = tm_aces_fitted(min(combined_lin * roll, 60.0));
-            } else if (mode == 3.0) {
-                float w_val = max(roll * 2.0, 0.1);
-                float w2 = w_val * w_val;
-                out_lin = (combined_lin * (1.0 + combined_lin / w2)) / (1.0 + combined_lin);
-            } else if (mode == 4.0) {
-                out_lin = tm_uncharted2(combined_lin, max(1.0, roll * 2.0));
-            } else if (mode == 5.0) {
-                float3 desat_col = lerp(combined_lin, float3(luma, luma, luma), saturate((luma - 0.5) * 0.5 * roll));
-                out_lin = desat_col / (1.0 + desat_col * (0.5 / max(roll, 0.1)));
-            }
+            out_lin = map_rgb_tone(combined_lin, mode, roll, luma);
         }
     }
 
@@ -303,20 +325,20 @@ float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target 
 ]]
 
 local max_passes = 8
-local log2_r = max(log(max(1, radius)) / log(2.0), 0.05)
-local n_full = min(floor(log2_r), max_passes)
+local log2_r = math.max(math.log(math.max(1, radius)) / math.log(2.0), 0.05)
+local n_full = math.min(math.floor(log2_r), max_passes)
 local frac = log2_r - n_full
-local passes = min(n_full + (frac > 0 and 1 or 0), max_passes)
+local passes = math.min(n_full + (frac > 0 and 1 or 0), max_passes)
 
 local widths = { [0] = w }
 local heights = { [0] = h }
 local actual_passes = 0
 for k = 1, passes do
-    if min(widths[k - 1], heights[k - 1]) <= 4 then
+    if math.min(widths[k - 1], heights[k - 1]) <= 4 then
         break
     end
-    widths[k] = max(1, ceil(widths[k - 1] / 2))
-    heights[k] = max(1, ceil(heights[k - 1] / 2))
+    widths[k] = math.max(1, math.ceil(widths[k - 1] / 2))
+    heights[k] = math.max(1, math.ceil(heights[k - 1] / 2))
     actual_passes = k
 end
 passes = actual_passes
@@ -325,6 +347,7 @@ if passes <= 0 then
     return
 end
 
+obj.clearbuffer("cache:glow_orig", w, h)
 obj.copybuffer("cache:glow_orig", "object")
 
 local down_buf = {}
@@ -404,7 +427,7 @@ for i = passes - 1, 0, -1 do
     current_src = up_buf[i]
 end
 
-local final_intensity = intensity / max(0.001, total_weight)
+local final_intensity = intensity / math.max(0.001, total_weight)
 local is_preserve_hue = (preserve_hue == 1) and 1.0 or 0.0
 
 obj.pixelshader(
