@@ -60,8 +60,7 @@ float4 ps_quantize(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
 }
 ]]
 
-local filter_mode = val_no_interp and "copy" or "linear"
-local address_mode = "clamp"
+local sampler_mode = val_no_interp and "dot" or "clamp"
 
 local constants = {
     val_zoom * 0.01,
@@ -75,6 +74,6 @@ obj.pixelshader(
     "object",
     { "object" },
     constants,
-    filter_mode,
-    address_mode
+    "copy",
+    sampler_mode
 )
