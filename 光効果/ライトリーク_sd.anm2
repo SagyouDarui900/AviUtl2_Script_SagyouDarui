@@ -1,0 +1,278 @@
+--label:光効果
+--information:ライトリーク (Ultimate)
+
+--group:基本設定,true
+--track@intensity:強度,0,500,100,0.1
+--track@scale:サイズ,10,500,100,0.1
+--track@speed:速度,0,500,100,0.1
+--select@blend_mode:合成モード=0,加算=0,スクリーン=1,通常=2
+--check@bpm_sync:BPM同期,false
+--group:
+
+--group:形状と光源タイプ,true
+--select@leak_type:光源タイプ=0,放射状=0,エッジリーク=1,アナモルフィック=2,クラウド散乱=3
+--track@pos_x:位置X,-2000,2000,-50,1
+--track@pos_y:位置Y,-2000,2000,-50,1
+--trackgroup@pos_x,pos_y:光源位置
+--track@angle:角度,-360,360,0,0.1
+--track@aspect:縦横比,-10,10,0,0.01
+--trackgroup@scale,angle,aspect:光の形状
+--group:
+
+--group:質感と光学効果,true
+--select@n_type:ノイズ質感=0,ソフト=0,クラウド=1,オーロラうねり=2
+--track@detail:細かさ,1,8,3,1
+--track@flicker:フリッカー,0,100,0,0.1
+--track@aberration:色収差,0,100,0,0.1
+--track@streak:光芒強度,0,100,0,0.1
+--track@grain:フィルム粒子,0,100,0,0.1
+--track@core_white:コア白飛び,0,100,30,0.1
+--track@seed:シード値,0,1000,0,1
+--group:
+
+--group:カラー設定,true
+--color@col1:中心色,0xffcc66
+--color@col_mid:中間色,0xff4411
+--color@col2:外周色,0x880000
+--group:
+
+if (intensity or 0) <= 0 or (scale or 0) <= 0
+    or (obj.w or 0) <= 0 or (obj.h or 0) <= 0 then
+    return
+end
+
+--[[pixelshader@ps_light_leak_ult:
+cbuffer Params : register(b0) {
+    float intensity;
+    float time_val;
+    float scale_val;
+    float pos_x;
+
+    float pos_y;
+    float aspect;
+    float seed_val;
+    float angle;
+
+    float flicker_amt;
+    float aberration;
+    float ext_aspect;
+    float detail;
+
+    float streak_intensity;
+    float grain_amt;
+    float core_white;
+    float leak_type;
+
+    float3 color1;
+    float n_type;
+
+    float3 color2;
+    float pad1;
+
+    float3 color_mid;
+    float pad2;
+};
+
+float2 hash22(float2 p) {
+    p = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
+    return -1.0 + 2.0 * frac(sin(p) * 43758.5453123);
+}
+
+float perlin_noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+
+    return lerp(lerp(dot(hash22(i + float2(0.0, 0.0)), f - float2(0.0, 0.0)),
+                     dot(hash22(i + float2(1.0, 0.0)), f - float2(1.0, 0.0)), u.x),
+                lerp(dot(hash22(i + float2(0.0, 1.0)), f - float2(0.0, 1.0)),
+                     dot(hash22(i + float2(1.0, 1.0)), f - float2(1.0, 1.0)), u.x), u.y);
+}
+
+float fbm(float2 p, float t, float seed_offset_val, int octaves, int type) {
+    float value = 0.0;
+    float amp = 0.5;
+    float freq = 1.0;
+    float norm = 0.0;
+    float2 seed_offset = float2(seed_offset_val * 11.1, seed_offset_val * 23.3);
+
+    if (type == 1 || type == 2) {
+        float2 warp = float2(
+            perlin_noise(p * 1.5 + float2(t * 0.1, seed_offset_val)),
+            perlin_noise(p * 1.5 + float2(seed_offset_val, t * 0.12))
+        );
+        p += warp * (type == 2 ? 0.8 : 0.4);
+    }
+
+    [unroll(8)]
+    for (int i = 0; i < 8; i++) {
+        if (i >= octaves) break;
+
+        float2 offset = (type == 2) ? float2(t * 0.15, t * -0.2) : float2(t * 0.2, t * 0.1);
+        offset *= freq;
+        float n = 0.5 + 0.5 * perlin_noise(p * 2.5 * freq + offset + seed_offset + float(i) * 13.7);
+
+        if (type == 2) {
+            n = 1.0 - abs(n * 2.0 - 1.0);
+            n = n * n;
+        }
+
+        value += amp * n;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return value / max(norm, 0.0001);
+}
+
+float get_leak_mask(float2 st, float2 center, float scale, float ext_aspect_val, float angle_rad, float t, float seed, float l_type) {
+    float2 delta = st - center;
+    float s, c;
+    sincos(-angle_rad, s, c);
+    float2 rot_delta = float2(c * delta.x - s * delta.y, s * delta.x + c * delta.y);
+
+    float ax = (ext_aspect_val > 0.0) ? 1.0 + ext_aspect_val : 1.0;
+    float ay = (ext_aspect_val > 0.0) ? 1.0 : 1.0 - ext_aspect_val;
+
+    float dist = 0.0;
+    int type_idx = (int)l_type;
+
+    if (type_idx == 1) {
+        dist = abs(rot_delta.x * ax) / max(scale * 0.01, 0.001);
+    } else if (type_idx == 2) {
+        dist = length(rot_delta * float2(ax * 0.2, ay * 4.0)) / max(scale * 0.01, 0.001);
+    } else if (type_idx == 3) {
+        dist = length(rot_delta * float2(ax, ay)) / max(scale * 0.02, 0.001);
+    } else {
+        dist = length(rot_delta * float2(ax, ay)) / max(scale * 0.01, 0.001);
+    }
+
+    int oct = clamp((int)detail, 1, 8);
+    int n_type_idx = clamp((int)n_type, 0, 2);
+
+    float n1 = fbm(st, t, seed, oct, n_type_idx);
+    float n2 = fbm(st * 1.5 + float2(4.3, -2.1), t * 0.8, seed + 10.0, oct, n_type_idx);
+
+    float falloff = (type_idx == 3) ? smoothstep(3.0, 0.0, dist) : smoothstep(2.0, 0.0, dist);
+    float leak_mask = falloff * (n1 * 0.65 + n2 * 0.35);
+    return pow(max(leak_mask, 0.0), 1.1);
+}
+
+float4 ps_light_leak_ult(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+    float2 st = uv - float2(0.5, 0.5);
+    st.x *= aspect;
+    float2 center = float2(pos_x, pos_y);
+    float t = time_val;
+
+    float flk = 0.5 + 0.5 * perlin_noise(float2(t * 12.0, seed_val));
+    float current_intensity = intensity * 0.01 * lerp(1.0, flk, flicker_amt);
+
+    float scale_r = scale_val * (1.0 + aberration * 0.005);
+    float scale_g = scale_val;
+    float scale_b = scale_val * max(1.0 - aberration * 0.005, 0.01);
+
+    float mask_r = get_leak_mask(st, center, scale_r, ext_aspect, angle, t, seed_val, leak_type);
+    float mask_g = get_leak_mask(st, center, scale_g, ext_aspect, angle, t, seed_val, leak_type);
+    float mask_b = get_leak_mask(st, center, scale_b, ext_aspect, angle, t, seed_val, leak_type);
+
+    float dist_g = length(st - center) / max(scale_g * 0.01, 0.001);
+
+    float grad_factor = saturate(dist_g * 0.8);
+    float3 grad_color = (grad_factor < 0.5) 
+        ? lerp(color1, color_mid, grad_factor * 2.0) 
+        : lerp(color_mid, color2, (grad_factor - 0.5) * 2.0);
+
+    float core_factor = pow(saturate(1.0 - dist_g * 0.5), 2.0) * (core_white * 0.01);
+    grad_color = lerp(grad_color, float3(1.0, 1.0, 1.0), core_factor);
+
+    if (streak_intensity > 0.0) {
+        float2 s_delta = st - center;
+        float s, c;
+        sincos(-angle, s, c);
+        float2 rot_s = float2(c * s_delta.x - s * s_delta.y, s * s_delta.x + c * s_delta.y);
+        float streak_mask = exp(-abs(rot_s.y) * 45.0 / max(scale_val * 0.01, 0.01)) * smoothstep(2.5, 0.0, abs(rot_s.x));
+        grad_color += color1 * (streak_mask * streak_intensity * 0.8);
+    }
+
+    if (grain_amt > 0.0) {
+        float g_noise = frac(sin(dot(uv * (t + 1.0), float2(12.9898, 78.233))) * 43758.5453);
+        grad_color *= (1.0 + (g_noise - 0.5) * grain_amt * 0.3);
+    }
+
+    float3 final_color = grad_color * float3(mask_r, mask_g, mask_b) * current_intensity;
+    float max_mask = max(mask_r, max(mask_g, mask_b));
+    float final_alpha = max_mask * current_intensity;
+
+    return float4(final_color, final_alpha);
+}
+]]
+
+obj.setanchor("pos_x,pos_y", 0, "arm", "color", col1)
+
+local intensity_multi = 1.0
+if bpm_sync == true or bpm_sync == 1 then
+    local tempo, _, offset = obj.getinfo("bpm")
+    if tempo and tempo > 0 then
+        local sec_per_beat = 60.0 / tempo
+        local current_time = obj.time - (offset or 0)
+        local beat_phase = (current_time % sec_per_beat) / sec_per_beat
+        intensity_multi = math.max(0.0, 1.0 - beat_phase * 1.5)
+    end
+end
+
+local safe_intensity = math.max(0.0, intensity or 0.0)
+local safe_scale = math.max(0.0, scale or 0.0)
+local safe_speed = speed or 0.0
+local safe_aspect = aspect or 0.0
+local safe_detail = math.min(8, math.max(1, math.floor(detail or 3)))
+local safe_type = math.min(2, math.max(0, math.floor(n_type or 0)))
+local safe_leak_type = math.min(3, math.max(0, math.floor(leak_type or 0)))
+local safe_flicker = math.min(100, math.max(0, flicker or 0))
+local safe_aberration = math.min(100, math.max(0, aberration or 0))
+local safe_streak = math.min(100, math.max(0, streak or 0))
+local safe_grain = math.min(100, math.max(0, grain or 0))
+local safe_core = math.min(100, math.max(0, core_white or 30))
+local safe_seed = seed or 0
+local safe_pos_x = pos_x or 0.0
+local safe_pos_y = pos_y or 0.0
+local safe_angle = angle or 0.0
+
+local final_intensity = safe_intensity * intensity_multi
+local r1, g1, b1 = RGB(col1)
+local rm, gm, bm = RGB(col_mid)
+local r2, g2, b2 = RGB(col2)
+local aspect_ratio = obj.w / obj.h
+local current_time = (obj.time or 0.0) * (safe_speed * 0.01)
+local rad_angle = safe_angle * math.pi / 180.0
+
+local constants = {
+    final_intensity,
+    current_time,
+    safe_scale,
+    safe_pos_x / obj.h,
+
+    safe_pos_y / obj.h,
+    aspect_ratio,
+    safe_seed,
+    rad_angle,
+
+    safe_flicker * 0.01,
+    safe_aberration * 0.01,
+    safe_aspect,
+    safe_detail,
+
+    safe_streak * 0.01,
+    safe_grain * 0.01,
+    safe_core,
+    safe_leak_type,
+
+    r1 / 255.0, g1 / 255.0, b1 / 255.0, safe_type,
+    r2 / 255.0, g2 / 255.0, b2 / 255.0, 0.0,
+    rm / 255.0, gm / 255.0, bm / 255.0, 0.0
+}
+
+local blend_str = "add"
+if blend_mode == 1 then blend_str = "screen" end
+if blend_mode == 2 then blend_str = "draw" end
+
+obj.pixelshader("ps_light_leak_ult", "object", { "object" }, constants, blend_str, "clamp")
