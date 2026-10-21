@@ -13,11 +13,16 @@
 --track@angle:角度,-3600,3600,0,0.1
 --group:
 
---check@invert:反転,0
+--check@invert:反転,false
+
+local w, h = obj.w, obj.h
+if w <= 0 or h <= 0 then
+    return
+end
 
 --[[pixelshader@cross_clip_ps:
-Texture2D t0 : register(t0);
-SamplerState s0 : register(s0);
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
 
 cbuffer params : register(b0) {
     float2 obj_size;
@@ -30,8 +35,8 @@ cbuffer params : register(b0) {
 };
 
 float4 cross_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float4 color = t0.Sample(s0, uv);
-    if (color.a == 0.0) return color;
+    float4 color = tex.Sample(samp, uv);
+    if (color.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
 
     // UV座標から中心基準のローカルピクセル座標へ変換
     float2 p = float2((uv.x - 0.5) * obj_size.x, (uv.y - 0.5) * obj_size.y);
@@ -61,7 +66,7 @@ float4 cross_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targe
 -- プレビュー画面での中心操作用アンカー
 obj.setanchor("center_x,center_y", 0, "arm")
 
-local w, h = obj.w, obj.h
+local math = math
 local base_size = math.min(w, h)
 local rad = math.rad(angle)
 local sin_a = math.sin(rad)
@@ -71,14 +76,16 @@ local scale = size * 0.01
 local half_w = (base_size * (cross_w * 0.01) * scale) * 0.5
 local half_h = (base_size * (cross_h * 0.01) * scale) * 0.5
 
+local is_invert = (invert == 1 or invert == true) and 1.0 or 0.0
+
 -- 定数バッファ（float4 × 3 = 12要素）
 local constants = {
     w, h,
     center_x, center_y,
     half_w, half_h,
     sin_a, cos_a,
-    invert,
+    is_invert,
     0.0, 0.0, 0.0
 }
 
-obj.pixelshader("cross_clip_ps", "object", {"object"}, constants)
+obj.pixelshader("cross_clip_ps", "object", {"object"}, constants, "copy", "clamp")
