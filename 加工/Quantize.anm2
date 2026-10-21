@@ -5,65 +5,76 @@
 --group:量子化設定,true
 --track@zoom_lv:ピクセル倍率,100,50000,100,0.01
 --track@color_steps:色階調(減色),2,256,256,1
---check@no_interp:補間なし,true
+--check@no_interp:補間なし,1
 --group:
 
--- 変化がない場合や画像サイズが無効な場合は早期リターン
-local do_mosaic = zoom_lv > 100.0
-local do_posterize = color_steps < 256
+local val_zoom = zoom_lv or 100.0
+local val_color_steps = color_steps or 256
+local val_no_interp = (no_interp == 1) or (no_interp == true)
+
+local do_mosaic = val_zoom > 100.0
+local do_posterize = val_color_steps < 256
 
 if (not do_mosaic and not do_posterize) or obj.w <= 0 or obj.h <= 0 then
     return
 end
 
 --[[pixelshader@ps_quantize:
-    cbuffer params : register(b0) {
-        float p_zoom;        // [0].x: ピクセル倍率 (zoom_lv / 100.0)
-        float p_color_steps; // [0].y: 色階調数 (2 - 256)
-        float2 p_res;        // [0].zw: 画像解像度 (w, h)
-    };
+cbuffer params : register(b0) {
+    float p_zoom;        // ピクセル倍率 (zoom_lv / 100.0)
+    float p_color_steps; // 色階調数 (2 - 256)
+    float2 p_res;        // 画像解像度 (w, h)
+};
 
-    Texture2D tex : register(t0);
-    SamplerState samp : register(s0);
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
 
-    float4 ps_quantize(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-        float2 sample_uv = uv;
+float4 ps_quantize(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 sample_uv = uv;
 
-        // 1. 空間の量子化 (中心基準のピクセル化)
-        if (p_zoom > 1.0) {
-            float2 center_px = (uv - 0.5) * p_res;
-            float2 quant_px = (floor(center_px / p_zoom) + 0.5) * p_zoom;
-            sample_uv = saturate(quant_px / p_res + 0.5);
-        }
-
-        float4 color = tex.Sample(samp, sample_uv);
-
-        if (color.a <= 0.0) {
-            return float4(0.0, 0.0, 0.0, 0.0);
-        }
-
-        // 2. 色の量子化 (Posterization)
-        if (p_color_steps < 256.0) {
-            float safe_a = max(color.a, 0.00001);
-            float3 straight_rgb = color.rgb / safe_a;
-
-            float steps = p_color_steps - 1.0;
-            straight_rgb = floor(straight_rgb * steps + 0.5) / steps;
-
-            color.rgb = straight_rgb * color.a;
-        }
-
-        return color;
+    // 1. 空間の量子化 (中心基準のピクセル化)
+    if (p_zoom > 1.0) {
+        float2 center_px = (uv - 0.5) * p_res;
+        float2 quant_px = (floor(center_px / p_zoom) + 0.5) * p_zoom;
+        sample_uv = saturate(quant_px / p_res + 0.5);
     }
+
+    float4 color = tex.Sample(samp, sample_uv);
+
+    if (color.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // 2. 色の量子化 (Posterization)
+    if (p_color_steps < 256.0) {
+        float safe_a = max(color.a, 0.00001);
+        float3 straight_rgb = color.rgb / safe_a;
+
+        float steps = p_color_steps - 1.0;
+        straight_rgb = floor(straight_rgb * steps + 0.5) / steps;
+
+        color.rgb = straight_rgb * color.a;
+    }
+
+    return color;
+}
 ]]
 
-local sampler_type = no_interp and "dot" or "clip"
+local filter_mode = val_no_interp and "copy" or "linear"
+local address_mode = "clamp"
 
 local constants = {
-    zoom_lv * 0.01,
-    color_steps,
+    val_zoom * 0.01,
+    val_color_steps,
     obj.w,
     obj.h
 }
 
-obj.pixelshader("ps_quantize", "object", {"object"}, constants, "copy", sampler_type)
+obj.pixelshader(
+    "ps_quantize",
+    "object",
+    { "object" },
+    constants,
+    filter_mode,
+    address_mode
+)
