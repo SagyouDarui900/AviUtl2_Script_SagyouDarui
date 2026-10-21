@@ -11,6 +11,15 @@
 --select@mode:モード=0,平行ズレ=0,放射ズレ(倍率)=1,回転ズレ=2
 --group:
 
+--group:ラジアル設定
+--track@radial:回転ラジアル,-3.14,3.14,0.0,0.01
+--track@scale:倍率ズレ,-1.0,1.0,0.0,0.01
+--select@scale_mode:倍率方式=0,線形=0,指数=1
+--track@radius:影響範囲,0.01,10.0,1.0,0.01
+--track@falloff:減衰強度,0.0,10.0,0.0,0.1
+--select@falloff_mode:減衰方式=0,標準累乗=0,急峻1=1,急峻2=2,急峻3=3,指数減衰=4
+--group:
+
 --group:詳細設定
 --track@quality:品質(サンプル数),2,64,8,1
 --select@color_order:配色=0,赤(+)・青(-)=0,緑(+)・赤(-)=1,青(+)・緑(-)=2,赤(+)・緑(-)=3,緑(+)・青(-)=4,青(+)・赤(-)=5
@@ -260,10 +269,10 @@ float3 cfeForward(float3 color)
 float3 cfeInverse(float3 value)
 {
     const float epsilon = 0.001;
-    float yCoordinate = max(value.y, 1e-5);
-    float n = clamp(floor(1.0 / yCoordinate), 1.0, 1000.0);
+    float y_coord = max(value.y, 1e-5);
+    float n = clamp(floor(1.0 / y_coord), 1.0, 1000.0);
     float x = 1.0 / max(n + value.x, 1e-5);
-    float y = 1.0 / yCoordinate - n;
+    float y = 1.0 / y_coord - n;
     float z = wrap01(value.z - 0.23 * sin(TWO_PI * value.x) - 0.17 * sin(TWO_PI * value.y));
     return (float3(x, y, z) - epsilon) / (1.0 - 2.0 * epsilon);
 }
@@ -385,8 +394,8 @@ float3 stdInverse(float3 value)
 // QRO-2 — Quaternion Ribbon
 float3 qroRotate(float3 q, float angle)
 {
-    const float inverseSqrt3 = 0.5773502691896258;
-    float3 axis = float3(inverseSqrt3, inverseSqrt3, inverseSqrt3);
+    const float inv_sqrt3 = 0.5773502691896258;
+    float3 axis = float3(inv_sqrt3, inv_sqrt3, inv_sqrt3);
     float cosine = cos(angle);
     float sine = sin(angle);
     return q * cosine + cross(axis, q) * sine + axis * dot(axis, q) * (1.0 - cosine);
@@ -394,10 +403,10 @@ float3 qroRotate(float3 q, float angle)
 
 float qroAngle(float3 q)
 {
-    const float inverseSqrt3 = 0.5773502691896258;
+    const float inv_sqrt3 = 0.5773502691896258;
     float rho = length(q);
-    float projection = dot(float3(inverseSqrt3, inverseSqrt3, inverseSqrt3), q);
-    return 4.2 * safeTanh(2.0 * rho) + 2.4 * sin(4.0 * projection);
+    float proj = dot(float3(inv_sqrt3, inv_sqrt3, inv_sqrt3), q);
+    return 4.2 * safeTanh(2.0 * rho) + 2.4 * sin(4.0 * proj);
 }
 
 float3 qroForward(float3 color)
@@ -414,24 +423,24 @@ float3 qroInverse(float3 value)
 // HBP-2 — Hyperbolic Prism
 float3 hbpBasisForward(float3 q)
 {
-    const float inverseSqrt3 = 0.5773502691896258;
-    const float inverseSqrt2 = 0.7071067811865475;
-    const float inverseSqrt6 = 0.4082482904638630;
+    const float inv_sqrt3 = 0.5773502691896258;
+    const float inv_sqrt2 = 0.7071067811865475;
+    const float inv_sqrt6 = 0.4082482904638630;
     return float3(
-        (q.x + q.y + q.z) * inverseSqrt3,
-        (q.x - q.z) * inverseSqrt2,
-        (q.x - 2.0 * q.y + q.z) * inverseSqrt6);
+        (q.x + q.y + q.z) * inv_sqrt3,
+        (q.x - q.z) * inv_sqrt2,
+        (q.x - 2.0 * q.y + q.z) * inv_sqrt6);
 }
 
 float3 hbpBasisInverse(float3 value)
 {
-    const float inverseSqrt3 = 0.5773502691896258;
-    const float inverseSqrt2 = 0.7071067811865475;
-    const float inverseSqrt6 = 0.4082482904638630;
+    const float inv_sqrt3 = 0.5773502691896258;
+    const float inv_sqrt2 = 0.7071067811865475;
+    const float inv_sqrt6 = 0.4082482904638630;
     return float3(
-        value.x * inverseSqrt3 + value.y * inverseSqrt2 + value.z * inverseSqrt6,
-        value.x * inverseSqrt3 - 2.0 * value.z * inverseSqrt6,
-        value.x * inverseSqrt3 - value.y * inverseSqrt2 + value.z * inverseSqrt6);
+        value.x * inv_sqrt3 + value.y * inv_sqrt2 + value.z * inv_sqrt6,
+        value.x * inv_sqrt3 - 2.0 * value.z * inv_sqrt6,
+        value.x * inv_sqrt3 - value.y * inv_sqrt2 + value.z * inv_sqrt6);
 }
 
 float3 hbpForward(float3 color)
@@ -466,45 +475,45 @@ float3 cmyInverse(float3 value)
     return 1.0 - saturate(value);
 }
 
-float3 colorForward(float3 color, int colorSpace)
+float3 colorForward(float3 color, int color_space)
 {
-    if (colorSpace == 1) return rssForward(color);
-    if (colorSpace == 2) return fssForward(color);
-    if (colorSpace == 3) return cslForward(color);
-    if (colorSpace == 4) return hcsForward(color);
-    if (colorSpace == 5) return phsForward(color);
-    if (colorSpace == 6) return csmForward(color);
-    if (colorSpace == 7) return ksmForward(color);
-    if (colorSpace == 8) return cfeForward(color);
-    if (colorSpace == 9) return anoForward(color);
-    if (colorSpace == 10) return catForward(color);
-    if (colorSpace == 11) return brdForward(color);
-    if (colorSpace == 12) return torForward(color);
-    if (colorSpace == 13) return stdForward(color);
-    if (colorSpace == 14) return qroForward(color);
-    if (colorSpace == 15) return hbpForward(color);
-    if (colorSpace == 16) return cmyForward(color);
+    if (color_space == 1) return rssForward(color);
+    if (color_space == 2) return fssForward(color);
+    if (color_space == 3) return cslForward(color);
+    if (color_space == 4) return hcsForward(color);
+    if (color_space == 5) return phsForward(color);
+    if (color_space == 6) return csmForward(color);
+    if (color_space == 7) return ksmForward(color);
+    if (color_space == 8) return cfeForward(color);
+    if (color_space == 9) return anoForward(color);
+    if (color_space == 10) return catForward(color);
+    if (color_space == 11) return brdForward(color);
+    if (color_space == 12) return torForward(color);
+    if (color_space == 13) return stdForward(color);
+    if (color_space == 14) return qroForward(color);
+    if (color_space == 15) return hbpForward(color);
+    if (color_space == 16) return cmyForward(color);
     return color;
 }
 
-float3 colorInverse(float3 value, int colorSpace)
+float3 colorInverse(float3 value, int color_space)
 {
-    if (colorSpace == 1) return rssInverse(value);
-    if (colorSpace == 2) return fssInverse(value);
-    if (colorSpace == 3) return cslInverse(value);
-    if (colorSpace == 4) return hcsInverse(value);
-    if (colorSpace == 5) return phsInverse(value);
-    if (colorSpace == 6) return csmInverse(value);
-    if (colorSpace == 7) return ksmInverse(value);
-    if (colorSpace == 8) return cfeInverse(value);
-    if (colorSpace == 9) return anoInverse(value);
-    if (colorSpace == 10) return catInverse(value);
-    if (colorSpace == 11) return brdInverse(value);
-    if (colorSpace == 12) return torInverse(value);
-    if (colorSpace == 13) return stdInverse(value);
-    if (colorSpace == 14) return qroInverse(value);
-    if (colorSpace == 15) return hbpInverse(value);
-    if (colorSpace == 16) return cmyInverse(value);
+    if (color_space == 1) return rssInverse(value);
+    if (color_space == 2) return fssInverse(value);
+    if (color_space == 3) return cslInverse(value);
+    if (color_space == 4) return hcsInverse(value);
+    if (color_space == 5) return phsInverse(value);
+    if (color_space == 6) return csmInverse(value);
+    if (color_space == 7) return ksmInverse(value);
+    if (color_space == 8) return cfeInverse(value);
+    if (color_space == 9) return anoInverse(value);
+    if (color_space == 10) return catInverse(value);
+    if (color_space == 11) return brdInverse(value);
+    if (color_space == 12) return torInverse(value);
+    if (color_space == 13) return stdInverse(value);
+    if (color_space == 14) return qroInverse(value);
+    if (color_space == 15) return hbpInverse(value);
+    if (color_space == 16) return cmyInverse(value);
     return value;
 }
 
@@ -517,7 +526,7 @@ float3 get_color_weight(int order, float t, float hide) {
     float w3 = exp(-0.5 * d3 * d3);
 
     if (hide > 0.5) {
-        float original_suppression = smoothstep(0.05, 0.35, abs(t));
+        float original_suppression = smoothstep(0.05, 0.35, abs(t - 0.5));
         w1 *= original_suppression;
         w2 *= original_suppression;
         w3 *= original_suppression;
@@ -653,13 +662,14 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
         (sum_w.g > 0.0) ? (sum_col.g / sum_w.g) : orig.g,
         (sum_w.b > 0.0) ? (sum_col.b / sum_w.b) : orig.b);
     float3 restored_color = (color_space != 0) ? colorInverse(transformed_color, color_space) : transformed_color;
-    final_color.rgb = saturate(restored_color);
     
     float out_a_r = (sum_w.r > 0.0) ? (sum_a.r / sum_w.r) : orig.a;
     float out_a_g = (sum_w.g > 0.0) ? (sum_a.g / sum_w.g) : orig.a;
     float out_a_b = (sum_w.b > 0.0) ? (sum_a.b / sum_w.b) : orig.a;
     
     final_color.a = (out_a_r + out_a_g + out_a_b) / 3.0;
+
+    final_color.rgb = saturate(restored_color) * final_color.a;
     
     float mix_factor = param_mode.w * 0.01;
     float4 result = lerp(final_color, orig, mix_factor);
@@ -680,32 +690,33 @@ do
     local sqrt = math.sqrt
 
     local safe_amount = amount or 0.0
-    local safe_falloff = 0.0
-    local safe_radius = 1.0
-    local safe_radial = 0.0
-    local safe_scale = 0.0
-    local safe_mode = 0
-    local safe_effect_mode = min(max(mode or 0, 0), 2)
-    local safe_color_order = min(max(color_order or 0, 0), 5)
-    local safe_color_space = min(max(color_space or 0, 0), 16)
-    local safe_scale_mode = 0
-    local safe_quality = max(quality or 8, 2)
+    local safe_angle = angle or 0.0
     local safe_center_x = center_x or 0.0
     local safe_center_y = center_y or 0.0
+    local safe_effect_mode = min(max(mode or 0, 0), 2)
+
+    local safe_radial = radial or 0.0
+    local safe_scale = scale or 0.0
+    local safe_scale_mode = scale_mode or 0
+    local safe_radius = radius or 1.0
+    local safe_falloff = falloff or 0.0
+    local safe_falloff_mode = falloff_mode or 0
+
+    local safe_quality = max(quality or 8, 2)
+    local safe_color_order = min(max(color_order or 0, 0), 5)
+    local safe_color_space = min(max(color_space or 0, 0), 16)
+    local safe_hide_orig = (hide_orig == 1 or hide_orig == true) and 1.0 or 0.0
+    local safe_mix_rate = min(max(mix_rate or 0.0, 0.0), 100.0)
+
     local q = min(64, floor(safe_quality))
-    local angle_rad = rad(angle or 0.0)
+    local angle_rad = rad(safe_angle)
     local cos_a = cos(angle_rad)
     local sin_a = sin(angle_rad)
 
-    local ex_x = 0
-    local ex_y = 0
-
     local orig_w = obj.w
     local orig_h = obj.h
-    local max_radius = sqrt(orig_w * orig_w + orig_h * orig_h) * 0.5
-    local estimated_displacement = abs(safe_amount)
-        + max_radius * (abs(safe_radial) + abs(safe_scale))
-    q = min(q, max(2, ceil(estimated_displacement)))
+    local ex_x = 0
+    local ex_y = 0
 
     if safe_effect_mode == 0 then
         local max_shift = abs(safe_amount)
@@ -778,8 +789,8 @@ do
 
             safe_effect_mode,
             safe_color_order,
-            (hide_orig == 1 or hide_orig == true) and 1.0 or 0.0,
-            min(max(mix_rate or 0.0, 0.0), 100.0),
+            safe_hide_orig,
+            safe_mix_rate,
 
             center_px_x,
             center_px_y,
@@ -796,7 +807,7 @@ do
             safe_scale,
             safe_scale_mode,
 
-            safe_mode,
+            safe_falloff_mode,
             safe_color_space,
             0.0,
             0.0
