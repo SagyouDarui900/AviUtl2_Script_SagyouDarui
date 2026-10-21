@@ -28,6 +28,9 @@
 Texture2D tex0 : register(t0);
 SamplerState smp0 : register(s0);
 
+static const float PI = 3.14159265359;
+static const float TWO_PI = 6.28318530718;
+
 cbuffer ConstantBuffer : register(b0) {
     float u_time;             // 時間（秒）
     float u_scale;            // 貝片サイズ
@@ -48,13 +51,13 @@ cbuffer ConstantBuffer : register(b0) {
 };
 
 float2 hash22(float2 p) {
-    float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+    float3 p3 = frac(p.xyx * float3(0.1031, 0.1030, 0.0973));
     p3 += dot(p3, p3.yzx + 33.33);
     return frac((p3.xx + p3.yz) * p3.zy);
 }
 
 float hash12(float2 p) {
-    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    float3 p3 = frac(p.xyx * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return frac((p3.x + p3.y) * p3.z);
 }
@@ -83,8 +86,8 @@ void nacre_cells(float2 uv, out float crack, out float2 cell_hash, out float2 ce
     float2 f = frac(uv);
     float d1 = 8.0;
     float d2 = 8.0;
-    float2 min_g = float2(0.0, 0.0);
-    float2 min_p = float2(0.0, 0.0);
+    float2 min_g = 0.0;
+    float2 min_p = 0.0;
 
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
@@ -112,7 +115,7 @@ float3 nacre_iridescence(float phase) {
     float3 b = float3(0.38, 0.42, 0.35);
     float3 c = float3(1.10, 0.95, 0.80);
     float3 d = float3(0.05, 0.40, 0.70);
-    return saturate(a + b * cos(6.2831853 * (c * phase + d)));
+    return saturate(a + b * cos(TWO_PI * (c * phase + d)));
 }
 
 float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
@@ -133,34 +136,27 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float2 center_uv = uv - 0.5;
     float2 aspect_uv = float2(center_uv.x * u_aspect, center_uv.y);
     
-    // 画面位置に応じた動的視線ベクトル (カメラからの広角視差)
     float3 v = normalize(float3(aspect_uv * 0.8, 1.0));
-    
     float2 shell_uv = aspect_uv * u_scale;
 
-    // 1. 割貝構造と境界データの取得
     float crack;
     float2 cell_hash;
     float2 cell_center;
     float edge_dist;
     nacre_cells(shell_uv, crack, cell_hash, cell_center, edge_dist);
 
-    // 2. 視差効果（内部屈折レイヤー）
     float2 parallax_uv = aspect_uv + v.xy * (u_depth_str * 0.02);
     float grain = nacre_grain(parallax_uv + cell_hash * 0.2, u_grain_dense);
 
-    // 3. 貝片傾き＋セルエッジベベル法線の合成
-    float cell_angle = cell_hash.x * 6.2831853;
+    float cell_angle = cell_hash.x * TWO_PI;
     float2 tilt = float2(cos(cell_angle), sin(cell_angle)) * (cell_hash.y * 0.2);
     
-    // エッジ部分を盛り上げるベベル法線計算
     float bevel_grad = (1.0 - smoothstep(0.0, 0.15, edge_dist)) * u_bevel_str * 0.02;
     float2 bevel_dir = normalize(cell_center + 0.0001) * bevel_grad;
 
     float bump = (grain - 0.5) * 0.25;
     float3 n_shell = normalize(float3(tilt.x + bump + bevel_dir.x, tilt.y + bump + bevel_dir.y, 1.0));
 
-    // 4. ハーフベクトルと内積の算出
     float3 l = u_light_dir;
     float3 h = normalize(l + v);
 
@@ -168,12 +164,10 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float n_dot_l = saturate(dot(n_shell, l));
     float n_dot_h = saturate(dot(n_shell, h));
 
-    // 5. 多層薄膜干渉（構造色遊色）
     float film_shift = cell_hash.y * 0.6 + grain * 0.4 + u_time * 0.04;
     float irid_phase = (1.0 - n_dot_v) * 0.8 + (1.0 - n_dot_h) * 0.2 + film_shift;
     float3 irid_color = nacre_iridescence(irid_phase) * (u_irid_strength * 0.01);
 
-    // 6. 拡散反射・鏡面反射
     float3 pearl_base = float3(0.92, 0.93, 0.95) * (u_pearl_whiteness * 0.01);
     float3 shell_albedo = lerp(pearl_base, rgb * pearl_base, 0.3);
 
@@ -181,18 +175,15 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float3 shell_diffuse = (shell_albedo + irid_color) * (n_dot_l * 0.6 + 0.4);
     float3 raden_surface = shell_diffuse + irid_color * pearl_spec;
 
-    // 7. 割貝の目地（漆の沈み込み）処理
     float crack_factor = lerp(1.0 - (u_crack_depth * 0.009), 1.0, crack);
     raden_surface *= crack_factor;
 
-    // 8. 表面漆クリアコート層のフレネル・ハイライト
     float fresnel = 0.04 + 0.96 * pow(1.0 - saturate(v.z), 5.0);
     float3 n_clear = float3(0.0, 0.0, 1.0);
     float clear_n_dot_h = saturate(dot(n_clear, h));
     float clear_spec = pow(max(clear_n_dot_h, 0.0), u_spec_power) * (1.5 + fresnel);
     raden_surface += float3(1.0, 1.0, 1.0) * clear_spec;
 
-    // 9. 地塗り黒漆との滑らかな合成
     float3 lacquer_base = float3(0.012, 0.01, 0.012) * rgb;
     float3 final_rgb = lerp(lacquer_base, raden_surface, inlay_mask);
 
@@ -200,17 +191,16 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
 }
 ]]
 
-local max = math.max
-local cos = math.cos
-local sin = math.sin
-local sqrt = math.sqrt
-local deg_to_rad = math.rad
+local math_cos = math.cos
+local math_sin = math.sin
+local math_sqrt = math.sqrt
+local math_rad = math.rad
 
 if obj.w <= 0 or obj.h <= 0 then
     return
 end
 
-local aspect_ratio = obj.w / max(obj.h, 1)
+local aspect_ratio = obj.w / obj.h
 
 local light_dir_x = 0.0
 local light_dir_y = 0.0
@@ -218,18 +208,18 @@ local light_dir_z = 1.0
 
 if light_anim == 1 then
     local anim_rad = obj.time * 1.2
-    light_dir_x = cos(anim_rad)
-    light_dir_y = sin(anim_rad) * 0.6
+    light_dir_x = math_cos(anim_rad)
+    light_dir_y = math_sin(anim_rad) * 0.6
     light_dir_z = 0.8
 else
-    local rx_rad = deg_to_rad(light_rx)
-    local ry_rad = deg_to_rad(light_ry)
-    light_dir_x = sin(rx_rad) * cos(ry_rad)
-    light_dir_y = sin(ry_rad)
-    light_dir_z = cos(rx_rad) * cos(ry_rad)
+    local rx_rad = math_rad(light_rx or 0)
+    local ry_rad = math_rad(light_ry or 0)
+    light_dir_x = math_sin(rx_rad) * math_cos(ry_rad)
+    light_dir_y = math_sin(ry_rad)
+    light_dir_z = math_cos(rx_rad) * math_cos(ry_rad)
 end
 
-local len = sqrt(light_dir_x * light_dir_x + light_dir_y * light_dir_y + light_dir_z * light_dir_z)
+local len = math_sqrt(light_dir_x * light_dir_x + light_dir_y * light_dir_y + light_dir_z * light_dir_z)
 if len > 0 then
     light_dir_x = light_dir_x / len
     light_dir_y = light_dir_y / len
@@ -238,22 +228,22 @@ end
 
 local constants = {
     obj.time,
-    scale,
-    irid_strength,
-    pearl_whiteness,
+    scale or 20,
+    irid_strength or 100,
+    pearl_whiteness or 120,
 
-    grain_dense,
-    spec_power,
-    crack_depth,
-    threshold,
+    grain_dense or 40,
+    spec_power or 128,
+    crack_depth or 25,
+    threshold or 20,
 
     light_dir_x,
     light_dir_y,
     light_dir_z,
     aspect_ratio,
 
-    bevel_str or 0,
-    depth_str or 0,
+    bevel_str or 40,
+    depth_str or 30,
     0.0,
     0.0
 }
