@@ -2,10 +2,22 @@
 --track@split_x:分割数X,1,200,10,1
 --track@split_y:分割数Y,1,200,10,1
 --trackgroup@split_x,split_y:分割数
---track@clip_rate:クリッピング率(%),0,100,10,0.1
+--track@clip_rate:クリッピング率,0,100,10,0.1
 --check@force_square:正方形化,false
 --check@outer_gap:外周の隙間,true
 --select@clip_dir:削る方向=0,格子(上下左右)=0,縦シマ(左右両端)=1,横シマ(上下両端)=2,左側のみ=3,右側のみ=4,上側のみ=5,下側のみ=6
+
+local w, h = obj.w, obj.h
+if w <= 0 or h <= 0 then
+    return
+end
+
+if clip_rate <= 0 then
+    return
+elseif clip_rate >= 100 then
+    obj.clearbuffer("object")
+    return
+end
 
 --[[pixelshader@grid_clip_ps:
 cbuffer params : register(b0) {
@@ -109,24 +121,18 @@ float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 }
 ]]
 
-if clip_rate <= 0 then
-    return
-elseif clip_rate >= 100 then
-    obj.clearbuffer("object")
-    return
-end
-
-local is_sq = (force_square == 1 or force_square == true)
+local is_sq = (force_square == 1 or force_square == true) and 1.0 or 0.0
+local is_outer = (outer_gap == 1 or outer_gap == true) and 1.0 or 0.0
 
 local constants = {
     split_x, 
     split_y, 
     clip_rate, 
-    (outer_gap == 1 or outer_gap == true) and 1.0 or 0.0,
-    obj.w, 
-    obj.h, 
+    is_outer,
+    w, 
+    h, 
     tonumber(clip_dir) or 0,
-    is_sq and 1.0 or 0.0
+    is_sq
 }
 
 obj.pixelshader("grid_clip_ps", "object", {"object"}, constants, "copy", "clamp")
