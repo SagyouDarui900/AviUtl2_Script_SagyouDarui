@@ -1,17 +1,16 @@
 --label:加工
 
 --group:貝片・質感,true
---track@scale:貝片サイズ,1,200,20,1
---track@pearl_whiteness:真珠層白度,0,200,120,1
---track@grain_dense:成長紋密度,1,100,40,1
---track@crack_depth:割貝目地,0,100,25,1
---track@bevel_str:割貝ベベル,0,100,40,1
---track@depth_str:真珠層深度,0,100,30,1
+--track@scale:貝片サイズ,1,200,30,1
+--track@pearl_whiteness:真珠層白度,0,200,90,1
+--track@grain_dense:成長紋密度,1,100,60,1
+--track@crack_depth:割貝目地,0,100,40,1
+--track@depth_str:真珠層深度,0,100,40,1
 --track@threshold:漆地境界,0,100,20,1
 --group:
 
 --group:光沢・干渉,true
---track@irid_strength:虹色干渉,0,200,100,1
+--track@irid_strength:虹色干渉,0,300,160,1
 --track@spec_power:研出光沢,1,256,128,1
 --group:
 
@@ -28,7 +27,6 @@
 Texture2D tex0 : register(t0);
 SamplerState smp0 : register(s0);
 
-static const float PI = 3.14159265359;
 static const float TWO_PI = 6.28318530718;
 
 cbuffer ConstantBuffer : register(b0) {
@@ -45,9 +43,8 @@ cbuffer ConstantBuffer : register(b0) {
     float3 u_light_dir;       // 光源方向ベクトル
     float  u_aspect;          // アスペクト比 (w/h)
 
-    float u_bevel_str;        // ベベル強度
     float u_depth_str;        // 深度強度
-    float2 u_pad;             // パディング
+    float3 u_pad;             // パディング
 };
 
 float2 hash22(float2 p) {
@@ -73,21 +70,29 @@ float noise(float2 p) {
     return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
 }
 
-float nacre_grain(float2 uv, float dense) {
-    float2 p = uv * dense;
-    float2 stretched_p = float2(p.x * 0.3 + p.y * 0.8, p.x * 2.5 - p.y * 0.5);
-    float n1 = noise(stretched_p);
-    float n2 = noise(stretched_p * 2.1 + float2(3.1, 7.4));
-    return n1 * 0.65 + n2 * 0.35;
+// 貝殻繊維状の極めて細い成長紋ノイズ
+float nacre_fibers(float2 uv, float dense, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    float2 rot_uv = float2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+    
+    float2 p = rot_uv * float2(dense * 0.15, dense * 1.8);
+    float n1 = noise(p);
+    float n2 = noise(p * 2.3 + float2(5.2, 1.3));
+    return saturate(n1 * 0.7 + n2 * 0.3);
 }
 
-void nacre_cells(float2 uv, out float crack, out float2 cell_hash, out float2 cell_center, out float edge_dist) {
-    float2 g = floor(uv);
-    float2 f = frac(uv);
+// 有機的に歪んだ割貝ボロノイセル
+void nacre_organic_cells(float2 uv, out float crack, out float2 cell_hash, out float edge_dist) {
+    // 座標のディスプレイスメント（タイルの直線感を排除）
+    float2 warp = float2(noise(uv * 1.5), noise(uv * 1.5 + float2(3.2, 7.8))) * 0.35;
+    float2 st = uv + warp;
+
+    float2 g = floor(st);
+    float2 f = frac(st);
     float d1 = 8.0;
     float d2 = 8.0;
     float2 min_g = 0.0;
-    float2 min_p = 0.0;
 
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
@@ -98,24 +103,21 @@ void nacre_cells(float2 uv, out float crack, out float2 cell_hash, out float2 ce
                 d2 = d1;
                 d1 = d;
                 min_g = g + cell;
-                min_p = p;
             } else if (d < d2) {
                 d2 = d;
             }
         }
     }
     edge_dist = d2 - d1;
-    crack = smoothstep(0.0, 0.04, edge_dist);
+    // シャープで細いクラック目地
+    crack = smoothstep(0.0, 0.03, edge_dist);
     cell_hash = hash22(min_g);
-    cell_center = f - min_p;
 }
 
-float3 nacre_iridescence(float phase) {
-    float3 a = float3(0.72, 0.70, 0.75);
-    float3 b = float3(0.38, 0.42, 0.35);
-    float3 c = float3(1.10, 0.95, 0.80);
-    float3 d = float3(0.05, 0.40, 0.70);
-    return saturate(a + b * cos(TWO_PI * (c * phase + d)));
+// 貝層の多層干渉スペクトル
+float3 nacre_spectrum(float phase) {
+    float3 col = cos(TWO_PI * (float3(1.0, 0.7, 0.4) * phase + float3(0.0, 0.3, 0.65)));
+    return saturate(col * 0.5 + 0.5);
 }
 
 float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
@@ -128,7 +130,7 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float luminance = dot(rgb, float3(0.2126, 0.7152, 0.0722));
 
     float thresh = u_threshold * 0.01;
-    float inlay_mask = smoothstep(thresh, thresh + 0.1, luminance);
+    float inlay_mask = smoothstep(thresh, thresh + 0.05, luminance);
     if (inlay_mask <= 0.0001) {
         return base_color;
     }
@@ -136,26 +138,29 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float2 center_uv = uv - 0.5;
     float2 aspect_uv = float2(center_uv.x * u_aspect, center_uv.y);
     
-    float3 v = normalize(float3(aspect_uv * 0.8, 1.0));
+    float3 v = normalize(float3(aspect_uv * 1.5, 1.0));
     float2 shell_uv = aspect_uv * u_scale;
 
     float crack;
     float2 cell_hash;
-    float2 cell_center;
     float edge_dist;
-    nacre_cells(shell_uv, crack, cell_hash, cell_center, edge_dist);
+    nacre_organic_cells(shell_uv, crack, cell_hash, edge_dist);
 
-    float2 parallax_uv = aspect_uv + v.xy * (u_depth_str * 0.02);
-    float grain = nacre_grain(parallax_uv + cell_hash * 0.2, u_grain_dense);
-
-    float cell_angle = cell_hash.x * TWO_PI;
-    float2 tilt = float2(cos(cell_angle), sin(cell_angle)) * (cell_hash.y * 0.2);
+    // 繊維の方向（セルごとに異なる角度）
+    float fiber_angle = cell_hash.x * TWO_PI;
     
-    float bevel_grad = (1.0 - smoothstep(0.0, 0.15, edge_dist)) * u_bevel_str * 0.02;
-    float2 bevel_dir = normalize(cell_center + 0.0001) * bevel_grad;
+    // 視差による内部真珠層の奥行き
+    float2 parallax_uv = aspect_uv + v.xy * (u_depth_str * 0.025);
+    float fibers = nacre_fibers(parallax_uv * u_scale + cell_hash * 2.0, u_grain_dense, fiber_angle);
 
-    float bump = (grain - 0.5) * 0.25;
-    float3 n_shell = normalize(float3(tilt.x + bump + bevel_dir.x, tilt.y + bump + bevel_dir.y, 1.0));
+    // セルごとのわずかな面傾きと、繊維筋（1Dバンプ）による法線補正
+    float cell_tilt_angle = cell_hash.y * TWO_PI;
+    float2 cell_tilt = float2(cos(cell_tilt_angle), sin(cell_tilt_angle)) * 0.08;
+    
+    float fiber_bump = (fibers - 0.5) * 0.25;
+    float2 fiber_dir = float2(cos(fiber_angle + 1.5708), sin(fiber_angle + 1.5708));
+    
+    float3 n_shell = normalize(float3(cell_tilt + fiber_dir * fiber_bump, 1.0));
 
     float3 l = u_light_dir;
     float3 h = normalize(l + v);
@@ -164,27 +169,36 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float n_dot_l = saturate(dot(n_shell, l));
     float n_dot_h = saturate(dot(n_shell, h));
 
-    float film_shift = cell_hash.y * 0.6 + grain * 0.4 + u_time * 0.04;
-    float irid_phase = (1.0 - n_dot_v) * 0.8 + (1.0 - n_dot_h) * 0.2 + film_shift;
-    float3 irid_color = nacre_iridescence(irid_phase) * (u_irid_strength * 0.01);
+    // 繊維に連動した急激な角度変化（フラッシュ効果）
+    float flash = pow(n_dot_h, 8.0) * (0.2 + 0.8 * fibers);
 
-    float3 pearl_base = float3(0.92, 0.93, 0.95) * (u_pearl_whiteness * 0.01);
-    float3 shell_albedo = lerp(pearl_base, rgb * pearl_base, 0.3);
+    // 構造色（薄膜干渉）
+    float film_shift = cell_hash.y * 3.0 + fibers * 0.6 + u_time * 0.03;
+    float irid_phase = (1.0 - n_dot_v) * 1.8 + (1.0 - n_dot_h) * 1.5 + film_shift;
+    float3 irid_color = nacre_spectrum(irid_phase) * (u_irid_strength * 0.015);
 
-    float pearl_spec = pow(max(n_dot_h, 0.0), 32.0) * (0.7 + 0.5 * cell_hash.x);
-    float3 shell_diffuse = (shell_albedo + irid_color) * (n_dot_l * 0.6 + 0.4);
-    float3 raden_surface = shell_diffuse + irid_color * pearl_spec;
+    // 真珠層ベース色（黄味〜青味を帯びた白い輝き）
+    float3 pearl_base = float3(0.90, 0.92, 0.94) * (u_pearl_whiteness * 0.01) * (0.6 + 0.8 * fibers);
+    float3 shell_albedo = lerp(pearl_base, rgb * pearl_base, 0.2);
 
-    float crack_factor = lerp(1.0 - (u_crack_depth * 0.009), 1.0, crack);
+    // 反射光の計算
+    float3 shell_diffuse = shell_albedo * (n_dot_l * 0.5 + 0.5) + irid_color * (0.3 + 0.7 * flash);
+    float pearl_spec = pow(max(n_dot_h, 0.0), u_spec_power) * (0.2 + 2.5 * flash);
+    
+    float3 raden_surface = shell_diffuse + (irid_color + float3(0.8, 0.9, 1.0)) * pearl_spec;
+
+    // 割貝クラック（研ぎ出し面のため平坦。黒い細い輪郭として表現）
+    float crack_factor = lerp(1.0 - (u_crack_depth * 0.01), 1.0, crack);
     raden_surface *= crack_factor;
 
-    float fresnel = 0.04 + 0.96 * pow(1.0 - saturate(v.z), 5.0);
+    // 表面漆の平坦なクリアコート反射
     float3 n_clear = float3(0.0, 0.0, 1.0);
     float clear_n_dot_h = saturate(dot(n_clear, h));
-    float clear_spec = pow(max(clear_n_dot_h, 0.0), u_spec_power) * (1.5 + fresnel);
+    float clear_spec = pow(max(clear_n_dot_h, 0.0), u_spec_power * 1.5) * 0.6;
     raden_surface += float3(1.0, 1.0, 1.0) * clear_spec;
 
-    float3 lacquer_base = float3(0.012, 0.01, 0.012) * rgb;
+    // 地塗り黒漆との平滑な定着
+    float3 lacquer_base = float3(0.008, 0.006, 0.008) * rgb;
     float3 final_rgb = lerp(lacquer_base, raden_surface, inlay_mask);
 
     return float4(final_rgb * base_color.a, base_color.a);
@@ -226,24 +240,33 @@ if len > 0 then
     light_dir_z = light_dir_z / len
 end
 
+local val_scale = scale or 30
+local val_irid_strength = irid_strength or 160
+local val_pearl_whiteness = pearl_whiteness or 90
+local val_grain_dense = grain_dense or 60
+local val_spec_power = spec_power or 128
+local val_crack_depth = crack_depth or 40
+local val_threshold = threshold or 20
+local val_depth_str = depth_str or 40
+
 local constants = {
     obj.time,
-    scale or 20,
-    irid_strength or 100,
-    pearl_whiteness or 120,
+    val_scale,
+    val_irid_strength,
+    val_pearl_whiteness,
 
-    grain_dense or 40,
-    spec_power or 128,
-    crack_depth or 25,
-    threshold or 20,
+    val_grain_dense,
+    val_spec_power,
+    val_crack_depth,
+    val_threshold,
 
     light_dir_x,
     light_dir_y,
     light_dir_z,
     aspect_ratio,
 
-    bevel_str or 40,
-    depth_str or 30,
+    val_depth_str,
+    0.0,
     0.0,
     0.0
 }
