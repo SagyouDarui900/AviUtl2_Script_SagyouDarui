@@ -11,7 +11,7 @@
 --group:
 
 --group:拡散・減衰
---track@radius:拡散半径,0,500,100,1
+--track@radius:拡散半径,0,2000,100,1
 --track@spread:サンプリング幅,0.1,5.0,1.0,0.01
 --track@aspect:縦横拡散比,-1.0,1.0,0.0,0.01
 --track@falloff:減衰の滑らかさ,0.5,4.0,2.0,0.01
@@ -32,7 +32,7 @@
 --group:出力・合成
 --track@intensity:合成強度,0.0,20.0,1.0,0.01
 --select@tone_map:トーン制御=1,なし=0,フィルムロールオフ=1,ACES=2,Reinhard=3,Uncharted 2=4,AgX=5,S字カーブ=6,ソフトクリップ=7,Lottes Filmic=8
---track@highlight_roll:ハイライト圧縮,0.1,10.0,1.0,0.01
+--track@highlight_roll:トーン調整,0.1,10.0,1.0,0.01
 --select@blend_mode:合成モード=0,加算=0,スクリーン=1
 --hide@highlight_roll:tone_map==0
 --group:
@@ -43,7 +43,7 @@ end
 
 local max_w, max_h = obj.getinfo("image_max")
 if not obj.getinfo("filter") then
-    local pad_amount = radius * spread * 2.0
+    local pad_amount = radius * spread * 3.0
     local pad_x = math.floor(math.max(math.min(pad_amount, (max_w - obj.w) / 2), 0))
     local pad_y = math.floor(math.max(math.min(pad_amount, (max_h - obj.h) / 2), 0))
     if pad_x > 0 or pad_y > 0 then
@@ -69,7 +69,7 @@ SamplerState srcSmp : register(s0);
 
 float3 srgb2linear(float3 c) {
     float3 c_pos = max(c, 0.0);
-    return lerp(c_pos / 12.92, pow((c_pos + 0.055) / 1.055, 2.4), step(0.04045, c_pos));
+    return lerp(c_pos / 12.92, pow(abs((c_pos + 0.055) / 1.055), 2.4), step(0.04045, c_pos));
 }
 
 float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
@@ -78,16 +78,14 @@ float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    float safe_a = max(col.a, 1e-5);
-    float3 straight_rgb = col.rgb / safe_a;
+    float3 straight_rgb = col.rgb / col.a;
     float3 linear_rgb = srgb2linear(straight_rgb);
-    
+
     float luma = (param_opt.x > 0.5) ? max(max(linear_rgb.r, linear_rgb.g), linear_rgb.b) : dot(linear_rgb, float3(0.2126, 0.7152, 0.0722));
 
     float th = param_ext.x;
     float knee = max(th * saturate(param_ext.y), 1e-4);
     float soft = luma - th + knee;
-    
     float soft_sq = (soft * soft) / (4.0 * knee);
     float extracted_luma = max(0.0, (soft < 2.0 * knee) ? soft_sq : (luma - th));
 
@@ -98,14 +96,13 @@ float4 extract_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     float weight = extracted_luma / luma;
     float exp_val = param_ext.z;
     float hl_val = param_ext.w;
-    
-    float boost = 1.0 + max(0.0, luma - 1.0) * (hl_val - 1.0);
-    boost = boost / (1.0 + max(0.0, boost - 10.0) * 0.1); 
 
-    float3 base_color = lerp(linear_rgb, param_col.yzw * luma, param_col.x);
+    float boost = 1.0 + extracted_luma * (hl_val - 1.0);
+
+    float3 base_color = lerp(linear_rgb, param_col.yzw, param_col.x);
     float3 glow_rad = base_color * (weight * exp_val * boost);
 
-    return float4(glow_rad * col.a, col.a * weight);
+    return float4(glow_rad * col.a, col.a);
 }
 ]]
 
@@ -177,7 +174,7 @@ float4 upsample_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
 
     blur.rgb *= param_color.rgb;
 
-    float4 cur = currentTex.Load(int3(pos.xy, 0));
+    float4 cur = currentTex.SampleLevel(srcSmp, uv, 0.0);
     return (cur * param_color.w) + (blur * param_extra.x);
 }
 ]]
@@ -194,90 +191,68 @@ SamplerState srcSmp : register(s0);
 
 float3 srgb2linear(float3 c) {
     float3 c_pos = max(c, 0.0);
-    return lerp(c_pos / 12.92, pow((c_pos + 0.055) / 1.055, 2.4), step(0.04045, c_pos));
+    return lerp(c_pos / 12.92, pow(abs((c_pos + 0.055) / 1.055), 2.4), step(0.04045, c_pos));
 }
 
 float3 linear2srgb(float3 c) {
     float3 c_pos = max(c, 0.0);
-    return lerp(c_pos * 12.92, 1.055 * pow(c_pos, 1.0 / 2.4) - 0.055, step(0.0031308, c_pos));
+    return lerp(c_pos * 12.92, 1.055 * pow(abs(c_pos), 1.0 / 2.4) - 0.055, step(0.0031308, c_pos));
 }
 
-float3 tm_aces_fitted(float3 x) {
-    float a = 2.51; float b = 0.03; float c = 2.43; float d = 0.59; float e = 0.14;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+float hable_func(float x) {
+    float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
 }
 
-float3 tm_hable_partial(float3 x) {
-    float a = 0.15; float b = 0.50; float c = 0.10; float d = 0.20; float e = 0.02; float f = 0.30;
-    return max(0.0, ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f);
-}
+float apply_tonemap_scalar(float x, int mode, float roll) {
+    float r = max(roll, 0.01);
+    float res = x;
 
-float3 tm_uncharted2(float3 x, float white_point) {
-    float3 curr = tm_hable_partial(x * 2.0);
-    float3 white_scale = 1.0 / max(1e-5, tm_hable_partial(float3(white_point, white_point, white_point)));
-    return saturate(curr * white_scale);
-}
-
-float map_luma_tone(float luma, float mode, float roll) {
-    if (mode == 1.0) {
-        return (luma > 1.0) ? (1.0 + (1.0 - exp(-(luma - 1.0) * roll)) / roll) : luma;
-    } else if (mode == 2.0) {
-        float safe_x = min(luma * roll, 60.0);
-        return tm_aces_fitted(float3(safe_x, safe_x, safe_x)).r;
-    } else if (mode == 3.0) {
-        float w_val = max(roll * 2.0, 0.1);
-        float w2 = w_val * w_val;
-        return (luma * (1.0 + luma / w2)) / (1.0 + luma);
-    } else if (mode == 4.0) {
-        return tm_uncharted2(float3(luma, luma, luma), max(1.0, roll * 2.0)).r;
-    } else if (mode == 5.0) {
-        return luma / (1.0 + luma * (0.5 / max(roll, 0.1)));
-    } else if (mode == 6.0) {
-        float p = max(0.5, roll);
-        return pow(max(luma, 0.0), p) / (pow(max(luma, 0.0), p) + 1.0);
-    } else if (mode == 7.0) {
-        float knee = 1.0 / max(0.1, roll);
-        float over = max(luma - knee, 0.0);
-        return min(luma, knee) + over / (1.0 + over);
-    } else if (mode == 8.0) {
-        float a = max(0.1, 1.6 * roll);
-        float l_a = pow(max(luma, 0.0), a);
-        return l_a / (l_a + 0.18);
+    if (mode == 1) {
+        res = 1.0 - exp(-x * r);
+    } else if (mode == 2) {
+        float v = x * r;
+        res = saturate((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14));
+    } else if (mode == 3) {
+        float w = max(r, 0.1);
+        res = (x * (1.0 + x / (w * w))) / (1.0 + x);
+    } else if (mode == 4) {
+        float curr = hable_func(x * 2.0 * r);
+        float white_scale = 1.0 / max(1e-4, hable_func(11.2));
+        res = curr * white_scale;
+    } else if (mode == 5) {
+        float v = x * r;
+        float s = v / (v + 0.18);
+        res = pow(max(s, 0.0), 1.2);
+    } else if (mode == 6) {
+        float k = r * 2.0;
+        res = 1.0 / (1.0 + exp(-k * (x - 0.5)));
+    } else if (mode == 7) {
+        float thresh = 1.0 / max(r, 0.1);
+        if (x < thresh) {
+            res = x;
+        } else {
+            res = thresh + (1.0 - thresh) * (1.0 - exp(-(x - thresh) / max(1.0 - thresh, 1e-4)));
+        }
+    } else if (mode == 8) {
+        float a = 1.6 * r;
+        float d = 0.977;
+        float midIn = 0.18;
+        float midOut = 0.18;
+        float b = (-pow(midIn, a) + pow(midOut, a) * d) / max(1e-4, pow(midOut, a) * (1.0 - d));
+        float c = (pow(midIn, a) * pow(midOut, a) * d) / max(1e-4, pow(midOut, a) * (1.0 - d));
+        res = pow(max(x, 0.0), a) / max(1e-4, pow(max(x, 0.0), a) * b + c);
     }
-    return luma;
+
+    return res;
 }
 
-float3 map_rgb_tone(float3 c, float mode, float roll, float luma) {
-    if (mode == 1.0) {
-        if (c.r > 1.0) c.r = 1.0 + (1.0 - exp(-(c.r - 1.0) * roll)) / roll;
-        if (c.g > 1.0) c.g = 1.0 + (1.0 - exp(-(c.g - 1.0) * roll)) / roll;
-        if (c.b > 1.0) c.b = 1.0 + (1.0 - exp(-(c.b - 1.0) * roll)) / roll;
-        return c;
-    } else if (mode == 2.0) {
-        return tm_aces_fitted(min(c * roll, 60.0));
-    } else if (mode == 3.0) {
-        float w_val = max(roll * 2.0, 0.1);
-        float w2 = w_val * w_val;
-        return (c * (1.0 + c / w2)) / (1.0 + c);
-    } else if (mode == 4.0) {
-        return tm_uncharted2(c, max(1.0, roll * 2.0));
-    } else if (mode == 5.0) {
-        float3 desat_col = lerp(c, float3(luma, luma, luma), saturate((luma - 0.5) * 0.5 * roll));
-        return desat_col / (1.0 + desat_col * (0.5 / max(roll, 0.1)));
-    } else if (mode == 6.0) {
-        float p = max(0.5, roll);
-        float3 c_p = pow(max(c, 0.0), float3(p, p, p));
-        return c_p / (c_p + 1.0);
-    } else if (mode == 7.0) {
-        float knee = 1.0 / max(0.1, roll);
-        float3 over = max(c - knee, 0.0);
-        return min(c, knee) + over / (1.0 + over);
-    } else if (mode == 8.0) {
-        float a = max(0.1, 1.6 * roll);
-        float3 c_a = pow(max(c, 0.0), float3(a, a, a));
-        return c_a / (c_a + 0.18);
-    }
-    return c;
+float3 apply_tonemap_rgb(float3 c, int mode, float roll) {
+    return float3(
+        apply_tonemap_scalar(c.r, mode, roll),
+        apply_tonemap_scalar(c.g, mode, roll),
+        apply_tonemap_scalar(c.b, mode, roll)
+    );
 }
 
 float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
@@ -285,42 +260,37 @@ float4 composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target 
     float4 bloom = bloomTex.SampleLevel(srcSmp, uv, 0.0);
 
     float orig_a = orig.a;
-    float3 orig_lin = srgb2linear(orig.rgb / max(orig_a, 1e-5)) * orig_a;
+    float3 orig_lin = (orig_a > 1e-5) ? srgb2linear(orig.rgb / orig_a) * orig_a : float3(0.0, 0.0, 0.0);
     float3 bloom_lin = max(bloom.rgb * param_comp.x, 0.0);
-
-    float combined_a = orig_a; 
 
     float3 add_lin = orig_lin + bloom_lin;
     float3 scr_lin = add_lin - (saturate(orig_lin) * saturate(bloom_lin));
     float3 combined_lin = lerp(add_lin, scr_lin, param_comp.z);
 
-    float mode = param_comp.y;
+    int mode = (int)(param_comp.y + 0.5);
     float roll = max(0.01, param_extra.x);
-    float luma = dot(combined_lin, float3(0.2126, 0.7152, 0.0722));
     float3 out_lin = combined_lin;
 
-    if (mode > 0.0) {
+    if (mode > 0) {
         if (param_extra.y > 0.5) {
-            float mapped_luma = map_luma_tone(luma, mode, roll);
-            out_lin = combined_lin * (mapped_luma / max(luma, 1e-5));
+            float luma = dot(combined_lin, float3(0.2126, 0.7152, 0.0722));
+            if (luma > 1e-5) {
+                float mapped_luma = apply_tonemap_scalar(luma, mode, roll);
+                out_lin = combined_lin * (mapped_luma / luma);
+            }
         } else {
-            out_lin = map_rgb_tone(combined_lin, mode, roll, luma);
+            out_lin = apply_tonemap_rgb(combined_lin, mode, roll);
         }
     }
 
-    float safe_a = max(combined_a, 1e-5);
-    float3 base_lin = min(out_lin, safe_a);
-    float3 glow_lin = max(0.0, out_lin - safe_a);
+    float combined_a = saturate(orig_a + bloom.a * param_comp.x);
+    float3 srgb_out = linear2srgb(max(out_lin, 0.0));
 
-    float3 straight_base = base_lin / safe_a;
-    float3 srgb_base = linear2srgb(straight_base) * combined_a;
-    float3 srgb_glow = linear2srgb(glow_lin);
-
-    float3 out_rgb = srgb_base + srgb_glow;
     float noise = frac(52.9829189 * frac(dot(pos.xy, float2(0.06711056, 0.00583715))));
-    out_rgb += (noise - 0.5) / 255.0;
+    srgb_out = saturate(srgb_out + (noise - 0.5) / 255.0);
 
-    return float4(max(out_rgb, 0.0) * param_comp.w, combined_a * param_comp.w);
+    float obj_alpha = param_comp.w;
+    return float4(srgb_out * combined_a, combined_a) * obj_alpha;
 }
 ]]
 
@@ -369,7 +339,7 @@ obj.pixelshader(
     "extract_ps",
     down_buf[0],
     "cache:glow_orig",
-    { 
+    {
         threshold, softness, exposure, highlight,
         is_color_override, lr, lg, lb,
         is_luma_type, 0.0, 0.0, 0.0
