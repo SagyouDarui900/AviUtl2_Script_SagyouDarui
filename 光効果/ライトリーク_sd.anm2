@@ -1,5 +1,5 @@
 --label:光効果
---information:ライトリーク (Ultimate)
+--information:ライトリーク
 
 --group:基本設定,true
 --track@intensity:強度,0,500,100,0.1
