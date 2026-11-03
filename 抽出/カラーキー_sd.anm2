@@ -1,0 +1,95 @@
+--label:抽出
+--select@mode:処理モード=0,カラーキー（指定色を透過）=0,カラーキープ（指定色以外を透過）=1,色置換=2
+--color@key_color:対象色,0x00ff00
+--color@rep_color:置換色,0xff0000
+--hide@rep_color:mode~=2
+--select@color_space:色空間=0,RGB=0,HSV=1,YUV=2
+--track@threshold:許容範囲,0,100,20,0.1
+--track@softness:境界ぼかし,0,100,10,0.1
+
+--[[pixelshader@olm_colorkey:
+cbuffer constant0 : register(b0) {
+    float3 key_rgb;
+    float pad1;
+    float3 rep_rgb;
+    float pad2;
+    float threshold;
+    float softness;
+    float mode;
+    float color_space;
+};
+
+Texture2D srcTex : register(t0);
+SamplerState srcSmp : register(s0);
+
+float3 rgb2hsv(float3 c) {
+    float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = lerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+float3 rgb2yuv(float3 c) {
+    float y = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+    float u = -0.14713 * c.r - 0.28886 * c.g + 0.436 * c.b;
+    float v = 0.615 * c.r - 0.51499 * c.g - 0.10001 * c.b;
+    return float3(y, u, v);
+}
+
+float4 olm_colorkey(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 col = srcTex.Sample(srcSmp, uv);
+    if (col.a <= 0.0) return col;
+
+    float3 straight_rgb = col.a > 0.001 ? col.rgb / col.a : col.rgb;
+
+    float dist = 0.0;
+    if (color_space < 0.5) {
+        dist = distance(straight_rgb, key_rgb);
+    } else if (color_space < 1.5) {
+        float3 hsv_cur = rgb2hsv(straight_rgb);
+        float3 hsv_key = rgb2hsv(key_rgb);
+        float dh = min(abs(hsv_cur.x - hsv_key.x), 1.0 - abs(hsv_cur.x - hsv_key.x));
+        float ds = abs(hsv_cur.y - hsv_key.y);
+        float dv = abs(hsv_cur.z - hsv_key.z);
+        dist = sqrt(dh * dh + ds * ds + dv * dv);
+    } else {
+        float3 yuv_cur = rgb2yuv(straight_rgb);
+        float3 yuv_key = rgb2yuv(key_rgb);
+        dist = distance(yuv_cur, yuv_key);
+    }
+
+    float t_low = threshold;
+    float t_high = threshold + max(softness, 0.0001);
+    float factor = smoothstep(t_low, t_high, dist);
+
+    if (mode < 0.5) {
+        col.rgb *= factor;
+        col.a *= factor;
+    } else if (mode < 1.5) {
+        float keep_factor = 1.0 - factor;
+        col.rgb *= keep_factor;
+        col.a *= keep_factor;
+    } else {
+        float3 new_rgb = lerp(rep_rgb, straight_rgb, factor);
+        col.rgb = new_rgb * col.a;
+    }
+
+    return col;
+}
+]]
+
+local key_r, key_g, key_b = RGB(key_color)
+local rep_r, rep_g, rep_b = RGB(rep_color)
+
+local constants = {
+    key_r / 255, key_g / 255, key_b / 255, 0.0,
+    rep_r / 255, rep_g / 255, rep_b / 255, 0.0,
+    threshold / 100,
+    softness / 100,
+    mode,
+    color_space
+}
+
+obj.pixelshader("olm_colorkey", "object", { "object" }, constants)
