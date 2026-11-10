@@ -6,6 +6,7 @@
 --track@thickness:線の太さ,1,50,15,1
 --select@pattern_type:模様の種類=0,円弧=0,直線=1,三角形=2
 --track@seed:シード値,0,10000,1234,1
+--hide@thickness:pattern_type==2
 --group:
 
 --group:配色設定
@@ -35,9 +36,10 @@ cbuffer Params : register(b0) {
     float4 color_fg;
 };
 
-float hash(float2 p) {
-    p = frac(p * 0.3183099 + float2(0.71, 0.113));
-    p += dot(p, p.yx + 19.19);
+// 精度を維持する高分散2Dハッシュ関数
+float hash21(float2 p, float s) {
+    p = frac(p * float2(0.1031, 0.1030) + float2(s * 0.01337, s * 0.0713));
+    p += dot(p, p.yx + 33.33);
     return frac((p.x + p.y) * p.x);
 }
 
@@ -48,7 +50,8 @@ float4 truchet_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float2 i = floor(st);
     float2 f = frac(st);
     
-    float n = hash(i + seed * 13.37);
+    // シード値とタイル座標によるパターンの反転判定
+    float n = hash21(i, seed);
     if (n > 0.5) {
         f.x = 1.0 - f.x;
     }
@@ -64,23 +67,22 @@ float4 truchet_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float fw = max(fwidth(d), 0.0001);
         mask = 1.0 - smoothstep(thickness_norm - fw, thickness_norm + fw, d);
     } else if (pattern_type < 1.5) {
-        // 直線 (Maze)
+        // 直線 (Maze: 1/sqrt(2) ≒ 0.70710678 による対角線距離計算)
         float d1 = abs(f.x + f.y - 0.5) * 0.70710678;
         float d2 = abs(f.x + f.y - 1.5) * 0.70710678;
         d = min(d1, d2);
         float fw = max(fwidth(d), 0.0001);
         mask = 1.0 - smoothstep(thickness_norm - fw, thickness_norm + fw, d);
     } else {
-        // 三角形 (Diagonal Fill)
+        // 三角形 (Diagonal Fill: 対角線による面の塗り分け)
         d = (f.x - f.y) * 0.70710678;
         float fw = max(fwidth(d), 0.0001);
         mask = 1.0 - smoothstep(-fw, fw, d);
     }
     
-    float4 col = lerp(color_bg, color_fg, saturate(mask));
-    col.rgb *= col.a;
-    
-    return col;
+    // Straight RGB空間で合成後に Premultiplied Alpha 化
+    float4 mixed = lerp(color_bg, color_fg, saturate(mask));
+    return float4(mixed.rgb * mixed.a, mixed.a);
 }
 ]]
 
@@ -90,8 +92,11 @@ do
     local cos = math.cos
     local sin = math.sin
 
-    local w = (obj.screen_w and obj.screen_w > 0) and obj.screen_w or 1920
-    local h = (obj.screen_h and obj.screen_h > 0) and obj.screen_h or 1080
+    local w = (obj.screen_w and obj.screen_w > 0) and obj.screen_w or obj.w
+    local h = (obj.screen_h and obj.screen_h > 0) and obj.screen_h or obj.h
+    if w <= 0 then w = 1920 end
+    if h <= 0 then h = 1080 end
+
     local s = max(scale, 1.0)
 
     local r_bg, g_bg, b_bg = RGB(col_bg)
@@ -102,6 +107,7 @@ do
     local scroll_y = 0.0
     if anim == 1 then
         local angle_rad = rad(angle)
+        -- 秒間移動ピクセル量のスケーリング計算
         local move_dist = obj.time * s * (scroll_speed * 0.2)
         scroll_x = -move_dist * cos(angle_rad)
         scroll_y = -move_dist * sin(angle_rad)
