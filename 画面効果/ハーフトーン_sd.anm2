@@ -1,4 +1,5 @@
 --label:画面効果
+--filter
 --track@cell_size:間隔,1,500,16,0.1
 --track@dot_scale:サイズ倍率,0,300,100,0.1
 --track@min_size:最小サイズ,0,100,0,0.1
@@ -38,11 +39,19 @@
 --track@mix_rate:適用度,0,100,100,1
 --group
 
---hide@bg_col:color_mode==0
+--hide@bg_col:color_mode!=1
 --hide@bg_col:transparent_bg==1
+--hide@bg_alpha:color_mode!=1
 --hide@bg_alpha:transparent_bg==1
 --hide@dot_col:color_mode>1
 --hide@dot_alpha:color_mode>2
+
+--hide@grad_angle:tone_mode==0
+--hide@grad_width:tone_mode==0
+--hide@grad_start:tone_mode==0
+--hide@grad_end:tone_mode==0
+--hide@grad_pos_x:tone_mode==0
+--hide@grad_pos_y:tone_mode==0
 
 --[[pixelshader@ps_halftone:
 Texture2D InputTexture : register(t0);
@@ -102,7 +111,8 @@ float sd_hexagon(float2 p, float r) {
     p = abs(p);
     p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
     p -= float2(clamp(p.x, -k.z * r, k.z * r), r);
-    return length(p) * sign(p.y);
+    float s = (p.y >= 0.0) ? 1.0 : -1.0;
+    return length(p) * s;
 }
 
 float sd_star5(float2 p, float r) {
@@ -151,12 +161,12 @@ float get_screen(float2 screen_p, float custom_angle) {
 
 float get_mask(float screen_val, float density) {
     float target_density = saturate(density * dot_scale);
-    if (density > 0.001) {
-        target_density = max(target_density, min_size);
+    if (target_density > 0.0001 && min_size > 0.0001) {
+        target_density = min_size + target_density * (1.0 - min_size);
     }
 
     float val = screen_val - target_density;
-    float fw = max(fwidth(val), 0.001);
+    float fw = clamp(fwidth(val), 0.001, 0.5);
     return 1.0 - smoothstep(-fw, fw, val);
 }
 
@@ -169,18 +179,27 @@ float3 sample_smoothed_rgb(float2 uv) {
     }
 
     float2 resolution = float2(res_w, res_h);
-    float2 off = smoothness / resolution;
-    float4 c1 = InputTexture.SampleLevel(LinearSampler, uv + float2(off.x, 0.0), 0);
-    float4 c2 = InputTexture.SampleLevel(LinearSampler, uv - float2(off.x, 0.0), 0);
-    float4 c3 = InputTexture.SampleLevel(LinearSampler, uv + float2(0.0, off.y), 0);
-    float4 c4 = InputTexture.SampleLevel(LinearSampler, uv - float2(0.0, off.y), 0);
+    float2 off = (smoothness * 0.75) / resolution;
+
+    float4 c1 = InputTexture.SampleLevel(LinearSampler, uv + float2( off.x,   0.0), 0);
+    float4 c2 = InputTexture.SampleLevel(LinearSampler, uv - float2( off.x,   0.0), 0);
+    float4 c3 = InputTexture.SampleLevel(LinearSampler, uv + float2(  0.0,  off.y), 0);
+    float4 c4 = InputTexture.SampleLevel(LinearSampler, uv - float2(  0.0, -off.y), 0);
+    float4 c5 = InputTexture.SampleLevel(LinearSampler, uv + float2( off.x,  off.y), 0);
+    float4 c6 = InputTexture.SampleLevel(LinearSampler, uv + float2(-off.x,  off.y), 0);
+    float4 c7 = InputTexture.SampleLevel(LinearSampler, uv + float2( off.x, -off.y), 0);
+    float4 c8 = InputTexture.SampleLevel(LinearSampler, uv + float2(-off.x, -off.y), 0);
 
     float3 col1 = (c1.a > 0.0001) ? (c1.rgb / c1.a) : c1.rgb;
     float3 col2 = (c2.a > 0.0001) ? (c2.rgb / c2.a) : c2.rgb;
     float3 col3 = (c3.a > 0.0001) ? (c3.rgb / c3.a) : c3.rgb;
     float3 col4 = (c4.a > 0.0001) ? (c4.rgb / c4.a) : c4.rgb;
+    float3 col5 = (c5.a > 0.0001) ? (c5.rgb / c5.a) : c5.rgb;
+    float3 col6 = (c6.a > 0.0001) ? (c6.rgb / c6.a) : c6.rgb;
+    float3 col7 = (c7.a > 0.0001) ? (c7.rgb / c7.a) : c7.rgb;
+    float3 col8 = (c8.a > 0.0001) ? (c8.rgb / c8.a) : c8.rgb;
 
-    return (col0 + col1 + col2 + col3 + col4) * 0.2;
+    return col0 * 0.25 + (col1 + col2 + col3 + col4) * 0.125 + (col5 + col6 + col7 + col8) * 0.0625;
 }
 
 float calc_spatial_gradient(float2 uv) {
@@ -226,7 +245,7 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
         float mask = get_mask(screen_val, density);
 
         float3 fg_color = (color_mode > 1.5) ? s_rgb : col_dot;
-        float3 bg_color_val = (color_mode < 0.5) ? float3(1.0, 1.0, 1.0) : col_bg;
+        float3 bg_color_val = (color_mode > 0.5 && color_mode < 1.5) ? col_bg : float3(1.0, 1.0, 1.0);
 
         float effective_dot_a = dot_alpha * mask;
         float effective_bg_a = (transparent_bg > 0.5) ? 0.0 : bg_alpha * (1.0 - mask);
@@ -261,7 +280,7 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
 
         if (tone_mode > 0.5 && tone_mode < 1.5) {
             float grad = calc_spatial_gradient(uv);
-            c_density = grad; m_density = grad; y_density = grad; k_density = grad;
+            c_density *= grad; m_density *= grad; y_density *= grad; k_density *= grad;
         } else if (tone_mode > 1.5) {
             float grad = calc_spatial_gradient(uv);
             c_density *= grad; m_density *= grad; y_density *= grad; k_density *= grad;
@@ -276,18 +295,19 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
         float3 ink_m = float3(1.0, 0.0, 1.0);
         float3 ink_y = float3(1.0, 1.0, 0.0);
 
-        float3 print_rgb = col_bg;
-        print_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_c, mask_c);
-        print_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_m, mask_m);
-        print_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_y, mask_y);
-        print_rgb *= (1.0 - mask_k);
+        float3 ink_rgb = lerp(float3(1.0, 1.0, 1.0), ink_c, mask_c);
+        ink_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_m, mask_m);
+        ink_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_y, mask_y);
+        ink_rgb *= (1.0 - mask_k);
+
+        float3 bg_color_val = float3(1.0, 1.0, 1.0);
 
         float total_mask = saturate(mask_c + mask_m + mask_y + mask_k);
         float effective_dot_a = dot_alpha * total_mask;
         float effective_bg_a = (transparent_bg > 0.5) ? 0.0 : bg_alpha * (1.0 - total_mask);
 
         out_alpha = saturate(effective_dot_a + effective_bg_a);
-        out_rgb = print_rgb * out_alpha; 
+        out_rgb = (ink_rgb * effective_dot_a) + (bg_color_val * effective_bg_a);
     }
 
     if (keep_alpha > 0.5) {
@@ -304,49 +324,49 @@ if obj.w <= 0 or obj.h <= 0 then
     return
 end
 
-local dot_r, dot_g, dot_b = RGB(dot_col or 0x000000)
-local bg_r, bg_g, bg_b = RGB(bg_col or 0xffffff)
-local safe_cell_size = math.max(cell_size or 16, 1.0)
+local dot_r, dot_g, dot_b = RGB(dot_col)
+local bg_r, bg_g, bg_b = RGB(bg_col)
+local safe_cell_size = math.max(cell_size, 1.0)
 
 local constants = {
     -- Param 0
     safe_cell_size,
-    (dot_scale or 100) * 0.01,
-    (min_size or 0) * 0.01,
-    angle or 0,
+    dot_scale * 0.01,
+    min_size * 0.01,
+    angle,
 
     -- Param 1
-    dot_angle or 0,
-    gamma_val or 1.0,
+    dot_angle,
+    gamma_val,
     (invert == 1 or invert == true) and 1.0 or 0.0,
-    shape_type or 0,
+    shape_type,
 
     -- Param 2
     (stagger == 1 or stagger == true) and 1.0 or 0.0,
-    color_mode or 0,
-    tone_mode or 0,
+    color_mode,
+    tone_mode,
     (transparent_bg == 1 or transparent_bg == true) and 1.0 or 0.0,
 
     -- Param 3
     (keep_alpha == 1 or keep_alpha == true) and 1.0 or 0.0,
-    smoothness or 0,
-    (mix_rate or 100) * 0.01,
-    grad_angle or 0,
+    smoothness,
+    mix_rate * 0.01,
+    grad_angle,
 
     -- Param 4
-    grad_width or 500,
-    (grad_start or 100) * 0.01,
-    (grad_end or 0) * 0.01,
-    (dot_alpha or 100) * 0.01,
+    grad_width,
+    grad_start * 0.01,
+    grad_end * 0.01,
+    dot_alpha * 0.01,
 
     -- Param 5
-    (bg_alpha or 100) * 0.01,
-    offset_x or 0,
-    offset_y or 0,
-    grad_pos_x or 0,
+    bg_alpha * 0.01,
+    offset_x,
+    offset_y,
+    grad_pos_x,
 
     -- Param 6
-    grad_pos_y or 0,
+    grad_pos_y,
     obj.w,
     obj.h,
     0.0,
