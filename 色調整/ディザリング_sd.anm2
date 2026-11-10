@@ -38,7 +38,7 @@
         float4 p_rcp;    // x:rcp_x, y:rcp_y, z:rcp_z, w:rcp_a
         float4 p_col1;   // rgb: 色1, a: 1.0
         float4 p_col2;   // rgb: 色2, a: 1.0
-        float4 p_env;    // x:time, y:width, z:height, w:rcp_pixel_size
+        float4 p_env;    // x:frame, y:width, z:height, w:rcp_pixel_size
         float4 p_scroll; // x:scroll_x, y:scroll_y, z:0, w:0
     };
 
@@ -62,7 +62,7 @@
 
     float3 srgb2linear(float3 c) {
         c = saturate(c);
-        return lerp(c / 12.92, pow(max(c + 0.055, 0.0), 2.4) / pow(1.055, 2.4), step(0.04045, c));
+        return lerp(c / 12.92, pow(max((c + 0.055) / 1.055, 0.0), 2.4), step(0.04045, c));
     }
 
     float3 linear2srgb(float3 c) {
@@ -70,8 +70,8 @@
         return lerp(c * 12.92, 1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055, step(0.0031308, c));
     }
 
-    float get_hash_random(int2 pos, float time) {
-        float2 p = float2(pos) + float2(time * 17.1, time * 31.7);
+    float get_hash_random(int2 pos, float frame) {
+        float2 p = float2(pos) + float2(frame * 17.1, frame * 31.7);
         float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
         p3 += dot(p3, p3.yzx + 33.33);
         return frac((p3.x + p3.y) * p3.z) - 0.5;
@@ -82,13 +82,11 @@
         uint mask = (uint)(size - 1);
         uint2 u_pos = (uint2)pos & mask;
         uint d = 0;
-        for (int i = 0; i < 4; i++) {
-            if (i < mode) {
-                uint bx = (u_pos.x >> (uint)i) & 1u;
-                uint by = (u_pos.y >> (uint)i) & 1u;
-                uint b = ((bx ^ by) << 1) | by;
-                d |= b << ((uint)(mode - 1 - i) * 2u);
-            }
+        for (int i = 0; i < mode; i++) {
+            uint bx = (u_pos.x >> (uint)i) & 1u;
+            uint by = (u_pos.y >> (uint)i) & 1u;
+            uint b = ((bx ^ by) << 1) | by;
+            d |= b << ((uint)(mode - 1 - i) * 2u);
         }
         float max_val = (float)(size * size);
         return ((float)d + 0.5) / max_val - 0.5;
@@ -113,7 +111,6 @@
             sample_uv = (quant_px + scroll_offset) / base_res + 0.5;
         }
 
-        sample_uv = saturate(sample_uv);
         float4 pixel_color = tex.SampleLevel(samp, sample_uv, 0);
         float4 orig_color = (dot_size > 1.0 && p_basic.z < 1.0) ? tex.SampleLevel(samp, uv, 0) : pixel_color;
 
@@ -166,9 +163,8 @@
             res_rgb = saturate(round(rgb * steps + offset) * rcp_steps);
         } else if (c_mode == 1) {
             float3 hsv = rgb2hsv(rgb);
-            float hue_steps = steps.x + 1.0;
-            hsv.x = frac(round(hsv.x * hue_steps) / hue_steps);
-            hsv.y = saturate(round(hsv.y * steps.y) * rcp_steps.y);
+            hsv.x = frac(round(hsv.x * steps.x + offset) * rcp_steps.x);
+            hsv.y = saturate(round(hsv.y * steps.y + offset) * rcp_steps.y);
             hsv.z = saturate(round(hsv.z * steps.z + offset) * rcp_steps.z);
             res_rgb = hsv2rgb(hsv);
         } else if (c_mode == 2) {
@@ -189,8 +185,11 @@
             alpha = saturate(round(alpha * p_steps.w + offset) * p_rcp.w);
         }
 
-        float4 result = float4(res_rgb * alpha, alpha);
-        return lerp(orig_color, result, p_basic.z);
+        float3 orig_straight = orig_color.rgb / max(orig_color.a, 1.0e-5);
+        float3 final_rgb = lerp(orig_straight, res_rgb, p_basic.z);
+        float final_a = lerp(orig_color.a, alpha, p_basic.z);
+
+        return float4(final_rgb * final_a, final_a);
     }
 ]]
 
@@ -223,22 +222,17 @@ if use_sep_levels == 1 then
     s_y = max(1, floor(lv_2 or 8) - 1)
     s_z = max(1, floor(lv_3 or 8) - 1)
 else
-    local b_step = max(1, floor(safe_levels) - 1)
+    local b_step = max(1, safe_levels - 1)
     s_x, s_y, s_z = b_step, b_step, b_step
 end
 
-local s_a = max(1, floor(safe_levels) - 1)
+local s_a = max(1, safe_levels - 1)
 
 local c1 = col1 or 0x000000
 local c2 = col2 or 0xffffff
 
-local r1 = floor(c1 / 65536) % 256
-local g1 = floor(c1 / 256) % 256
-local b1 = c1 % 256
-
-local r2 = floor(c2 / 65536) % 256
-local g2 = floor(c2 / 256) % 256
-local b2 = c2 % 256
+local r1, g1, b1 = RGB(c1)
+local r2, g2, b2 = RGB(c2)
 
 local constants = {
     safe_pixel_size, safe_strength, safe_intensity, safe_threshold,
@@ -247,7 +241,7 @@ local constants = {
     1.0 / s_x, 1.0 / s_y, 1.0 / s_z, 1.0 / s_a,
     r1 / 255.0, g1 / 255.0, b1 / 255.0, 1.0,
     r2 / 255.0, g2 / 255.0, b2 / 255.0, 1.0,
-    obj.time or 0, width, height, 1.0 / safe_pixel_size,
+    obj.frame or 0, width, height, 1.0 / safe_pixel_size,
     safe_scroll_x, safe_scroll_y, 0.0, 0.0
 }
 
