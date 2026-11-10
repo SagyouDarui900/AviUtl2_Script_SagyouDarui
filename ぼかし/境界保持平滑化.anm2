@@ -1,5 +1,5 @@
 --label:ぼかし
---information:境界保持平滑化
+--information:境界保持平滑化 (Bilateral Filter)
 --filter
 
 --track@radius:範囲,0,100,10,1
@@ -20,7 +20,6 @@
         float3 padding;            // yzw: パディング
     };
 
-    // Rec.709標準輝度および簡易色差の抽出
     float3 rgb_to_yuv(float3 rgb) {
         float y = dot(rgb, float3(0.2126, 0.7152, 0.0722));
         float u = (rgb.b - y) * 0.564;
@@ -29,14 +28,13 @@
     }
 
     float4 bilateral_pass1(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-        float4 center_col = tex1.Sample(samp1, uv);
+        float4 center_col = tex1.SampleLevel(samp1, uv, 0);
         
         if (center_col.a <= 0.0001) {
             return center_col;
         }
 
-        // Premultiplied RGBA からの安全なカラー抽出
-        float3 center_rgb = center_col.rgb / max(center_col.a, 0.0001);
+        float3 center_rgb = center_col.rgb / center_col.a;
         float3 center_yuv = rgb_to_yuv(center_rgb);
 
         float4 sum = float4(0.0, 0.0, 0.0, 0.0);
@@ -46,17 +44,20 @@
         [loop]
         for (int i = -i_rad; i <= i_rad; i++) {
             float2 offset = step_uv * float(i);
-            float4 col = tex1.Sample(samp1, uv + offset);
+            float4 col = tex1.SampleLevel(samp1, uv + offset, 0);
             
-            float safe_a = max(col.a, 0.0001);
-            float3 sample_rgb = col.rgb / safe_a;
+            // 完全透明ピクセルはサンプリング対象外
+            if (col.a <= 0.0001) continue;
+
+            float3 sample_rgb = col.rgb / col.a;
             float3 sample_yuv = rgb_to_yuv(sample_rgb);
 
-            // 輝度差と色差に重み付けした視覚的カラー距離
             float3 diff_yuv = sample_yuv - center_yuv;
-            float dist_color2 = diff_yuv.x * diff_yuv.x * 2.0 + dot(diff_yuv.yz, diff_yuv.yz) + pow(col.a - center_col.a, 2.0);
+            float diff_a = col.a - center_col.a;
+            float dist_color2 = diff_yuv.x * diff_yuv.x * 2.0 + dot(diff_yuv.yz, diff_yuv.yz) + diff_a * diff_a;
 
-            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2);
+            // アルファ加重平均によるエッジの染み出し防止
+            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2) * col.a;
 
             sum += col * w;
             sum_weight += w;
@@ -89,13 +90,13 @@
     }
 
     float4 bilateral_pass2(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-        float4 orig_col = tex_orig.Sample(samp2, uv);
+        float4 orig_col = tex_orig.SampleLevel(samp2, uv, 0);
 
         if (orig_col.a <= 0.0001) {
             return orig_col;
         }
 
-        float3 orig_rgb = orig_col.rgb / max(orig_col.a, 0.0001);
+        float3 orig_rgb = orig_col.rgb / orig_col.a;
         float3 orig_yuv = rgb_to_yuv(orig_rgb);
 
         float4 sum = float4(0.0, 0.0, 0.0, 0.0);
@@ -105,17 +106,19 @@
         [loop]
         for (int i = -i_rad; i <= i_rad; i++) {
             float2 offset = step_uv * float(i);
-            float4 col = tex_temp.Sample(samp2, uv + offset);
-            float4 col_orig_sample = tex_orig.Sample(samp2, uv + offset);
+            float4 col = tex_temp.SampleLevel(samp2, uv + offset, 0);
+            float4 col_orig_sample = tex_orig.SampleLevel(samp2, uv + offset, 0);
 
-            float safe_a = max(col_orig_sample.a, 0.0001);
-            float3 sample_rgb = col_orig_sample.rgb / safe_a;
+            if (col_orig_sample.a <= 0.0001) continue;
+
+            float3 sample_rgb = col_orig_sample.rgb / col_orig_sample.a;
             float3 sample_yuv = rgb_to_yuv(sample_rgb);
 
             float3 diff_yuv = sample_yuv - orig_yuv;
-            float dist_color2 = diff_yuv.x * diff_yuv.x * 2.0 + dot(diff_yuv.yz, diff_yuv.yz) + pow(col_orig_sample.a - orig_col.a, 2.0);
+            float diff_a = col_orig_sample.a - orig_col.a;
+            float dist_color2 = diff_yuv.x * diff_yuv.x * 2.0 + dot(diff_yuv.yz, diff_yuv.yz) + diff_a * diff_a;
 
-            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2);
+            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2) * col_orig_sample.a;
 
             sum += col * w;
             sum_weight += w;
@@ -127,7 +130,9 @@
         if (detail_boost > 0.0) {
             float4 detail_comp = orig_col - blurred_col;
             blurred_col += detail_comp * detail_boost;
-            blurred_col = saturate(blurred_col);
+            // Premultiplied Alphaの制約 (0 <= RGB <= A <= 1) を崩さないようクランプ
+            blurred_col.a = saturate(blurred_col.a);
+            blurred_col.rgb = clamp(blurred_col.rgb, 0.0, blurred_col.a);
         }
 
         return lerp(orig_col, blurred_col, rate);
@@ -135,17 +140,16 @@
 ]]
 
 local r = radius
-local th_norm = (threshold * 0.01)
-local th = th_norm * th_norm * 2.0
+local th_norm = math.max(threshold * 0.01, 0.001)
 local rate_val = rate * 0.01
 local detail_val = detail * 0.02
 
-if r <= 0 or th <= 0 or rate_val <= 0 or obj.w <= 0 or obj.h <= 0 then
+if r <= 0 or rate_val <= 0 or obj.w <= 0 or obj.h <= 0 then
     return
 end
 
 local sigma_s = math.max(r * 0.5, 0.001)
-local sigma_r = math.max(th, 0.001)
+local sigma_r = math.max(th_norm * 0.5, 0.001)
 
 local inv_two_sigma_s2 = -1.0 / (2.0 * sigma_s * sigma_s)
 local inv_two_sigma_r2 = -1.0 / (2.0 * sigma_r * sigma_r)
