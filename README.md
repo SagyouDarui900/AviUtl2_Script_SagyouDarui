@@ -1,2 +1,3 @@
 # AviUtl2_Script_SagyouDarui
 自分用にAIで作成したAviUtl2スクリプトのまとめです
+破壊的変更が多めなので安定するまでカタログ追加はしないです
