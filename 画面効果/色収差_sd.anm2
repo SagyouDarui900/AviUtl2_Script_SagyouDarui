@@ -28,12 +28,6 @@
 --track@mix_rate:元画像ブレンド(%),0.0,100.0,0.0,0.1
 --group:
 
-obj.setanchor("center_x,center_y", 1, "line")
-
-if obj.w <= 0 or obj.h <= 0 then
-    return
-end
-
 --[[pixelshader@omni_chromatic_aberration:
 cbuffer Params : register(b0) {
     float4 param_geom;   // x: amount, y: cos_a, z: sin_a, w: quality
@@ -77,6 +71,7 @@ float safeSinh(float value)
     return 0.5 * (exp(value) - exp(-value));
 }
 
+// sign(0) = 0 により value = 0 で正しく 0 を返す
 float safeTanh(float value)
 {
     float e = exp(-2.0 * min(abs(value), 20.0));
@@ -163,6 +158,8 @@ float3 cslInverse(float3 value)
 }
 
 // HCS-1 — Hyperbolic Cross
+// Forward行列 M = { {1.15, -0.65, 0.20}, {-0.20, 1.30, -0.70}, {0.75, 0.15, -0.55} }
+// det(M) = -0.48975
 float3 hcsForward(float3 color)
 {
     float3 q = color - 0.5;
@@ -176,6 +173,7 @@ float3 hcsForward(float3 color)
         safeAsinh(2.6 * y.z) / 2.6);
 }
 
+// Inverse係数は M^-1 = (1/det) * adj(M) の厳密解
 float3 hcsInverse(float3 value)
 {
     float3 y = float3(
@@ -208,7 +206,7 @@ float3 phsInverse(float3 value)
     return opponentToRgb(w + 0.5, a, b);
 }
 
-// CSM-1 — Chirikov Standard Map
+// CSM-1 — Chirikov Standard Map (sinは周期1のためwrap01済み入力でも完全可逆)
 float3 csmForward(float3 color)
 {
     float x = wrap01(color.r);
@@ -296,7 +294,7 @@ float3 anoInverse(float3 value)
         y.y - y.z));
 }
 
-// CAT-2 — Optical Catastrophe
+// CAT-2 — Optical Catastrophe (z->y->xの順で計算する逐次逆変換により厳密に一致)
 float3 catForward(float3 color)
 {
     float3 q = color - 0.5;
@@ -350,6 +348,7 @@ float3 brdInverse(float3 value)
 }
 
 // TOR-2 — Integer Torus
+// 行列 M = { {1,1,1}, {1,2,1}, {1,1,2} }, det(M) = 1 (ユニモジュラ行列のためトーラス空間で完全可逆)
 float3 torForward(float3 color)
 {
     float3 x = wrap01(color);
@@ -392,6 +391,8 @@ float3 stdInverse(float3 value)
 }
 
 // QRO-2 — Quaternion Ribbon
+// 回転軸 axis=(1,1,1)/sqrt(3) まわりの回転のため、length(q) および dot(axis, q) は回転不変量。
+// したがって qroAngle(value) == qroAngle(q) が成立し、-qroAngle(value) で正確に復元される。
 float3 qroRotate(float3 q, float angle)
 {
     const float inv_sqrt3 = 0.5773502691896258;
@@ -477,44 +478,54 @@ float3 cmyInverse(float3 value)
 
 float3 colorForward(float3 color, int color_space)
 {
-    if (color_space == 1) return rssForward(color);
-    if (color_space == 2) return fssForward(color);
-    if (color_space == 3) return cslForward(color);
-    if (color_space == 4) return hcsForward(color);
-    if (color_space == 5) return phsForward(color);
-    if (color_space == 6) return csmForward(color);
-    if (color_space == 7) return ksmForward(color);
-    if (color_space == 8) return cfeForward(color);
-    if (color_space == 9) return anoForward(color);
-    if (color_space == 10) return catForward(color);
-    if (color_space == 11) return brdForward(color);
-    if (color_space == 12) return torForward(color);
-    if (color_space == 13) return stdForward(color);
-    if (color_space == 14) return qroForward(color);
-    if (color_space == 15) return hbpForward(color);
-    if (color_space == 16) return cmyForward(color);
-    return color;
+    float3 res = color;
+    [branch]
+    switch (color_space) {
+        case 1:  res = rssForward(color); break;
+        case 2:  res = fssForward(color); break;
+        case 3:  res = cslForward(color); break;
+        case 4:  res = hcsForward(color); break;
+        case 5:  res = phsForward(color); break;
+        case 6:  res = csmForward(color); break;
+        case 7:  res = ksmForward(color); break;
+        case 8:  res = cfeForward(color); break;
+        case 9:  res = anoForward(color); break;
+        case 10: res = catForward(color); break;
+        case 11: res = brdForward(color); break;
+        case 12: res = torForward(color); break;
+        case 13: res = stdForward(color); break;
+        case 14: res = qroForward(color); break;
+        case 15: res = hbpForward(color); break;
+        case 16: res = cmyForward(color); break;
+        default: res = color; break;
+    }
+    return res;
 }
 
 float3 colorInverse(float3 value, int color_space)
 {
-    if (color_space == 1) return rssInverse(value);
-    if (color_space == 2) return fssInverse(value);
-    if (color_space == 3) return cslInverse(value);
-    if (color_space == 4) return hcsInverse(value);
-    if (color_space == 5) return phsInverse(value);
-    if (color_space == 6) return csmInverse(value);
-    if (color_space == 7) return ksmInverse(value);
-    if (color_space == 8) return cfeInverse(value);
-    if (color_space == 9) return anoInverse(value);
-    if (color_space == 10) return catInverse(value);
-    if (color_space == 11) return brdInverse(value);
-    if (color_space == 12) return torInverse(value);
-    if (color_space == 13) return stdInverse(value);
-    if (color_space == 14) return qroInverse(value);
-    if (color_space == 15) return hbpInverse(value);
-    if (color_space == 16) return cmyInverse(value);
-    return value;
+    float3 res = value;
+    [branch]
+    switch (color_space) {
+        case 1:  res = rssInverse(value); break;
+        case 2:  res = fssInverse(value); break;
+        case 3:  res = cslInverse(value); break;
+        case 4:  res = hcsInverse(value); break;
+        case 5:  res = phsInverse(value); break;
+        case 6:  res = csmInverse(value); break;
+        case 7:  res = ksmInverse(value); break;
+        case 8:  res = cfeInverse(value); break;
+        case 9:  res = anoInverse(value); break;
+        case 10: res = catInverse(value); break;
+        case 11: res = brdInverse(value); break;
+        case 12: res = torInverse(value); break;
+        case 13: res = stdInverse(value); break;
+        case 14: res = qroInverse(value); break;
+        case 15: res = hbpInverse(value); break;
+        case 16: res = cmyInverse(value); break;
+        default: res = value; break;
+    }
+    return res;
 }
 
 float3 get_color_weight(int order, float t, float hide) {
@@ -607,6 +618,7 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
         float2 sample_uv = uv;
         float signed_amount = amount_val * s * falloff;
 
+        [branch]
         if (mode_val < 0.5) {
             sample_uv = uv + (dir * signed_amount) * inv_res;
         } else if (mode_val < 1.5) {
@@ -671,12 +683,19 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
 
     final_color.rgb = saturate(restored_color) * final_color.a;
     
+    // mix_factor: 元画像ブレンド率 (0%: 色収差成分のみ, 100%: 原音/原画像100%)
     float mix_factor = param_mode.w * 0.01;
     float4 result = lerp(final_color, orig, mix_factor);
 
     return result * param_center.z;
 }
 ]]
+
+obj.setanchor("center_x,center_y", 1, "line")
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
 
 do
     local abs = math.abs
@@ -739,6 +758,7 @@ do
         ex_x = pad
         ex_y = pad
     else
+        -- 回転ズレおよび複合変調に対する拡張量の安全マージン算出
         local hw = orig_w * 0.5
         local hh = orig_h * 0.5
         local cx_rel = safe_center_x
