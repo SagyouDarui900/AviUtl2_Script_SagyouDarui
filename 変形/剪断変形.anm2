@@ -1,0 +1,118 @@
+--label:変形
+--information:剪断変形
+
+--group:変形パラメータ
+--track@shear_x:横傾斜(度),-89.0,89.0,10.0,0.1
+--track@shear_y:縦傾斜(度),-89.0,89.0,0.0,0.1
+--trackgroup@shear_x,shear_y:傾斜
+--track@local_rot:文字の回転(度),-360.0,360.0,0.0,0.1
+--track@space_x:横の間隔補正(px),-100.0,100.0,0.0,0.1
+--track@space_y:縦の間隔補正(px),-100.0,100.0,0.0,0.1
+--trackgroup@space_x,space_y:間隔補正
+--track@space_align:補正基準(%),0.0,100.0,50.0,0.1
+--group:
+
+--[[pixelshader@shear_simple_ps:
+cbuffer params : register(b0) {
+    float4 uv_mat;     // 逆行列 (u_x, u_y, v_x, v_y)
+    float2 uv_offset;  // 中心サンプリングオフセット (u, v)
+    float2 padding;    // 16バイト境界アライメントパディング
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 shear_simple_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 centered_uv = uv - 0.5;
+    float2 src_uv = float2(
+        dot(uv_mat.xy, centered_uv) + uv_offset.x,
+        dot(uv_mat.zw, centered_uv) + uv_offset.y
+    );
+    return tex.Sample(samp, src_uv);
+}
+]]
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+-- 変形・補正パラメータがすべて0の場合は処理をスキップ
+if shear_x == 0 and shear_y == 0 and local_rot == 0 and space_x == 0 and space_y == 0 then
+    return
+end
+
+local sx = math.rad(shear_x)
+local sy = math.rad(shear_y)
+local rot = math.rad(local_rot)
+
+local tan_sx = math.tan(sx)
+local tan_sy = math.tan(sy)
+local cos_r = math.cos(rot)
+local sin_r = math.sin(rot)
+
+-- 順変換行列 M = R * Sh (シェアリング適用後にローカル回転を合成)
+-- Sh = | 1       tan_sx |
+--      | tan_sy  1      |
+-- R  = | cos_r  -sin_r  |
+--      | sin_r   cos_r  |
+local m11 = cos_r - sin_r * tan_sy
+local m12 = cos_r * tan_sx - sin_r
+local m21 = sin_r + cos_r * tan_sy
+local m22 = sin_r * tan_sx + cos_r
+
+-- 行列式 det(M)
+local det = m11 * m22 - m12 * m21
+
+-- 特異行列ガード: 行列式が極小（不可逆・面が潰れる状態）の場合は描画をスキップ
+if math.abs(det) < 0.0001 then
+    return
+end
+
+-- 逆行列 M^-1
+local inv_m11 = m22 / det
+local inv_m12 = -m12 / det
+local inv_m21 = -m21 / det
+local inv_m22 = m11 / det
+
+local hw = obj.w * 0.5
+local hh = obj.h * 0.5
+
+-- 補正基準 (0%: 左/上基準 -space/2, 50%: 中央基準 0, 100%: 右/下基準 +space/2)
+local offset_x = space_x * (space_align * 0.01 - 0.5)
+local offset_y = space_y * (space_align * 0.01 - 0.5)
+
+-- 変換後バウンディングボックスの半幅・半高（順変換の極大値 + スクリーンオフセット）
+local max_abs_x = math.abs(m11) * hw + math.abs(m12) * hh + math.abs(offset_x)
+local max_abs_y = math.abs(m21) * hw + math.abs(m22) * hh + math.abs(offset_y)
+
+local scale_x = max_abs_x / hw
+local scale_y = max_abs_y / hh
+-- バッファ拡大率の上限を設定し、極端な角度でのメモリ・描画リソース爆発を防止
+local scale = math.min(math.max(1.0, scale_x, scale_y), 50.0)
+
+obj.zoom = obj.zoom * scale
+
+-- UVサンプリング逆変換行列の構築
+-- ピクセル座標系: (x_s, y_s)^T = M^-1 * (x_d, y_d)^T
+-- 正規化UV変換: u_s - 0.5 = inv_m11 * (u_d - 0.5) + inv_m12 * (h/w) * (v_d - 0.5)
+--              v_s - 0.5 = inv_m21 * (w/h) * (u_d - 0.5) + inv_m22 * (v_d - 0.5)
+local mat_u_x = inv_m11 * scale
+local mat_u_y = inv_m12 * scale * (obj.h / obj.w)
+local mat_v_x = inv_m21 * scale * (obj.w / obj.h)
+local mat_v_y = inv_m22 * scale
+
+-- スクリーン空間でのオフセット量 (offset_x, offset_y) をサンプリング中心へ反映
+local off_u = 0.5 - (inv_m11 * offset_x + inv_m12 * offset_y) / obj.w
+local off_v = 0.5 - (inv_m21 * offset_x + inv_m22 * offset_y) / obj.h
+
+obj.pixelshader(
+    "shear_simple_ps",
+    "object",
+    { "object" },
+    {
+        mat_u_x, mat_u_y, mat_v_x, mat_v_y,
+        off_u, off_v, 0.0, 0.0  -- 16バイトアライメントパディング
+    },
+    "copy",
+    "clip"
+)
