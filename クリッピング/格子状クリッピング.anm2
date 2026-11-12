@@ -1,4 +1,6 @@
 --label:クリッピング
+--filter
+
 --track@split_x:分割数X,1,200,10,1
 --track@split_y:分割数Y,1,200,10,1
 --trackgroup@split_x,split_y:分割数
@@ -36,10 +38,6 @@ Texture2D tex : register(t0);
 SamplerState samp : register(s0);
 
 float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    if (clip_rate >= 100.0) {
-        return float4(0.0, 0.0, 0.0, 0.0);
-    }
-    
     float px = uv.x * w;
     float py = uv.y * h;
     
@@ -52,8 +50,9 @@ float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         float cell_size = min(cell_w, cell_h);
         cell_w = cell_size;
         cell_h = cell_size;
-        offset_x = fmod(w * 0.5, cell_size);
-        offset_y = fmod(h * 0.5, cell_size);
+        // 正方形セルの中央揃えオフセット計算
+        offset_x = fmod(w, cell_size) * 0.5;
+        offset_y = fmod(h, cell_size) * 0.5;
     }
     
     float gx = px - offset_x;
@@ -64,8 +63,8 @@ float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     
     float bx = floor((px - offset_x) / cell_w);
     float by = floor((py - offset_y) / cell_h);
-    float max_bx = floor((w - offset_x - 0.001) / cell_w);
-    float max_by = floor((h - offset_y - 0.001) / cell_h);
+    float max_bx = floor(max(0.0, w - offset_x - 0.001) / cell_w);
+    float max_by = floor(max(0.0, h - offset_y - 0.001) / cell_h);
     
     float rate = clip_rate * 0.01;
     float rem_w = cell_w * (1.0 - rate);
@@ -77,16 +76,21 @@ float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float r_bottom = (cell_h + rem_h) * 0.5;
     
     bool protect = (outer_gap < 0.5);
-    int dir = (int)(clip_dir + 0.5);
+    int dir = (int)round(clip_dir);
     
-    if (dir == 0 || dir == 1 || dir == 2) {
-        if (protect) {
-            if (bx <= 0.0)      { r_left = 0.0; r_right = rem_w; }
-            if (bx >= max_bx)   { r_left = cell_w - rem_w; r_right = cell_w; }
-            if (by <= 0.0)      { r_top = 0.0; r_bottom = rem_h; }
-            if (by >= max_by)   { r_top = cell_h - rem_h; r_bottom = cell_h; }
+    // 外周保護 (対象軸ごとに適切に分離)
+    if (protect) {
+        if (dir == 0 || dir == 1) {
+            if (bx <= 0.0)    { r_left = 0.0; r_right = rem_w; }
+            if (bx >= max_bx) { r_left = cell_w - rem_w; r_right = cell_w; }
         }
-    } else if (dir == 3) {
+        if (dir == 0 || dir == 2) {
+            if (by <= 0.0)    { r_top = 0.0; r_bottom = rem_h; }
+            if (by >= max_by) { r_top = cell_h - rem_h; r_bottom = cell_h; }
+        }
+    }
+    
+    if (dir == 3) {
         r_left = cell_w - rem_w; r_right = cell_w;
         if (protect && bx <= 0.0) { r_left = 0.0; r_right = rem_w; }
     } else if (dir == 4) {
@@ -100,7 +104,8 @@ float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         if (protect && by >= max_by) { r_top = cell_h - rem_h; r_bottom = cell_h; }
     }
     
-    float aa = 0.75;
+    // 極小セル分割時でもセルが潰れないようアンチエイリアス幅を制限
+    float aa = min(0.75, min(cell_w, cell_h) * 0.25);
     float alpha_x = 1.0;
     float alpha_y = 1.0;
     
@@ -116,13 +121,13 @@ float4 grid_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
         alpha_y = a_top * a_bottom;
     }
     
-    float4 color = tex.Sample(samp, uv);
+    float4 color = tex.SampleLevel(samp, uv, 0);
     return color * (alpha_x * alpha_y);
 }
 ]]
 
-local is_sq = (force_square == 1 or force_square == true) and 1.0 or 0.0
-local is_outer = (outer_gap == 1 or outer_gap == true) and 1.0 or 0.0
+local is_sq = force_square and 1.0 or 0.0
+local is_outer = outer_gap and 1.0 or 0.0
 
 local constants = {
     split_x, 
@@ -131,7 +136,7 @@ local constants = {
     is_outer,
     w, 
     h, 
-    tonumber(clip_dir) or 0,
+    clip_dir,
     is_sq
 }
 
