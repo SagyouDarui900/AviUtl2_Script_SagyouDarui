@@ -14,6 +14,7 @@
 --select@noise_type:ノイズタイプ=0,ホワイトノイズ=0,ブルーノイズ=1
 --track@seed_val:シード値,0,1000,0,1
 --track@sync_cycle:同期サイクル,1,120,1,1
+--track@speed:速度(%),0.0,1000.0,100.0,1.0
 --group:
 
 --group:色調変動設定
@@ -55,6 +56,7 @@ float rand(float2 co) {
     return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
 }
 
+// 高周波成分を強調した擬似ブルーノイズ（均一な分布のため過度なクリッピングを抑制）
 float pseudo_blue_noise(float2 co) {
     float center = rand(co);
     float l = rand(co + float2(-1.0, 0.0));
@@ -62,7 +64,7 @@ float pseudo_blue_noise(float2 co) {
     float u = rand(co + float2( 0.0, -1.0));
     float d = rand(co + float2( 0.0,  1.0));
     float val = center - (l + r + u + d) * 0.25;
-    return saturate(val * 1.5 + 0.5);
+    return saturate(val + 0.5);
 }
 
 float get_noise(float2 co, float type) {
@@ -89,29 +91,39 @@ float3 hsv2rgb(float3 c) {
 }
 
 float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    // グリッドIDは元UVに基づいて生成（セル単位のノイズ特性を元の格子位置に固定）
     float2 grid_uv_float = (uv - 0.5) * param_grid.xy;
     float2 grid_uv = floor(grid_uv_float);
     float2 cell_uv = frac(grid_uv_float);
 
     float rnd_seed = param_env.x + 123.456;
     float n_type = param_hsv.w;
-    float2 seed_offset = float2(rnd_seed * 0.13, rnd_seed * 0.17);
 
-    float r_hue   = (get_noise(grid_uv + float2(rnd_seed * 1.1, rnd_seed * 1.2), n_type) - 0.5) * 2.0;
-    float r_sat   = (get_noise(grid_uv + float2(rnd_seed * 1.3, rnd_seed * 1.4), n_type) - 0.5) * 2.0;
-    float r_light = (get_noise(grid_uv + float2(rnd_seed * 1.5, rnd_seed * 1.6), n_type) - 0.5) * 2.0;
-    float r_distX = (get_noise(grid_uv + float2(rnd_seed * 1.7, rnd_seed * 1.8), n_type) - 0.5) * 2.0;
-    float r_distY = (get_noise(grid_uv + float2(rnd_seed * 1.9, rnd_seed * 2.0), n_type) - 0.5) * 2.0;
+    // 時間シードを連続加算せず、時間からランダムな巨大オフセットを生成して加算する
+    float2 off_hue   = float2(rand(float2(rnd_seed, 1.1)), rand(float2(rnd_seed, 1.2))) * 1000.0;
+    float2 off_sat   = float2(rand(float2(rnd_seed, 1.3)), rand(float2(rnd_seed, 1.4))) * 1000.0;
+    float2 off_light = float2(rand(float2(rnd_seed, 1.5)), rand(float2(rnd_seed, 1.6))) * 1000.0;
+    float2 off_distX = float2(rand(float2(rnd_seed, 1.7)), rand(float2(rnd_seed, 1.8))) * 1000.0;
+    float2 off_distY = float2(rand(float2(rnd_seed, 1.9)), rand(float2(rnd_seed, 2.0))) * 1000.0;
+
+    float r_hue   = (get_noise(grid_uv + off_hue, n_type) - 0.5) * 2.0;
+    float r_sat   = (get_noise(grid_uv + off_sat, n_type) - 0.5) * 2.0;
+    float r_light = (get_noise(grid_uv + off_light, n_type) - 0.5) * 2.0;
+    float r_distX = (get_noise(grid_uv + off_distX, n_type) - 0.5) * 2.0;
+    float r_distY = (get_noise(grid_uv + off_distY, n_type) - 0.5) * 2.0;
 
     float2 inv_res = param_env.yz;
 
     float2 shake_offset = float2(0.0, 0.0);
     if (param_fx.w > 0.0) {
-        float shake_x = (rand(grid_uv + float2(param_env.x * 0.13, 12.34)) - 0.5) * 2.0;
-        float shake_y = (rand(grid_uv + float2(param_env.x * 0.17, 56.78)) - 0.5) * 2.0;
+        float2 off_sx = float2(rand(float2(rnd_seed, 2.1)), 12.34) * 1000.0;
+        float2 off_sy = float2(rand(float2(rnd_seed, 2.2)), 56.78) * 1000.0;
+        float shake_x = (rand(grid_uv + off_sx) - 0.5) * 2.0;
+        float shake_y = (rand(grid_uv + off_sy) - 0.5) * 2.0;
         shake_offset = float2(shake_x, shake_y) * (param_fx.w * inv_res);
     }
 
+    // テクスチャサンプリング座標（震え・歪みオフセットを反映）
     float2 dist_uv = uv + shake_offset + float2(r_distX, r_distY) * (param_grid.z * inv_res);
 
     float4 c = float4(0.0, 0.0, 0.0, 0.0);
@@ -136,7 +148,8 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    float3 rgb = c.rgb / alpha;
+    // ぼかし後のプリマルチ解除時にRGBが1.0を超過しないようクランプ
+    float3 rgb = saturate(c.rgb / alpha);
 
     // 色調変動
     float3 hsv = rgb2hsv(rgb);
@@ -145,15 +158,15 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
     hsv.z = saturate(hsv.z + r_light * param_hsv.z);
     rgb = hsv2rgb(hsv);
 
-    // 深度（ベベル）
+    // 深度（ベベル: 左上ハイライト・右下シャドウ）
     float bevel = (1.0 - cell_uv.x - cell_uv.y);
     rgb = saturate(rgb + bevel * (param_fx.x * 0.01));
 
-    // エッジ強調
+    // エッジ強調（極小グリッド時にもセル内部が塗りつぶされないようエッジ幅比率に上限を設定）
     float cell_w_px = (1.0 / inv_res.x) / max(param_grid.x, 1.0);
     float cell_h_px = (1.0 / inv_res.y) / max(param_grid.y, 1.0);
-    float edge_tx = 1.5 / cell_w_px;
-    float edge_ty = 1.5 / cell_h_px;
+    float edge_tx = min(1.5 / cell_w_px, 0.4);
+    float edge_ty = min(1.5 / cell_h_px, 0.4);
     float edge = step(cell_uv.x, edge_tx) + step(1.0 - edge_tx, cell_uv.x) +
                  step(cell_uv.y, edge_ty) + step(1.0 - edge_ty, cell_uv.y);
     edge = saturate(edge);
@@ -161,7 +174,7 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
 
     // ML保護ノイズ
     if (param_fx.z > 0.5) {
-        float ml_noise = (rand(pos.xy + seed_offset) - 0.5) * 0.1;
+        float ml_noise = (rand(pos.xy + float2(rand(float2(rnd_seed, 3.1)), rand(float2(rnd_seed, 3.2))) * 1000.0) - 0.5) * 0.1;
         rgb = saturate(rgb + ml_noise);
     }
 
@@ -175,7 +188,8 @@ do
     local w, h = obj.w, obj.h
     local actual_grid_y = (is_square == 1) and (grid_x * (h / w)) or grid_y
     local safe_cycle = math.max(1, math.floor(sync_cycle))
-    local total_seed = math.floor(obj.frame / safe_cycle) + seed_val
+    -- 長時間再生時における float32 精度劣化防止のためシード値を 10000 周期でラップ
+    local total_seed = (math.floor((obj.frame * (speed * 0.01)) / safe_cycle) + seed_val) % 10000
     local sampler_mode = (transparent_bg == 1) and "clip" or "clamp"
 
     obj.pixelshader(
