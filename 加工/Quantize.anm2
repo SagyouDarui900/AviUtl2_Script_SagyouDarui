@@ -41,16 +41,21 @@ float4 ps_quantize(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
 
     float4 color = tex.Sample(samp, sample_uv);
 
-    if (color.a <= 0.0) {
+    // 微小アルファの早期リターン（半透明境界ノイズの防止）
+    if (color.a < 0.0001) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // 2. 色の量子化 (Posterization)
+    // 2. 色の量子化 (Posterization) - 256階調未満のとき減色処理を実行
     if (p_color_steps < 256.0) {
-        float safe_a = max(color.a, 0.00001);
+        float safe_a = max(color.a, 0.0001);
         float3 straight_rgb = color.rgb / safe_a;
 
-        float steps = p_color_steps - 1.0;
+        // HDR環境での色破綻・アルファ超過防止のため [0, 1] にクランプ
+        straight_rgb = saturate(straight_rgb);
+
+        // ゼロ除算防止ガード（最小値 1.0 = 2階調・2値化）
+        float steps = max(p_color_steps - 1.0, 1.0);
         straight_rgb = floor(straight_rgb * steps + 0.5) / steps;
 
         color.rgb = straight_rgb * color.a;
