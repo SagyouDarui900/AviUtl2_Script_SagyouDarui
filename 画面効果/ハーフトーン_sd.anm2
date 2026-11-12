@@ -1,5 +1,6 @@
 --label:画面効果
 --filter
+
 --track@cell_size:間隔,1,500,16,0.1
 --track@dot_scale:サイズ倍率,0,300,100,0.1
 --track@min_size:最小サイズ,0,100,0,0.1
