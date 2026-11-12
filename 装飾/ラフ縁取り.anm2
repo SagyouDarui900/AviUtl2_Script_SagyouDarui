@@ -1,0 +1,170 @@
+--information:ラフ縁取り
+--label:装飾
+
+--group:基本設定
+--track@width:太さ,0,500,20,1
+--track@speed:速度,0,1000,10,1
+--color@outline_col:縁色,0xff0088
+--track@outline_alpha:縁透明度,0,100,100,1
+--group:詳細設定
+--track@roughness:粗さ,1,200,50,1
+--track@jitter:乱れ,0,100,50,1
+--track@angle:流れる角度,-180,180,45,1
+--track@threshold:閾値,1,255,50,1
+--track@rounding:角丸め,0,100,50,1
+--check@only_outline:縁のみ表示,false
+--check@radial_flow:中心から流す,false
+--check@individual_seed:個別ランダム,true
+--group:
+
+local w_val = math.max(0, math.floor(width or 0))
+if w_val > 0 then
+    -- 乱れ(jitter)による変動やアンチエイリアスを考慮した十分なマージンを確保
+    local margin = math.ceil(w_val * 1.5) + 8
+    obj.effect("領域拡張", "上", margin, "下", margin, "左", margin, "右", margin)
+end
+
+local buf_w, buf_h = obj.w, obj.h
+if buf_w <= 0 or buf_h <= 0 then
+    return
+end
+
+--[[pixelshader@RoughOutlineShader:
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+cbuffer Params : register(b0) {
+    float4 border_color; // x:r, y:g, z:b, w:a
+    float4 base_params;  // x:width, y:roughness, z:jitter, w:speed
+    float4 screen_info;  // x:time, y:width, z:height, w:threshold
+    float4 flow_misc;    // x:only_outline, y:angle_rad, z:seed, w:radial_flow
+    float4 extra_params; // x:rounding, y:outline_alpha, z:pad, w:pad
+};
+
+float hash(float2 p) {
+    return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+float noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    
+    float a = hash(i);
+    float b = hash(i + float2(1.0, 0.0));
+    float c = hash(i + float2(0.0, 1.0));
+    float d = hash(i + float2(1.0, 1.0));
+    
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float4 RoughOutlineShader(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float w_param = base_params.x;
+    float rough = max(base_params.y, 0.001);
+    float jitter = base_params.z;
+    float time = fmod(screen_info.x * base_params.w * 0.1, 1000.0);
+    float2 size = screen_info.yz;
+    float alpha_th = screen_info.w;
+    
+    bool only_outline = (flow_misc.x > 0.5);
+    float angle_rad = flow_misc.y;
+    float seed = flow_misc.z;
+    bool radial_flow = (flow_misc.w > 0.5);
+    
+    // 角丸め: 1.0(100%)で真円・滑らか、0.0(0%)でランダムジッター最大
+    float rounding = extra_params.x * 0.01;
+    float roughness_rnd = 1.0 - rounding;
+    float alpha_factor = extra_params.y * 0.01;
+
+    float4 src_color = tex.SampleLevel(samp, uv, 0);
+
+    // ノイズベクトル計算 (アスペクト比を維持したピクセル空間で計算)
+    float2 noise_uv;
+    if (radial_flow) {
+        float2 pixel_pos = (uv - 0.5) * size;
+        float pixel_len = max(length(pixel_pos), 0.0001);
+        float2 dir = pixel_pos / pixel_len;
+        float flow_dir = (angle_rad >= 0.0) ? 1.0 : -1.0;
+        noise_uv = (uv * (size / rough)) - dir * time * flow_dir + float2(seed, seed);
+    } else {
+        float2 flow_dir = float2(cos(angle_rad), -sin(angle_rad));
+        noise_uv = uv * (size / rough) - flow_dir * time + float2(seed, seed);
+    }
+
+    float n = noise(noise_uv);
+    // jitter=100でも縁が完全に消失しないよう下限を設定
+    float noise_factor = lerp(1.0, max(0.15, n), jitter * 0.01);
+    float base_dist = max(1.0, w_param * noise_factor);
+
+    // 円周サンプリング (64サンプル)
+    const int SAMPLES = 64;
+    float max_alpha = 0.0;
+    float dither = hash(uv * size + float2(time, seed));
+    float start_angle = n * 6.2831853 + dither * (6.2831853 / float(SAMPLES));
+
+    [loop]
+    for (int i = 0; i < SAMPLES; i++) {
+        float angle = start_angle + (float(i) / float(SAMPLES)) * 6.2831853;
+        float2 dir = float2(cos(angle), sin(angle));
+        float dist_dither = 1.0 - roughness_rnd * 0.5 * hash(uv * size + float2(i, seed));
+        float2 offset = dir * ((base_dist * dist_dither) / size);
+        
+        float a = tex.SampleLevel(samp, uv + offset, 0).a;
+        max_alpha = max(max_alpha, a);
+        // 閾値を超えた時点で結果が確定するため早期終了
+        if (max_alpha * 255.0 >= alpha_th) break;
+    }
+
+    // 縁取り色の生成 (プリマルチプライドアルファ)
+    float4 border_out = float4(0.0, 0.0, 0.0, 0.0);
+    if (max_alpha * 255.0 >= alpha_th) {
+        float final_a = border_color.a * alpha_factor;
+        border_out = float4(border_color.rgb * final_a, final_a);
+    }
+
+    // 縁のみ表示モード: 元画像領域を型抜き (Porter-Duff OUT)
+    if (only_outline) {
+        return border_out * (1.0 - src_color.a);
+    }
+
+    // 通常モード: 元画像の下に縁を合成 (Under合成)
+    float3 out_rgb = src_color.rgb + border_out.rgb * (1.0 - src_color.a);
+    float out_a = src_color.a + border_out.a * (1.0 - src_color.a);
+    return float4(out_rgb, out_a);
+}
+]]
+
+local math = math
+local max = math.max
+local min = math.min
+local rad = math.rad
+
+local r_val = max(1, roughness or 1)
+local j_val = min(max(jitter or 0, 0), 100)
+local s_val = speed or 0
+local ang_rad = rad(angle or 0)
+local t_val = min(max(threshold or 1, 1), 255)
+local round_val = min(max(rounding or 0, 0), 100)
+local a_val = min(max(outline_alpha or 100, 0), 100)
+local is_only_outline = only_outline and 1.0 or 0.0
+local is_radial_flow = radial_flow and 1.0 or 0.0
+
+-- シード値計算
+local final_seed = ((obj.id or 0) * 12.345) % 1000.0
+if individual_seed then
+    final_seed = (final_seed + (obj.index or 0) * 137.5) % 1000.0
+end
+
+-- 色情報取得
+local r, g, b = RGB(outline_col or 0xff0088)
+
+-- 定数バッファ（float4 x 5）
+local constants = {
+    r / 255.0, g / 255.0, b / 255.0, 1.0,
+    w_val, r_val, j_val, s_val,
+    (obj.time or 0) % 10000.0, buf_w, buf_h, t_val,
+    is_only_outline, ang_rad, final_seed, is_radial_flow,
+    round_val, a_val, 0.0, 0.0
+}
+
+obj.pixelshader("RoughOutlineShader", "object", {"object"}, constants, "copy", "clamp")
