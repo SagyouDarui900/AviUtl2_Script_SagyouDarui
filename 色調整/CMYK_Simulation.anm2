@@ -1,0 +1,77 @@
+--label:色調整
+--filter
+--information:CMYKシミュレーション (プロセスカラー近似変換)
+
+--group:パラメータ
+--track@ratio:強度,0,100,100,0.1
+--select@mode:表示=0,CMYK合成=0,C(シアン)版=1,M(マゼンタ)版=2,Y(イエロー)版=3,K(キー)版=4
+--check@pure:純色表示(版確認用),false
+--group:
+
+--[[pixelshader@PS_CMYK:
+    Texture2D tex0 : register(t0);
+    SamplerState smp : register(s0);
+
+    cbuffer Params : register(b0) {
+        float ratio;
+        float mode;
+        float pure;
+        float padding;
+    };
+
+    float4 PS_CMYK(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
+        float4 c = tex0.Sample(smp, uv);
+        
+        // 極小アルファの早期リターン（半透明境界での除算ノイズ防止）
+        if (c.a <= 0.005) return c;
+
+        // プリマルチプライド解除によるストレートRGB復元
+        float3 rgb = saturate(c.rgb / c.a);
+
+        // RGB -> 簡易CMYK変換 (デバイス非依存カラーモデル)
+        float k = 1.0 - max(rgb.r, max(rgb.g, rgb.b));
+        float div = max(1.0 - k, 0.0001);
+        
+        float cy = saturate((1.0 - rgb.r - k) / div);
+        float mg = saturate((1.0 - rgb.g - k) / div);
+        float yl = saturate((1.0 - rgb.b - k) / div);
+
+        float4 result = float4(0.0, 0.0, 0.0, c.a);
+        int m = (int)round(mode);
+        
+        if (m == 0) {
+            // CMYK -> RGB 再合成
+            float r = (1.0 - cy) * (1.0 - k);
+            float g = (1.0 - mg) * (1.0 - k);
+            float b = (1.0 - yl) * (1.0 - k);
+            result.rgb = float3(r, g, b);
+        } else if (pure > 0.5) {
+            // 純色版表示: 各インクの純色への着色（K版は印刷慣例に従い白〜黒のグレースケール）
+            if      (m == 1) result.rgb = lerp(float3(1.0, 1.0, 1.0), float3(0.0, 1.0, 1.0), cy);
+            else if (m == 2) result.rgb = lerp(float3(1.0, 1.0, 1.0), float3(1.0, 0.0, 1.0), mg);
+            else if (m == 3) result.rgb = lerp(float3(1.0, 1.0, 1.0), float3(1.0, 1.0, 0.0), yl);
+            else if (m == 4) result.rgb = lerp(float3(1.0, 1.0, 1.0), float3(0.0, 0.0, 0.0), k);
+        } else {
+            // 単色濃度グレースケール表示
+            float val = 0.0;
+            if      (m == 1) val = cy;
+            else if (m == 2) val = mg;
+            else if (m == 3) val = yl;
+            else if (m == 4) val = k;
+            
+            result.rgb = float3(val, val, val);
+        }
+
+        // ストレートRGBからプリマルチプライドアルファへ再変換
+        result.rgb *= result.a;
+
+        // 元画像と変換後画像のプリマルチプライド線形合成
+        return lerp(c, result, ratio);
+    }
+]]
+
+local param_ratio = ratio * 0.01
+local param_mode = mode
+local param_pure = pure and 1.0 or 0.0
+
+obj.pixelshader("PS_CMYK", "object", { "object" }, { param_ratio, param_mode, param_pure, 0.0 }, "copy", "clamp")
