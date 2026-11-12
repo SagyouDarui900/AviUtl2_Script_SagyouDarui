@@ -4,8 +4,8 @@
 
 --group:パターン設定
 --select@param_mode:モード=0,クロスステッチ=0,クロスハッチング=1,ミックス=2
---track@param_size:サイズ,2.0,100.0,10.0,0.1
---track@param_thickness:線の太さ,1.0,20.0,1.0,0.1
+--track@param_size:サイズ,2.0,100.0,10.0,1
+--track@param_thickness:線の太さ,1.0,20.0,1.0,1
 --track@param_angle:角度,-360.0,360.0,0.0,0.1
 --check@param_invert:反転/白黒化,0
 --group:
@@ -32,15 +32,18 @@ cbuffer Params : register(b0) {
 Texture2D tex : register(t0);
 SamplerState samp : register(s0);
 
+// HLSL標準のfmodと異なり、負の数入力時にも非負の剰余を返す算術モジュロ関数
 float get_mod(float a, float b) {
     return a - floor(a / b) * b;
 }
 
+// 浮動小数点演算でセル内の対角ステッチ判定を実施
 bool check_stitch(float2 localPos, float2 localCellPos, float sz, float thick) {
-    int2 rem = (int2)floor(localPos - localCellPos);
-    return (abs(rem.x - rem.y) < thick) || (abs(rem.x - ((int)sz - 1 - rem.y)) < thick);
+    float2 rem = localPos - localCellPos;
+    return (abs(rem.x - rem.y) < thick) || (abs(rem.x - (sz - 1.0 - rem.y)) < thick);
 }
 
+// 輝度段階に応じたクロスハッチング線判定
 bool check_hatch(float2 localPos, float sz, float thick, float lum) {
     float offset = sz * 0.5;
     float line1 = get_mod(localPos.x + localPos.y, sz);
@@ -48,7 +51,7 @@ bool check_hatch(float2 localPos, float sz, float thick, float lum) {
     float line3 = get_mod(localPos.x + localPos.y - offset, sz);
     float line4 = get_mod(localPos.x - localPos.y - offset, sz);
 
-    return (lum < 1.0 && line1 < thick) ||
+    return (lum < 0.9 && line1 < thick) ||
            (lum < 0.7 && line2 < thick) ||
            (lum < 0.5 && line3 < thick) ||
            (lum < 0.3 && line4 < thick);
@@ -62,23 +65,24 @@ float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
     float c = param_geom.z;
     float s = param_geom.w;
     float2x2 rot = float2x2(c, -s, s, c);
-    float2x2 invRot = float2x2(c, s, -s, c);
 
     float2 localPos = mul(rot, pPos - center);
 
-    float sz = max(2.0, floor(param_geom.x));
-    float thick = max(1.0, floor(param_geom.y));
+    float sz = max(2.0, param_geom.x);
+    float thick = max(1.0, param_geom.y);
     int mode = (int)param_state.x;
     bool invert_flag = param_state.y > 0.5;
     float obj_alpha = param_state.z;
 
     float2 sampleUV = uv;
     if (mode != 1) {
+        float2x2 invRot = float2x2(c, s, -s, c);
         float2 localCellPos = floor(localPos / sz) * sz;
         float2 localSamplePos = localCellPos + sz * 0.5;
         float2 invSamplePos = mul(invRot, localSamplePos) + center;
         sampleUV = invSamplePos / res;
 
+        // 回転・サンプリング座標の範囲外チェック（透明化）
         if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) {
             return float4(0.0, 0.0, 0.0, 0.0);
         }
@@ -92,7 +96,7 @@ float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
 
     float3 outRGB = float3(0.0, 0.0, 0.0);
 
-    if (mode == 0) {
+    if (mode == 0) { // クロスステッチ
         float2 localCellPos = floor(localPos / sz) * sz;
         bool isStitch = check_stitch(localPos, localCellPos, sz, thick);
         float3 stitchColor = saturate(straightRGB * 1.4);
@@ -103,14 +107,14 @@ float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
         } else {
             outRGB = invert_flag ? stitchColor : float3(0.0, 0.0, 0.0);
         }
-    } else if (mode == 1) {
+    } else if (mode == 1) { // クロスハッチング
         bool isHatch = check_hatch(localPos, sz, thick, lum);
         if (invert_flag) {
             outRGB = isHatch ? float3(0.0, 0.0, 0.0) : float3(1.0, 1.0, 1.0);
         } else {
             outRGB = isHatch ? float3(0.0, 0.0, 0.0) : straightRGB;
         }
-    } else {
+    } else { // ミックス
         float2 localCellPos = floor(localPos / sz) * sz;
         bool isStitch = check_stitch(localPos, localCellPos, sz, thick);
         bool isHatch = check_hatch(localPos, sz, thick, lum);
@@ -121,6 +125,9 @@ float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
             if (isHatch) {
                 outRGB = float3(0.0, 0.0, 0.0);
             }
+        } else {
+            // ステッチ部以外の背景領域を描画
+            outRGB = isHatch ? float3(0.0, 0.0, 0.0) : straightRGB;
         }
     }
 
@@ -138,16 +145,19 @@ do
     local cx = w * 0.5 + param_cx
     local cy = h * 0.5 + param_cy
 
+    local size_val = math.floor(param_size)
+    local thick_val = math.floor(param_thickness)
+
     obj.pixelshader(
         "cross_pattern_ps",
         "object",
         { "object" },
         {
-            param_size, param_thickness, cos_a, sin_a,
+            size_val, thick_val, cos_a, sin_a,
             cx, cy, w, h,
             param_mode, (param_invert == 1) and 1.0 or 0.0, obj.alpha, 0.0
         },
         "copy",
-        "clamp"
+        "clip"
     )
 end
