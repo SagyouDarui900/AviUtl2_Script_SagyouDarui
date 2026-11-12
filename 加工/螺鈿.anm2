@@ -1,4 +1,5 @@
 --label:加工
+--filter
 
 --group:貝片・質感,true
 --track@scale:貝片サイズ,1,200,30,1
@@ -15,12 +16,12 @@
 --group:
 
 --group:光源設定,true
---check@light_anim:光源回転,1
+--check@light_anim:光源回転,true
 --track@light_rx:光源角度X,-180,180,45,1
 --track@light_ry:光源角度Y,-180,180,45,1
 --trackgroup@light_rx,light_ry:光源角度
---hide@light_rx:light_anim==1
---hide@light_ry:light_anim==1
+--hide@light_rx:light_anim
+--hide@light_ry:light_anim
 --group:
 
 --[[pixelshader@ps_raden_inlay:
@@ -84,8 +85,8 @@ float nacre_fibers(float2 uv, float dense, float angle) {
 
 // 有機的に歪んだ割貝ボロノイセル
 void nacre_organic_cells(float2 uv, out float crack, out float2 cell_hash, out float edge_dist) {
-    // 座標のディスプレイスメント（タイルの直線感を排除）
-    float2 warp = float2(noise(uv * 1.5), noise(uv * 1.5 + float2(3.2, 7.8))) * 0.35;
+    // 座標のディスプレイスメント（タイルの直線感を排除しつつ過度な歪みを抑止）
+    float2 warp = float2(noise(uv * 1.5), noise(uv * 1.5 + float2(3.2, 7.8))) * 0.25;
     float2 st = uv + warp;
 
     float2 g = floor(st);
@@ -126,8 +127,12 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    float3 rgb = base_color.rgb / max(base_color.a, 0.0001);
-    float luminance = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+    // ストレートRGB復元
+    float3 rgb = saturate(base_color.rgb / max(base_color.a, 0.0001));
+    
+    // リニア輝度による漆地境界マスク判定 (知覚輝度)
+    float3 rgb_linear = pow(rgb, 2.2);
+    float luminance = dot(rgb_linear, float3(0.2126, 0.7152, 0.0722));
 
     float thresh = u_threshold * 0.01;
     float inlay_mask = smoothstep(thresh, thresh + 0.05, luminance);
@@ -173,7 +178,7 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float flash = pow(n_dot_h, 8.0) * (0.2 + 0.8 * fibers);
 
     // 構造色（薄膜干渉）
-    float film_shift = cell_hash.y * 3.0 + fibers * 0.6 + u_time * 0.03;
+    float film_shift = cell_hash.y * 3.0 + fibers * 0.6 + fmod(u_time * 0.03, 10.0);
     float irid_phase = (1.0 - n_dot_v) * 1.8 + (1.0 - n_dot_h) * 1.5 + film_shift;
     float3 irid_color = nacre_spectrum(irid_phase) * (u_irid_strength * 0.015);
 
@@ -181,8 +186,9 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float3 pearl_base = float3(0.90, 0.92, 0.94) * (u_pearl_whiteness * 0.01) * (0.6 + 0.8 * fibers);
     float3 shell_albedo = lerp(pearl_base, rgb * pearl_base, 0.2);
 
-    // 反射光の計算
-    float3 shell_diffuse = shell_albedo * (n_dot_l * 0.5 + 0.5) + irid_color * (0.3 + 0.7 * flash);
+    // 反射光の計算 (陰影に応じた自然な光量減衰)
+    float light_wrap = n_dot_l * 0.6 + 0.4;
+    float3 shell_diffuse = shell_albedo * light_wrap + irid_color * light_wrap * (0.2 + 0.8 * flash);
     float pearl_spec = pow(max(n_dot_h, 0.0), u_spec_power) * (0.2 + 2.5 * flash);
     
     float3 raden_surface = shell_diffuse + (irid_color + float3(0.8, 0.9, 1.0)) * pearl_spec;
@@ -201,7 +207,9 @@ float4 ps_raden_inlay(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     float3 lacquer_base = float3(0.008, 0.006, 0.008) * rgb;
     float3 final_rgb = lerp(lacquer_base, raden_surface, inlay_mask);
 
-    return float4(final_rgb * base_color.a, base_color.a);
+    // プリマルチプライドアルファ整合性保持 (RGB > Alpha のオーバーフローを抑止)
+    float3 clamped_rgb = saturate(final_rgb);
+    return float4(clamped_rgb * base_color.a, base_color.a);
 }
 ]]
 
@@ -220,11 +228,11 @@ local light_dir_x = 0.0
 local light_dir_y = 0.0
 local light_dir_z = 1.0
 
-if light_anim == 1 then
-    local anim_rad = obj.time * 1.2
+if light_anim then
+    local anim_rad = ((obj.time or 0) % 1000.0) * 1.2
     light_dir_x = math_cos(anim_rad)
     light_dir_y = math_sin(anim_rad) * 0.6
-    light_dir_z = 0.8
+    light_dir_z = 0.5
 else
     local rx_rad = math_rad(light_rx or 0)
     local ry_rad = math_rad(light_ry or 0)
@@ -249,8 +257,10 @@ local val_crack_depth = crack_depth or 40
 local val_threshold = threshold or 20
 local val_depth_str = depth_str or 40
 
+local safe_time = (obj.time or 0) % 1000.0
+
 local constants = {
-    obj.time,
+    safe_time,
     val_scale,
     val_irid_strength,
     val_pearl_whiteness,
