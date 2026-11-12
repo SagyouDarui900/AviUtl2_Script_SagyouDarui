@@ -59,7 +59,7 @@ end
 
         float jitter = rand(uv);
         float illumination_decay = 1.0;
-        float4 accumulated = float4(0.0, 0.0, 0.0, 0.0);
+        float accumulated_light = 0.0;
 
         [loop]
         for (int i = 0; i < num_samples; i++) {
@@ -70,22 +70,26 @@ end
             
             float safe_a = max(s.a, 0.00001);
             float3 straight_rgb = s.rgb / safe_a;
-            float lum = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722));
+            float lum = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722)) * step(0.0001, s.a);
             
-            float extract_val = max(0.0, lum - threshold);
-            extract_val = smoothstep(0.0, 0.2, extract_val) * extract_val;
+            float extract_val = smoothstep(threshold, threshold + 0.2, lum) * max(0.0, lum - threshold);
             
-            accumulated += s * (extract_val * illumination_decay * weight);
+            accumulated_light += extract_val * illumination_decay * weight;
             illumination_decay *= decay;
         }
 
         float4 original = tex.SampleLevel(smp, uv, 0);
-        float4 rays = accumulated * float4(tint_color, 1.0) * intensity;
-
-        float4 result = lerp(original * original_blend + rays, rays, only_light);
-        result.a = saturate(result.a);
         
-        return result;
+        float total_light = accumulated_light * intensity;
+        float rays_a = saturate(total_light);
+        float3 rays_rgb = tint_color * rays_a;
+
+        float4 base_col = original * original_blend;
+        
+        float out_a = (only_light > 0.5) ? rays_a : saturate(base_col.a + rays_a);
+        float3 out_rgb = (only_light > 0.5) ? rays_rgb : saturate(base_col.rgb + rays_rgb);
+
+        return float4(out_rgb, out_a);
     }
 ]]
 
@@ -97,12 +101,16 @@ local light_uv_x = 0.5 + light_x * inv_w
 local light_uv_y = 0.5 + light_y * inv_h
 
 local r, g, b = RGB(light_color)
+local lin_r = (r / 255.0) ^ 2.2
+local lin_g = (g / 255.0) ^ 2.2
+local lin_b = (b / 255.0) ^ 2.2
+
 local is_only_val = only_light and 1.0 or 0.0
 
 local constants = {
     light_uv_x, light_uv_y, intensity, decay,
     density, weight, samples, threshold,
-    r / 255.0, g / 255.0, b / 255.0, original_blend,
+    lin_r, lin_g, lin_b, original_blend,
     is_only_val, 0.0, 0.0, 0.0
 }
 
