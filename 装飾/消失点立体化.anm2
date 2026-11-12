@@ -1,0 +1,207 @@
+--label:装飾
+--information:消失点立体化
+
+--track@depth:深さ(%),-500,500,100,1
+--track@ext_rate:伸び率(%),0,100,100,1
+--select@base_point:基準点=0,手前(元画像)から=0,奥(消失点)から=1,中心から=2
+--track@vx:消失点X,-4000,4000,0,1
+--track@vy:消失点Y,-4000,4000,-500,1
+--trackgroup@vx,vy:消失点
+
+--select@draw_mode:表示=0,両方=0,側面のみ=1,正面のみ=2
+--color@col_start:手前の色,0xFF6600
+--color@col_end:奥の色,0x000000
+--check@use_grad:奥へグラデーション,1
+
+--track@fade:奥の透明化(%),0,100,0,1
+--track@samples:品質(重さ),10,500,100,1
+
+-- 消失点のアンカーを画面上に表示
+obj.setanchor("vx,vy", 0, "line")
+
+local r = ext_rate / 100.0
+local d = depth / 100.0
+
+-- 基準点に基づき、手前側のスケール(s_start)と奥側のスケール(s_end)を算出
+local s_origin = 1.0
+local s_target = 1.0 - d
+local s_start, s_end
+
+if base_point == 0 then
+    s_start = s_origin
+    s_end = s_origin + (s_target - s_origin) * r
+elseif base_point == 1 then
+    s_start = s_target + (s_origin - s_target) * r
+    s_end = s_target
+else
+    local mid = (s_origin + s_target) / 2.0
+    local half = (s_origin - s_target) / 2.0 * r
+    s_start = mid + half
+    s_end = mid - half
+end
+
+-- スケールのマイナス反転による描画破綻を防止し、常に手前(大)から奥(小)の順序を保証
+local s_front = math.max(s_start, s_end)
+local s_back  = math.min(s_start, s_end)
+if s_front < 0.001 then s_front = 0.001 end
+if s_back < 0.001 then s_back = 0.001 end
+
+-- 伸び率が0の場合は通常描画して終了
+if math.abs(s_front - s_back) < 0.001 then
+    if draw_mode ~= 1 then
+        obj.draw()
+    end
+    return
+end
+
+local vx_local, vy_local = vx, vy
+
+-- 個別オブジェクトが有効な場合、消失点をグループ全体の基準に自動補正
+if obj.getoption("multi_object") and obj.num > 1 then
+    local cx_base = obj.getvalue("cx") or 0
+    local cy_base = obj.getvalue("cy") or 0
+    vx_local = vx - obj.ox + obj.cx - cx_base
+    vy_local = vy - obj.oy + obj.cy - cy_base
+end
+
+-- 描画される全スケール範囲を内包する正確な領域拡張量を算出
+local w, h = obj.w, obj.h
+local pts = {
+    {x = -w/2, y = -h/2}, {x = w/2, y = -h/2},
+    {x = -w/2, y = h/2},  {x = w/2, y = h/2}
+}
+
+local min_x, max_x = -w/2, w/2
+local min_y, max_y = -h/2, h/2
+
+for i = 1, 4 do
+    local nx1 = vx_local + (pts[i].x - vx_local) * s_front
+    local ny1 = vy_local + (pts[i].y - vy_local) * s_front
+    local nx2 = vx_local + (pts[i].x - vx_local) * s_back
+    local ny2 = vy_local + (pts[i].y - vy_local) * s_back
+    
+    min_x = math.min(min_x, nx1, nx2)
+    max_x = math.max(max_x, nx1, nx2)
+    min_y = math.min(min_y, ny1, ny2)
+    max_y = math.max(max_y, ny1, ny2)
+end
+
+-- 領域拡張量の上限ガード (消失点が極端に画面外にある際のメモリ枯渇・クラッシュ防止)
+local MAX_EXT = 3000
+local ext_l = math.min(MAX_EXT, math.max(0, math.ceil(-w/2 - min_x)))
+local ext_r = math.min(MAX_EXT, math.max(0, math.ceil(max_x - w/2)))
+local ext_t = math.min(MAX_EXT, math.max(0, math.ceil(-h/2 - min_y)))
+local ext_b = math.min(MAX_EXT, math.max(0, math.ceil(max_y - h/2)))
+
+if ext_l > 0 or ext_r > 0 or ext_t > 0 or ext_b > 0 then
+    obj.effect("領域拡張", "左", ext_l, "右", ext_r, "上", ext_t, "下", ext_b)
+    -- 領域拡張による中心座標のズレを補正
+    obj.cx = obj.cx - (ext_r - ext_l) / 2
+    obj.cy = obj.cy - (ext_b - ext_t) / 2
+end
+
+-- シェーダー処理用のUV座標へ変換
+local new_w = w + ext_l + ext_r
+local new_h = h + ext_t + ext_b
+local left = -w/2 - ext_l
+local top = -h/2 - ext_t
+
+local cv_u = (vx_local - left) / new_w
+local cv_v = (vy_local - top) / new_h
+
+local r1, g1, b1 = RGB(col_start)
+local r2, g2, b2 = RGB(col_end)
+
+-- DirectX 11 HLSL ピクセルシェーダー
+--[[pixelshader@vanishing_ps:
+cbuffer params : register(b0) {
+    float cv_u;
+    float cv_v;
+    float sFront;
+    float sBack;
+    
+    float samples;
+    float drawMode;
+    float fade;
+    float useGrad;
+    
+    float4 colStart;
+    float4 colEnd;
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 vanishing_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 centerUV = float2(cv_u, cv_v);
+    
+    int max_steps = int(samples);
+    float step_s = (sFront - sBack) / max(1.0, float(max_steps));
+    int mode = (int)round(drawMode);
+    
+    float4 result = float4(0, 0, 0, 0);
+    
+    // 手前(i=0, sFront)から奥(i=max_steps, sBack)へPorter-Duff累積合成 (両端を含む max_steps + 1 サンプル)
+    for (int i = 0; i <= max_steps; i++) {
+        float scale = sFront - float(i) * step_s;
+        if (scale < 0.001) continue;
+        
+        float2 sampleUV = centerUV + (uv - centerUV) / scale;
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) continue;
+        
+        float4 c = tex.SampleLevel(samp, sampleUV, 0);
+        
+        if (c.a > 0.005) {
+            bool is_face = (i == 0);
+            
+            if (is_face) {
+                if (mode != 1) { // 側面のみモード(1)以外
+                    result.rgb += c.rgb * (1.0 - result.a);
+                    result.a   += c.a   * (1.0 - result.a);
+                }
+            } else {
+                if (mode != 2) { // 正面のみモード(2)以外
+                    float3 sideCol = colStart.rgb;
+                    
+                    // 手前(0.0)から奥(1.0)への正規化進捗値
+                    float t_dist = float(i) / max(1.0, float(max_steps));
+                    if (useGrad > 0.5) {
+                        // ガンマ補正を考慮したリニア色補間 (sRGB -> Linear -> sRGB)
+                        float3 c1_lin = pow(max(0.0, colStart.rgb), 2.2);
+                        float3 c2_lin = pow(max(0.0, colEnd.rgb), 2.2);
+                        float3 mix_lin = lerp(c1_lin, c2_lin, t_dist);
+                        sideCol = pow(max(0.0, mix_lin), 1.0 / 2.2);
+                    }
+                    
+                    float fade_alpha = saturate(1.0 - t_dist * fade);
+                    float alpha = c.a * fade_alpha;
+                    float3 premult = sideCol * alpha;
+                    
+                    // 前面から背面へのアルファブレンド累積合成 (Under合成)
+                    result.rgb += premult * (1.0 - result.a);
+                    result.a   += alpha   * (1.0 - result.a);
+                }
+            }
+            
+            // アルファ値が不透明に達したら裏側の不要な計算を早期終了
+            if (result.a >= 0.99) break;
+        }
+    }
+    
+    return result;
+}
+]]
+
+obj.pixelshader(
+    "vanishing_ps",
+    "object",
+    { "object" }, 
+    {
+        cv_u, cv_v, s_front, s_back,
+        samples, draw_mode, fade / 100.0, use_grad and 1.0 or 0.0,
+        r1 / 255.0, g1 / 255.0, b1 / 255.0, 1.0,
+        r2 / 255.0, g2 / 255.0, b2 / 255.0, 1.0
+    },
+    "copy",
+    "clamp"
+)
