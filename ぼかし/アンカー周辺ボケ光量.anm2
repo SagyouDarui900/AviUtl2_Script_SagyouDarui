@@ -6,27 +6,29 @@
 --track@center_x:中心X,-4000,4000,0,1
 --track@center_y:中心Y,-4000,4000,0,1
 --trackgroup@center_x,center_y:中心座標
---value@anchor_pos:画面操作アンカー,{}
---group:
+--group
 
 --group:範囲・ぼかし設定,true
 --track@size:サイズ,0,2000,300,1
 --track@feather:境界のぼかし,0,100,50,1
 --track@blur_max:ぼかし,0,200,30,1
 --track@curve:減衰カーブ,0.1,5.0,2.0,0.1
---group:
+--group
 
 --group:レンズ質感表現,true
 --track@chroma:色収差,0,100,20,1
 --track@aspect:アスペクト比,-100,100,0,1
 --track@highlight:ボケハイライト,0,100,0,1
---group:
+--group
 
 --group:光量・色設定,true
 --track@light:光量,0,200,50,1
 --color@light_color:光の色,0xffffff
 --select@light_mode:光の合成=0,加算=0,スクリーン=1
---group:
+--group
+
+-- 早期リターン前にアンカーを設定し、値が0の区間でも画面操作を維持
+obj.setanchor("center_x,center_y", 0, "line", "color", 0xffc800)
 
 if (blur_max <= 0 and light <= 0 and chroma <= 0) or obj.w <= 0 or obj.h <= 0 then
     return
@@ -34,95 +36,151 @@ end
 
 --[[pixelshader@peripheral_blur_ps:
     cbuffer params : register(b0) {
-        float4 p_anchor; // xy: anchor (px), zw: inv_dim (1/w, 1/h)
+        float4 p_anchor; // xy: 中心座標オフセット(px), zw: オブジェクト解像度(w, h)
         float4 p_geom;   // x: inner_radius, y: outer_radius, z: blur_max, w: curve
-        float4 p_color;  // xyz: light_color * light_intensity, w: light_mode
-        float4 p_lens;   // x: chroma, y: aspect_x, z: aspect_y, w: highlight_boost
+        float4 p_color;  // xyz: light_color (sRGB), w: light_scale
+        float4 p_lens;   // x: chroma_ratio, y: chroma_min_blur, z: hl_boost, w: light_mode
+        float4 p_aspect; // x: aspect_x, y: aspect_y, zw: padding
     };
 
     Texture2D tex : register(t0);
     SamplerState samp : register(s0);
 
-    float rand(float2 co) {
-        return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
+    float rand(float2 uv, float2 res) {
+        float2 p = uv * res;
+        return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+    }
+
+    float3 srgb_to_linear(float3 c) {
+        return float3(
+            pow(max(c.r, 0.0), 2.2),
+            pow(max(c.g, 0.0), 2.2),
+            pow(max(c.b, 0.0), 2.2)
+        );
+    }
+
+    float3 linear_to_srgb(float3 c) {
+        return float3(
+            pow(max(c.r, 0.0), 1.0 / 2.2),
+            pow(max(c.g, 0.0), 1.0 / 2.2),
+            pow(max(c.b, 0.0), 1.0 / 2.2)
+        );
     }
 
     float4 peripheral_blur_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-        // 画像中心(0,0)基準のピクセル座標
-        float2 coord = (uv - 0.5) * (1.0 / p_anchor.zw);
+        float2 res = p_anchor.zw;
+        float2 inv_res = 1.0 / res;
+        float2 coord = (uv - 0.5) * res;
         float dist = length(coord - p_anchor.xy);
 
-        // 中心から周辺への強度計算
-        float normalized_dist = smoothstep(p_geom.x, p_geom.y, dist);
-        float strength = pow(normalized_dist, p_geom.w);
+        float safe_outer = max(p_geom.y, p_geom.x + 0.001);
+        float normalized_dist = smoothstep(p_geom.x, safe_outer, dist);
+        float strength = pow(max(normalized_dist, 0.0), p_geom.w);
+
         float current_blur = strength * p_geom.z;
+        float spread_blur = max(current_blur, strength * p_lens.y);
+        float blur_r = spread_blur * (1.0 + p_lens.x);
+        float blur_g = current_blur;
+        float blur_b = max(spread_blur * (1.0 - p_lens.x), 0.0);
+        float max_blur = max(current_blur, blur_r);
 
-        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+        float3 avg_lin_premul = float3(0.0, 0.0, 0.0);
+        float out_a = 0.0;
 
-        if (current_blur <= 0.2) {
-            sum = tex.SampleLevel(samp, uv, 0);
+        if (max_blur <= 0.2) {
+            float4 col = tex.SampleLevel(samp, uv, 0);
+            out_a = saturate(col.a);
+            float3 srgb_straight = (out_a > 0.00001) ? saturate(col.rgb / out_a) : float3(0.0, 0.0, 0.0);
+            avg_lin_premul = srgb_to_linear(srgb_straight) * out_a;
         } else {
-            // フィボナッチ・スパイラルサンプリング (64タップ)
-            const int SAMPLES = 64;
+            int sample_count = clamp((int)ceil(max_blur * 1.5), 12, 64);
+            float inv_samples = 1.0 / (float)sample_count;
             const float golden_angle = 2.39996323;
-            float noise = rand(uv) * 6.2831853;
-            float total_weight = 0.0;
+            float noise = rand(uv, res) * 6.2831853;
 
-            float blur_r = current_blur * (1.0 + p_lens.x);
-            float blur_g = current_blur;
-            float blur_b = current_blur * (1.0 - p_lens.x);
+            float3 sum_rgb = float3(0.0, 0.0, 0.0);
+            float3 sum_alpha = float3(0.0, 0.0, 0.0);
+            float total_weight = 0.0;
+            bool has_chroma = (p_lens.x > 0.0001);
 
             [loop]
-            for (int i = 0; i < SAMPLES; i++) {
-                float r = sqrt(((float)i + 0.5) * (1.0 / (float)SAMPLES));
+            for (int i = 0; i < sample_count; i++) {
+                float r = sqrt(((float)i + 0.5) * inv_samples);
                 float theta = (float)i * golden_angle + noise;
 
-                float2 dir = float2(cos(theta), sin(theta)) * p_lens.yz;
-
-                float2 sample_uv_r = saturate(uv + dir * (r * blur_r) * p_anchor.zw);
-                float2 sample_uv_g = saturate(uv + dir * (r * blur_g) * p_anchor.zw);
-                float2 sample_uv_b = saturate(uv + dir * (r * blur_b) * p_anchor.zw);
-
+                float2 dir = float2(cos(theta), sin(theta)) * p_aspect.xy;
                 float weight = exp(-3.0 * r * r);
 
-                float4 col_r = tex.SampleLevel(samp, sample_uv_r, 0);
-                float4 col_g = tex.SampleLevel(samp, sample_uv_g, 0);
-                float4 col_b = tex.SampleLevel(samp, sample_uv_b, 0);
+                if (has_chroma) {
+                    float2 sample_uv_r = uv + dir * (r * blur_r) * inv_res;
+                    float2 sample_uv_g = uv + dir * (r * blur_g) * inv_res;
+                    float2 sample_uv_b = uv + dir * (r * blur_b) * inv_res;
 
-                float4 samp_col = float4(col_r.r, col_g.g, col_b.b, col_g.a);
+                    float4 col_r = tex.SampleLevel(samp, sample_uv_r, 0);
+                    float4 col_g = tex.SampleLevel(samp, sample_uv_g, 0);
+                    float4 col_b = tex.SampleLevel(samp, sample_uv_b, 0);
 
-                // ハイライトブースト
-                float lum = dot(samp_col.rgb, float3(0.299, 0.587, 0.114));
-                samp_col.rgb += samp_col.rgb * (pow(saturate(lum), 2.0) * p_lens.w);
+                    float3 chan_a = float3(col_r.a, col_g.a, col_b.a);
+                    float3 srgb_straight = float3(
+                        (chan_a.r > 0.00001) ? saturate(col_r.r / chan_a.r) : 0.0,
+                        (chan_a.g > 0.00001) ? saturate(col_g.g / chan_a.g) : 0.0,
+                        (chan_a.b > 0.00001) ? saturate(col_b.b / chan_a.b) : 0.0
+                    );
 
-                sum += samp_col * weight;
+                    float3 lin_straight = srgb_to_linear(srgb_straight);
+                    float lum = dot(lin_straight, float3(0.2126, 0.7152, 0.0722));
+                    float boost = 1.0 + pow(saturate(lum), 2.0) * p_lens.z;
+
+                    float3 lin_premul = lin_straight * (chan_a * boost);
+                    sum_rgb += lin_premul * weight;
+                    sum_alpha += chan_a * weight;
+                } else {
+                    float2 sample_uv = uv + dir * (r * blur_g) * inv_res;
+                    float4 col = tex.SampleLevel(samp, sample_uv, 0);
+
+                    float a = col.a;
+                    float3 srgb_straight = (a > 0.00001) ? saturate(col.rgb / a) : float3(0.0, 0.0, 0.0);
+
+                    float3 lin_straight = srgb_to_linear(srgb_straight);
+                    float lum = dot(lin_straight, float3(0.2126, 0.7152, 0.0722));
+                    float boost = 1.0 + pow(saturate(lum), 2.0) * p_lens.z;
+
+                    float3 lin_premul = lin_straight * (a * boost);
+                    sum_rgb += lin_premul * weight;
+                    sum_alpha += float3(a, a, a) * weight;
+                }
+
                 total_weight += weight;
             }
-            sum /= max(total_weight, 0.00001);
+
+            float inv_w = 1.0 / max(total_weight, 0.00001);
+            avg_lin_premul = sum_rgb * inv_w;
+            float3 avg_chan_a = sum_alpha * inv_w;
+            out_a = saturate(max(avg_chan_a.r, max(avg_chan_a.g, avg_chan_a.b)));
         }
 
-        // 光量（ビネット）の合成
-        float3 light_val = p_color.rgb * strength * sum.a;
-        float3 out_rgb = float3(0.0, 0.0, 0.0);
+        // リニア空間での光量（ビネット）合成
+        float3 light_lin_base = srgb_to_linear(p_color.rgb) * p_color.w;
+        float3 light_lin_straight = light_lin_base * strength;
+        float3 light_lin_premul = light_lin_straight * out_a;
+        float3 res_lin_premul = float3(0.0, 0.0, 0.0);
 
-        if (p_color.w < 0.5) {
-            out_rgb = sum.rgb + light_val;
+        if (p_lens.w < 0.5) {
+            res_lin_premul = avg_lin_premul + light_lin_premul;
         } else {
-            out_rgb = sum.rgb + light_val - (sum.rgb * light_val) / max(sum.a, 0.00001);
+            res_lin_premul = avg_lin_premul + light_lin_premul - avg_lin_premul * saturate(light_lin_straight);
         }
 
-        return float4(out_rgb, sum.a);
+        float3 out_rgb = float3(0.0, 0.0, 0.0);
+        if (out_a > 0.00001) {
+            float3 res_lin_straight = res_lin_premul / out_a;
+            float3 res_srgb_straight = saturate(linear_to_srgb(res_lin_straight));
+            out_rgb = res_srgb_straight * out_a;
+        }
+
+        return float4(out_rgb, out_a);
     }
 ]]
-
-obj.setanchor("anchor_pos", 1, "line", "color", 0xffc800)
-
-local cx = center_x
-local cy = center_y
-if anchor_pos and #anchor_pos >= 2 then
-    cx = cx + (anchor_pos[1] or 0)
-    cy = cy + (anchor_pos[2] or 0)
-end
 
 local f_val = feather * 0.01
 local max_dist = math.max(obj.w, obj.h) * 0.7
@@ -132,32 +190,40 @@ local outer_radius = size + max_dist * (0.2 + f_val * 1.5)
 local r, g, b = RGB(light_color)
 local light_scale = light * 0.01
 
-local chroma_val = chroma * 0.003
+local chroma_ratio = chroma * 0.003
+local chroma_min_blur = chroma * 0.15
 local asp = aspect * 0.01
-local aspect_x = (asp >= 0) and (1.0 + asp) or (1.0 / (1.0 - asp))
-local aspect_y = (asp >= 0) and (1.0 / (1.0 + asp)) or (1.0 - asp)
+
+local scale = 1.0 + math.abs(asp)
+local aspect_x = (asp >= 0) and scale or (1.0 / scale)
+local aspect_y = (asp >= 0) and (1.0 / scale) or scale
 local hl_boost = highlight * 0.02
 
 local constants = {
-    cx,
-    cy,
-    1.0 / obj.w,
-    1.0 / obj.h,
+    center_x,
+    center_y,
+    obj.w,
+    obj.h,
 
     inner_radius,
     outer_radius,
     blur_max,
     curve,
 
-    (r / 255.0) * light_scale,
-    (g / 255.0) * light_scale,
-    (b / 255.0) * light_scale,
-    light_mode or 0,
+    r / 255.0,
+    g / 255.0,
+    b / 255.0,
+    light_scale,
 
-    chroma_val,
+    chroma_ratio,
+    chroma_min_blur,
+    hl_boost,
+    light_mode,
+
     aspect_x,
     aspect_y,
-    hl_boost
+    0.0,
+    0.0
 }
 
 obj.pixelshader("peripheral_blur_ps", "object", {"object"}, constants, "copy", "clamp")
