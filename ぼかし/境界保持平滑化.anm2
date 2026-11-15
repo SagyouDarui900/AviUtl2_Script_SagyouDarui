@@ -5,61 +5,65 @@
 --track@radius:範囲,0,100,10,1
 --track@threshold:しきい値,0,100,20,0.1
 --track@detail:ディテール,0,100,0,1
---track@angle:角度,-360,360,0,0.1
+--track@angle:角度,-45,45,0,0.1
 --track@rate:適用率,0,100,100,1
+
+if radius <= 0 or rate <= 0 or obj.w <= 0 or obj.h <= 0 then
+    return
+end
 
 --[[pixelshader@bilateral_pass1:
     Texture2D tex1 : register(t0);
     SamplerState samp1 : register(s0);
 
     cbuffer params1 : register(b0) {
-        float2 step_uv;            // xy: サンプリング方向ステップ
-        float  inv_two_sigma_s2;   // z : 空間重み係数
-        float  inv_two_sigma_r2;   // w : 色重み係数
-        float  rad;                // x : サンプル半径
-        float3 padding;            // yzw: パディング
+        float2 step_uv;          // xy: サンプリング方向ステップ（ストライド反映済み）
+        float  inv_two_sigma_s2; // z : 空間ガウシアン係数（ストライド二乗反映済み）
+        float  inv_two_sigma_r2; // w : 色・アルファガウシアン係数
+        float  steps;            // x : 片側サンプルステップ数
+        float3 padding;          // yzw: 16バイト境界パディング
     };
 
-    float3 rgb_to_yuv(float3 rgb) {
+    float3 srgb_to_linear(float3 c) {
+        c = saturate(c);
+        return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c));
+    }
+
+    float3 rgb_to_yuv_709(float3 rgb) {
         float y = dot(rgb, float3(0.2126, 0.7152, 0.0722));
-        float u = (rgb.b - y) * 0.564;
-        float v = (rgb.r - y) * 0.713;
+        float u = (rgb.b - y) * 0.5389;
+        float v = (rgb.r - y) * 0.6350;
         return float3(y, u, v);
     }
 
     float4 bilateral_pass1(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float4 center_col = tex1.SampleLevel(samp1, uv, 0);
-        
-        if (center_col.a <= 0.0001) {
-            return center_col;
-        }
+        float center_a = saturate(center_col.a);
+        float3 center_lin = (center_a > 0.0001) ? srgb_to_linear(center_col.rgb / center_a) : float3(0.0, 0.0, 0.0);
+        float3 center_yuv = rgb_to_yuv_709(center_lin);
 
-        float3 center_rgb = center_col.rgb / center_col.a;
-        float3 center_yuv = rgb_to_yuv(center_rgb);
-
-        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-        float sum_weight = 0.0;
-        int i_rad = (int)rad;
+        // 中心画素 (i == 0, 重み = 1.0) を初期値として線形プリマルチ空間で累積
+        float4 sum = float4(center_lin * center_a, center_a);
+        float sum_weight = 1.0;
+        int i_steps = (int)round(steps);
 
         [loop]
-        for (int i = -i_rad; i <= i_rad; i++) {
+        for (int i = -i_steps; i <= i_steps; i++) {
+            if (i == 0) continue;
+
             float2 offset = step_uv * float(i);
             float4 col = tex1.SampleLevel(samp1, uv + offset, 0);
-            
-            // 完全透明ピクセルはサンプリング対象外
-            if (col.a <= 0.0001) continue;
-
-            float3 sample_rgb = col.rgb / col.a;
-            float3 sample_yuv = rgb_to_yuv(sample_rgb);
+            float a = saturate(col.a);
+            float3 sample_lin = (a > 0.0001) ? srgb_to_linear(col.rgb / a) : float3(0.0, 0.0, 0.0);
+            float3 sample_yuv = rgb_to_yuv_709(sample_lin);
 
             float3 diff_yuv = sample_yuv - center_yuv;
-            float diff_a = col.a - center_col.a;
+            float diff_a = a - center_a;
             float dist_color2 = diff_yuv.x * diff_yuv.x * 2.0 + dot(diff_yuv.yz, diff_yuv.yz) + diff_a * diff_a;
 
-            // アルファ加重平均によるエッジの染み出し防止
-            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2) * col.a;
+            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2);
 
-            sum += col * w;
+            sum += float4(sample_lin * a, a) * w;
             sum_weight += w;
         }
 
@@ -73,111 +77,122 @@
     SamplerState samp2 : register(s0);
 
     cbuffer params2 : register(b0) {
-        float2 step_uv;            // xy: サンプリング方向ステップ
-        float  inv_two_sigma_s2;   // z : 空間重み係数
-        float  inv_two_sigma_r2;   // w : 色重み係数
-        float  rad;                // x : サンプル半径
-        float  rate;               // y : 適用率
-        float  detail_boost;       // z : ディテール強調度
-        float  padding;            // w : パディング
+        float2 step_uv;          // xy: サンプリング方向ステップ（ストライド反映済み）
+        float  inv_two_sigma_s2; // z : 空間ガウシアン係数（ストライド二乗反映済み）
+        float  inv_two_sigma_r2; // w : 色・アルファガウシアン係数
+        float  steps;            // x : 片側サンプルステップ数
+        float  rate;             // y : 適用率 (0.0〜1.0)
+        float  detail_boost;     // z : ディテール強調度
+        float  padding;          // w : 16バイト境界パディング
     };
 
-    float3 rgb_to_yuv(float3 rgb) {
+    float3 srgb_to_linear(float3 c) {
+        c = saturate(c);
+        return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c));
+    }
+
+    float3 linear_to_srgb(float3 c) {
+        c = saturate(c);
+        return lerp(c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055, step(0.0031308, c));
+    }
+
+    float3 rgb_to_yuv_709(float3 rgb) {
         float y = dot(rgb, float3(0.2126, 0.7152, 0.0722));
-        float u = (rgb.b - y) * 0.564;
-        float v = (rgb.r - y) * 0.713;
+        float u = (rgb.b - y) * 0.5389;
+        float v = (rgb.r - y) * 0.6350;
         return float3(y, u, v);
     }
 
     float4 bilateral_pass2(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-        float4 orig_col = tex_orig.SampleLevel(samp2, uv, 0);
+        float4 center_temp = tex_temp.SampleLevel(samp2, uv, 0);
+        float center_a = saturate(center_temp.a);
+        float3 center_lin = (center_a > 0.0001) ? saturate(center_temp.rgb / center_a) : float3(0.0, 0.0, 0.0);
+        float3 center_yuv = rgb_to_yuv_709(center_lin);
 
-        if (orig_col.a <= 0.0001) {
-            return orig_col;
-        }
-
-        float3 orig_rgb = orig_col.rgb / orig_col.a;
-        float3 orig_yuv = rgb_to_yuv(orig_rgb);
-
-        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-        float sum_weight = 0.0;
-        int i_rad = (int)rad;
+        // 中心画素 (i == 0, 重み = 1.0) を初期値として累積
+        float4 sum = float4(center_lin * center_a, center_a);
+        float sum_weight = 1.0;
+        int i_steps = (int)round(steps);
 
         [loop]
-        for (int i = -i_rad; i <= i_rad; i++) {
-            float2 offset = step_uv * float(i);
-            float4 col = tex_temp.SampleLevel(samp2, uv + offset, 0);
-            float4 col_orig_sample = tex_orig.SampleLevel(samp2, uv + offset, 0);
+        for (int i = -i_steps; i <= i_steps; i++) {
+            if (i == 0) continue;
 
-            if (col_orig_sample.a <= 0.0001) continue;
+            float2 sample_uv = uv + step_uv * float(i);
+            float4 col_temp = tex_temp.SampleLevel(samp2, sample_uv, 0);
+            float a = saturate(col_temp.a);
+            float3 sample_lin = (a > 0.0001) ? saturate(col_temp.rgb / a) : float3(0.0, 0.0, 0.0);
+            float3 sample_yuv = rgb_to_yuv_709(sample_lin);
 
-            float3 sample_rgb = col_orig_sample.rgb / col_orig_sample.a;
-            float3 sample_yuv = rgb_to_yuv(sample_rgb);
-
-            float3 diff_yuv = sample_yuv - orig_yuv;
-            float diff_a = col_orig_sample.a - orig_col.a;
+            float3 diff_yuv = sample_yuv - center_yuv;
+            float diff_a = a - center_a;
             float dist_color2 = diff_yuv.x * diff_yuv.x * 2.0 + dot(diff_yuv.yz, diff_yuv.yz) + diff_a * diff_a;
 
-            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2) * col_orig_sample.a;
+            float w = exp(float(i * i) * inv_two_sigma_s2 + dist_color2 * inv_two_sigma_r2);
 
-            sum += col * w;
+            sum += float4(sample_lin * a, a) * w;
             sum_weight += w;
         }
 
-        float4 blurred_col = sum / max(sum_weight, 0.00001);
+        float4 blurred_lin_premul = sum / max(sum_weight, 0.00001);
+        float out_a = saturate(blurred_lin_premul.a);
+        float3 blurred_lin = (out_a > 0.0001) ? saturate(blurred_lin_premul.rgb / out_a) : float3(0.0, 0.0, 0.0);
 
-        // ディテール抽出およびスマートシャープ処理
-        if (detail_boost > 0.0) {
-            float4 detail_comp = orig_col - blurred_col;
-            blurred_col += detail_comp * detail_boost;
-            // Premultiplied Alphaの制約 (0 <= RGB <= A <= 1) を崩さないようクランプ
-            blurred_col.a = saturate(blurred_col.a);
-            blurred_col.rgb = clamp(blurred_col.rgb, 0.0, blurred_col.a);
+        float4 orig_col = tex_orig.SampleLevel(samp2, uv, 0);
+        float orig_a = saturate(orig_col.a);
+
+        // ストレート線形RGB空間でディテール強調を適用（滲み出し外周の暗転を防ぐため orig_a で減衰）
+        if (detail_boost > 0.0 && orig_a > 0.0001) {
+            float3 orig_lin = srgb_to_linear(orig_col.rgb / orig_a);
+            blurred_lin = saturate(blurred_lin + (orig_lin - blurred_lin) * (detail_boost * orig_a));
         }
+
+        float3 out_srgb = linear_to_srgb(blurred_lin);
+        float4 blurred_col = float4(out_srgb * out_a, out_a);
 
         return lerp(orig_col, blurred_col, rate);
     }
 ]]
 
-local r = radius
 local th_norm = math.max(threshold * 0.01, 0.001)
 local rate_val = rate * 0.01
 local detail_val = detail * 0.02
 
-if r <= 0 or rate_val <= 0 or obj.w <= 0 or obj.h <= 0 then
-    return
-end
+-- 片側最大32ステップに制限し、大半径時はストライドを拡大して空間スケールを維持
+local max_steps = 32
+local steps = math.min(math.ceil(radius), max_steps)
+local stride = (steps > 0) and (radius / steps) or 1.0
 
-local sigma_s = math.max(r * 0.5, 0.001)
+local sigma_s = math.max(radius * 0.5, 0.001)
 local sigma_r = math.max(th_norm * 0.5, 0.001)
 
-local inv_two_sigma_s2 = -1.0 / (2.0 * sigma_s * sigma_s)
+local inv_two_sigma_s2 = -(stride * stride) / (2.0 * sigma_s * sigma_s)
 local inv_two_sigma_r2 = -1.0 / (2.0 * sigma_r * sigma_r)
-local rad_ceil = math.ceil(r)
 
 local a = math.rad(angle)
 local cos_a = math.cos(a)
 local sin_a = math.sin(a)
 
-local inv_w = 1.0 / obj.w
-local inv_h = 1.0 / obj.h
+local inv_w = stride / obj.w
+local inv_h = stride / obj.h
+
+-- 共有バッファの解像度を現在のオブジェクトサイズに初期化
+obj.clearbuffer("tempbuffer", obj.w, obj.h)
 
 local dx1 = cos_a * inv_w
 local dy1 = sin_a * inv_h
 
-obj.setoption("drawtarget", "tempbuffer", obj.w, obj.h)
-
 local consts1 = {
     dx1, dy1, inv_two_sigma_s2, inv_two_sigma_r2,
-    rad_ceil, 0.0, 0.0, 0.0
+    steps, 0.0, 0.0, 0.0
 }
-obj.pixelshader("bilateral_pass1", "tempbuffer", {"object"}, consts1, "copy", "clamp")
+obj.pixelshader("bilateral_pass1", "tempbuffer", { "object" }, consts1, "copy", "clip")
 
 local dx2 = -sin_a * inv_w
 local dy2 = cos_a * inv_h
 
 local consts2 = {
     dx2, dy2, inv_two_sigma_s2, inv_two_sigma_r2,
-    rad_ceil, rate_val, detail_val, 0.0
+    steps, rate_val, detail_val, 0.0
 }
-obj.pixelshader("bilateral_pass2", "object", {"tempbuffer", "object"}, consts2, "copy", "clamp")
+obj.pixelshader("bilateral_pass2", "object", { "tempbuffer", "object" }, consts2, "copy", "clip")
