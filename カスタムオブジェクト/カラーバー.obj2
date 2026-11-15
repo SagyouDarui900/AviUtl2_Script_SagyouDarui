@@ -1,0 +1,172 @@
+--label:カスタムオブジェクト
+--information:カラーバージェネレーター v3.0 (SMPTE / ARIB対応版)
+
+--group:サイズ設定
+--track@size_x:サイズX,1,16384,1280,1
+--track@size_y:サイズY,1,16384,720,1
+--trackgroup@size_x,size_y:解像度
+--select@aspect_ratio:アスペクト比=2,カスタム=0,4:3=1,16:9=2,16:10=3
+--hide@size_y:aspect_ratio~=0
+--group
+
+--group:カラーバー設定
+--select@bar_type:種類=0,SMPTE=0,ARIB=1
+--group
+
+do
+    local floor = math.floor
+    local max = math.max
+    local min = math.min
+
+    local max_w, max_h = obj.getinfo("image_max")
+    local sx = min(max_w, max(floor(size_x + 0.5), 1))
+    local sy
+    if aspect_ratio == 1 then
+        sy = floor(sx * (3.0 / 4.0) + 0.5)
+    elseif aspect_ratio == 2 then
+        sy = floor(sx * (9.0 / 16.0) + 0.5)
+    elseif aspect_ratio == 3 then
+        sy = floor(sx * (10.0 / 16.0) + 0.5)
+    else
+        sy = floor(size_y + 0.5)
+    end
+    sy = min(max_h, max(sy, 1))
+
+    if obj.alpha <= 0 then
+        obj.clearbuffer("object", sx, sy)
+        return
+    end
+
+    local half_w = sx * 0.5
+    local half_h = sy * 0.5
+
+    -- 色コード変換（標準描画で obj.alpha が乗算されるため不透明度 1.0 基準で生成）
+    local function get_norm_color(col_int)
+        local r, g, b = RGB(col_int)
+        return r / 255.0, g / 255.0, b / 255.0, 1.0
+    end
+
+    local block_rows = {}
+
+    if bar_type == 1 then
+        -- ARIB STD-B28 / TR-B28 マルチフォーマットカラーバー (4段構成)
+        local arib_y_ratios = { 0.0, 580.0 / 1080.0, 700.0 / 1080.0, 820.0 / 1080.0, 1.0 }
+
+        local arib_x_7bar = {
+            0.0,
+            240.0 / 1920.0,
+            (240.0 + 1440.0 * 1.0 / 7.0) / 1920.0,
+            (240.0 + 1440.0 * 2.0 / 7.0) / 1920.0,
+            (240.0 + 1440.0 * 3.0 / 7.0) / 1920.0,
+            (240.0 + 1440.0 * 4.0 / 7.0) / 1920.0,
+            (240.0 + 1440.0 * 5.0 / 7.0) / 1920.0,
+            (240.0 + 1440.0 * 6.0 / 7.0) / 1920.0,
+            1680.0 / 1920.0,
+            1.0
+        }
+
+        local arib_x_step = {
+            0.0,
+            240.0 / 1920.0,
+            528.0 / 1920.0,
+            816.0 / 1920.0,
+            1104.0 / 1920.0,
+            1392.0 / 1920.0,
+            1680.0 / 1920.0,
+            1.0
+        }
+
+        local arib_x_pluge = {
+            0.0,
+            240.0 / 1920.0,
+            624.0 / 1920.0,
+            720.0 / 1920.0,
+            768.0 / 1920.0,
+            816.0 / 1920.0,
+            864.0 / 1920.0,
+            912.0 / 1920.0,
+            960.0 / 1920.0,
+            1008.0 / 1920.0,
+            1296.0 / 1920.0,
+            1680.0 / 1920.0,
+            1.0
+        }
+
+        local arib_cols_row1 = { 0x666666, 0xc0c0c0, 0xc0c000, 0x00c0c0, 0x00c000, 0xc000c0, 0xc00000, 0x0000c0, 0x666666 }
+        local arib_cols_row2 = { 0xffffff, 0x00ffff, 0xc0c000, 0xffffff, 0xffffff, 0xffffff, 0x0000c0, 0xffff00, 0xffffff }
+        local arib_cols_row3 = { 0x000000, 0x000000, 0x404040, 0x808080, 0xc0c0c0, 0xffffff, 0x000000 }
+        -- PLUGE信号 (-2% / 0% / +2% / 0% / +4%) はフルレンジ8bit RGBでは黒レベル以下が 0x000000 にクランプされる
+        local arib_cols_row4 = {
+            0x262626, 0xffffff, 0x000000, 0x000000, 0x000000,
+            0x050505, 0x000000, 0x0a0a0a, 0x000000, 0x000000,
+            0x262626, 0x262626
+        }
+
+        block_rows = {
+            { y0 = arib_y_ratios[1], y1 = arib_y_ratios[2], x_ratios = arib_x_7bar,  colors = arib_cols_row1 },
+            { y0 = arib_y_ratios[2], y1 = arib_y_ratios[3], x_ratios = arib_x_7bar,  colors = arib_cols_row2 },
+            { y0 = arib_y_ratios[3], y1 = arib_y_ratios[4], x_ratios = arib_x_step,  colors = arib_cols_row3 },
+            { y0 = arib_y_ratios[4], y1 = arib_y_ratios[5], x_ratios = arib_x_pluge, colors = arib_cols_row4 }
+        }
+    else
+        -- SMPTE カラーバー (3段構成)
+        local smpte_y_ratios = { 0.0, 740.0 / 1080.0, 800.0 / 1080.0, 1.0 }
+
+        local smpte_x_top = { 0.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0, 1.0 }
+        local smpte_x_mid = { 0.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0, 1.0 }
+        local smpte_x_bot = {
+            0.0,
+            384.0 / 1920.0,
+            768.0 / 1920.0,
+            1152.0 / 1920.0,
+            1396.0 / 1920.0,
+            1490.0 / 1920.0,
+            1584.0 / 1920.0,
+            1678.0 / 1920.0,
+            1.0
+        }
+
+        local smpte_cols_top = { 0xc0c0c0, 0xc0c000, 0x00c0c0, 0x00c000, 0xc000c0, 0xc00000, 0x0000c0 }
+        local smpte_cols_mid = { 0x0000c0, 0x131313, 0xc000c0, 0x131313, 0x00c0c0, 0x131313, 0xc0c0c0 }
+        local smpte_cols_bot = { 0x00214c, 0xffffff, 0x32006a, 0x131313, 0x090909, 0x131313, 0x1d1d1d, 0x131313 }
+
+        block_rows = {
+            { y0 = smpte_y_ratios[1], y1 = smpte_y_ratios[2], x_ratios = smpte_x_top, colors = smpte_cols_top },
+            { y0 = smpte_y_ratios[2], y1 = smpte_y_ratios[3], x_ratios = smpte_x_mid, colors = smpte_cols_mid },
+            { y0 = smpte_y_ratios[3], y1 = smpte_y_ratios[4], x_ratios = smpte_x_bot, colors = smpte_cols_bot }
+        }
+    end
+
+    local vertices = {}
+    local v_idx = 1
+
+    for row = 1, #block_rows do
+        local row_info = block_rows[row]
+        local y0 = row_info.y0 * sy - half_h
+        local y1 = row_info.y1 * sy - half_h
+        local x_r = row_info.x_ratios
+        local cols = row_info.colors
+
+        for col = 1, #cols do
+            local x0 = x_r[col] * sx - half_w
+            local x1 = x_r[col + 1] * sx - half_w
+            local rf, gf, bf, af = get_norm_color(cols[col])
+
+            vertices[v_idx]     = { x0, y0, 0, rf, gf, bf, af }
+            vertices[v_idx + 1] = { x1, y0, 0, rf, gf, bf, af }
+            vertices[v_idx + 2] = { x1, y1, 0, rf, gf, bf, af }
+            vertices[v_idx + 3] = { x0, y1, 0, rf, gf, bf, af }
+            v_idx = v_idx + 4
+        end
+    end
+
+    obj.setoption("drawtarget", "tempbuffer", sx, sy)
+    obj.setoption("culling", 0)
+
+    if #vertices > 0 then
+        obj.drawpoly(vertices, 4)
+    end
+
+    obj.setoption("drawtarget", "framebuffer")
+    obj.copybuffer("object", "tempbuffer")
+end

@@ -1,0 +1,196 @@
+--label:カスタムオブジェクト
+--information:CD回折ディスク v2.0
+
+--track@size:ディスクサイズ,10,4000,500,1
+--track@hole_size:内径比率,5,40,12.5,0.1
+--track@loop_sec:ループ周期(秒),0.1,60,4,0.1
+--track@light_angle:光源の角度,-180,180,0,0.1
+
+--group:光学・回折設定,true
+--color@base_col:基底色,0xd0d8e0
+--track@specular:ハイライト強度,0,200,100,1
+--track@rainbow_int:回折の強さ,0,200,100,1
+--track@rainbow_width:虹の広がり,10,200,100,1
+--track@track_detail:トラック溝の質感,0,200,100,1
+--group
+
+--group:ディスク造形・質感,false
+--track@hub_opacity:透明部の濃さ,0,100,25,1
+--track@bevel_int:段差・縁の陰影,0,200,100,1
+--group
+
+--[[pixelshader@ps_cd_diffraction:
+cbuffer constant0 : register(b0) {
+    float hole_ratio;
+    float loop_sec;
+    float time_val;
+    float light_rad;
+
+    float specular;
+    float rainbow_int;
+    float rainbow_width;
+    float track_detail;
+
+    float base_r;
+    float base_g;
+    float base_b;
+    float hub_opacity;
+
+    float bevel_int;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+float3 spectral_color(float t) {
+    return saturate(0.5 + 0.5 * cos(6.2831853 * (t + float3(0.0, 0.333333, 0.666667))));
+}
+
+float4 ps_cd_diffraction(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 p = uv - 0.5;
+    float r = length(p);
+    float theta = atan2(p.y, p.x);
+
+    // ディスク各層の同心円半径（内径比率に連動し破綻しない比率を維持）
+    float r_outer = 0.488;
+    float r_hole = 0.5 * hole_ratio;
+    float r_data_out = 0.472;
+    float r_data_in = clamp(r_hole * 2.85, 0.13, r_data_out - 0.05);
+    float r_hub = lerp(r_hole, r_data_in, 0.42);
+    float r_stack = lerp(r_hole, r_data_in, 0.78);
+    float r_mirror_in = lerp(r_hole, r_data_in, 0.90);
+
+    float aa = max(fwidth(r), 1e-6);
+
+    float alpha_outer = 1.0 - smoothstep(r_outer - aa, r_outer + aa, r);
+    float alpha_hole = smoothstep(r_hole - aa, r_hole + aa, r);
+    float disk_alpha = alpha_outer * alpha_hole;
+
+    if (disk_alpha <= 0.0001) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    float phase = ((loop_sec > 0.0) ? (frac(time_val / loop_sec) * 6.2831853) : 0.0) + light_rad;
+    float3 base = float3(base_r, base_g, base_b);
+
+    float rel_angle = theta - phase;
+    float u = sin(rel_angle);
+    float abs_u = abs(u);
+    float u2 = sin(rel_angle + 1.5707963);
+
+    // 異方性スペキュラ反射（主ハイライト・広角金属グロス・直交サブハイライト）
+    float spec_scale = specular * 0.01;
+    float spec_main = pow(max(saturate(1.0 - abs_u * 2.2), 0.0), 24.0) * 0.85 * spec_scale;
+    float spec_broad = pow(max(saturate(1.0 - abs_u * 1.25), 0.0), 5.0) * 0.22 * spec_scale;
+    float spec_sub = pow(max(saturate(1.0 - abs(u2) * 2.4), 0.0), 32.0) * 0.28 * spec_scale;
+    float total_spec = spec_main + spec_broad + spec_sub;
+
+    // 1次回折（主スペクトル）と2次回折（副スペクトル）による多層虹帯
+    float width_factor = max(0.1, rainbow_width * 0.01);
+    float disp1 = (abs_u * 2.2 - r * 0.65) / width_factor;
+    float disp2 = (abs_u * 4.1 + r * 0.90) / width_factor;
+    float3 rainbow1 = spectral_color(disp1);
+    float3 rainbow2 = spectral_color(disp2);
+
+    float mask1 = pow(max(saturate(1.0 - abs(abs_u - 0.38) * 2.1), 0.0), 2.6);
+    float mask2 = pow(max(saturate(1.0 - abs(abs_u - 0.76) * 2.6), 0.0), 3.4) * 0.55;
+    float3 rainbow_mix = (rainbow1 * mask1 + rainbow2 * mask2) / max(mask1 + mask2, 1e-4);
+    float diff_strength = saturate(mask1 + mask2) * (rainbow_int * 0.0085);
+
+    // 内周ミラーバンド（鏡面帯）では回折を抑える
+    float mirror_mask = smoothstep(r_mirror_in - aa, r_mirror_in + aa, r) * (1.0 - smoothstep(r_data_in - aa, r_data_in + aa, r));
+    float active_diff = saturate(diff_strength * (1.0 - mirror_mask * 0.85));
+
+    // 微細ピットトラック（同心円グルーヴ）と放射状ヘアラインの質感変調（モアレ抑制付き）
+    float groove_coord = r * 720.0;
+    float groove_fw = fwidth(groove_coord);
+    float groove_fade = saturate(1.0 - (groove_fw - 0.35) * 1.5);
+    float groove_wave = sin(groove_coord * 6.2831853) * 0.5 + 0.5;
+    float groove_mod = lerp(1.0, 0.88 + 0.24 * groove_wave, groove_fade * saturate(track_detail * 0.01) * (1.0 - mirror_mask));
+    float radial_grain = 0.97 + 0.03 * sin(theta * 96.0 + r * 40.0);
+
+    float3 data_col = lerp(base, rainbow_mix, active_diff) * radial_grain * groove_mod;
+    data_col += float3(total_spec, total_spec * 0.99, total_spec * 1.02);
+
+    // 外周エッジのフレネル光沢
+    float fresnel = smoothstep(r_data_out - 0.04, r_data_out, r) * 0.08 * spec_scale;
+    data_col += float3(fresnel, fresnel, fresnel);
+
+    // 透明ポリカーボネート部（クランプハブ段差・スタッキングリングの立体ベベル）
+    float bev = bevel_int * 0.01;
+    float hub_groove = 1.0 - smoothstep(0.0012 - aa, 0.0012 + aa, abs(r - r_hub));
+    float stack_band = 1.0 - smoothstep(0.0022 - aa, 0.0022 + aa, abs(r - r_stack));
+    float stack_bevel = smoothstep(-0.0025, 0.0025, r - r_stack) * stack_band;
+
+    float hub_a_base = hub_opacity * 0.01;
+    float3 poly_tint = lerp(float3(0.86, 0.91, 0.97), base, 0.35);
+    float3 plastic_col = poly_tint * (0.28 + hub_groove * 0.18 * bev + stack_band * 0.28 * bev);
+    plastic_col += float3(1.0, 1.0, 1.0) * ((stack_bevel - 0.5) * 0.25 * bev + (spec_main * 0.45 + spec_broad * 0.25));
+    float plastic_alpha = saturate(hub_a_base + (hub_groove * 0.14 + stack_band * 0.26) * bev + spec_main * 0.18);
+
+    // 記録面・内周ハブ・外周リムの合成
+    float mask_inner = 1.0 - smoothstep(r_mirror_in - aa, r_mirror_in + aa, r);
+    float mask_outer_edge = smoothstep(r_data_out - aa, r_data_out + aa, r);
+
+    float3 col = lerp(data_col, plastic_col, mask_inner);
+    col = lerp(col, plastic_col * 0.85, mask_outer_edge);
+
+    float final_alpha = lerp(disk_alpha, plastic_alpha * disk_alpha, mask_inner);
+    final_alpha = lerp(final_alpha, saturate(hub_a_base + 0.12 + spec_main * 0.15) * disk_alpha, mask_outer_edge);
+
+    // 記録面境界の暗線と内外周エッジの屈折リムハイライト
+    float border_data_in = 1.0 - smoothstep(0.0008 - aa, 0.0008 + aa, abs(r - r_data_in));
+    float border_data_out = 1.0 - smoothstep(0.0010 - aa, 0.0010 + aa, abs(r - r_data_out));
+    float rim_inner = 1.0 - smoothstep(0.0015 - aa, 0.0015 + aa, abs(r - r_hole));
+    float rim_outer = 1.0 - smoothstep(0.0015 - aa, 0.0015 + aa, abs(r - r_outer));
+
+    col *= 1.0 - (border_data_in * 0.18 + border_data_out * 0.22) * bev;
+    col += float3(0.95, 0.98, 1.0) * (rim_inner * 0.22 + rim_outer * 0.28) * bev;
+
+    // Premultiplied Alpha 出力
+    col = saturate(col);
+    return float4(col * final_alpha, final_alpha);
+}
+]]
+
+do
+    local max_w, max_h = obj.getinfo("image_max")
+    local max_size = math.min(max_w, max_h)
+    local size_val = math.min(max_size, math.max(1, math.floor(size + 0.5)))
+
+    obj.clearbuffer("object", size_val, size_val)
+
+    local base_r, base_g, base_b = RGB(base_col)
+    base_r = base_r / 255.0
+    base_g = base_g / 255.0
+    base_b = base_b / 255.0
+
+    local time_val = obj.time
+    if loop_sec > 0.0 then
+        time_val = time_val % loop_sec
+    end
+
+    local constants = {
+        hole_size / 100.0,
+        loop_sec,
+        time_val,
+        math.rad(light_angle),
+
+        specular,
+        rainbow_int,
+        rainbow_width,
+        track_detail,
+
+        base_r,
+        base_g,
+        base_b,
+        hub_opacity,
+
+        bevel_int,
+        0.0,
+        0.0,
+        0.0
+    }
+
+    obj.pixelshader("ps_cd_diffraction", "object", {}, constants, "copy", "clamp")
+end

@@ -1,0 +1,405 @@
+--label:カスタムオブジェクト
+--information:紙吹雪_sd
+
+--track@count:個数,1,2000,100,1
+--track@density:分布密度,1,200,100,1
+--track@move_dist:移動範囲,100,5000,1000,1
+--track@wind_angle:風の角度,0,360,0,1
+--track@wind_pitch:風の傾き,-90,90,0,1
+--track@speed:移動速度,1,1000,20,1
+--track@p_size:個別サイズ,1,800,25,1
+--track@seed:シード値,0,10000,0,1
+--check@show_anchor:基準点の表示,0
+--value@kmpos:基準点,{-150, 100, 0, 150, 100, 0}
+
+--group:移動・物理設定,false
+--track@speed_err:速度誤差,0,100,20,1
+--track@accel:加速度,1,500,100,1
+--track@sway:ひらひら揺れ,0,200,30,1
+--track@size_rand:サイズ変動率,0,200,30,1
+--track@flicker:チラつき,0,100,0,1
+--check@start_fade:始点をフェードイン,0
+--check@end_fade:終点をフェードアウト,1
+--group
+
+--group:立体形状・質感,false
+--track@curl:立体たわみ,0,100,20,1
+--track@twist:ねじれ度,0,100,15,1
+--track@light_int:陰影強度,0,100,30,1
+--track@back_dark:裏面の暗さ,0,100,20,1
+--group
+
+--group:外観・色彩設定,false
+--select@img_mode:描画モード=0,図形=0,パターン画像=1,画像+カラー乗算=2
+--select@fig_type:基本図形=1,円=0,四角形=1,三角形=2,五角形=3,六角形=4,星型=5
+--check@fig_random:図形ランダム,0
+--color@base_color:基本色,0xff3366
+--track@color_change:粒子間の色変化,0,360,60,1
+--check@shadow_enable:影を表示,0
+--file@file1:画像1
+--file@file2:画像2
+--file@file3:画像3
+--group
+
+--hide@fig_type:img_mode>0||fig_random==1
+--hide@fig_random:img_mode>0
+--hide@base_color:img_mode==1
+--hide@color_change:img_mode==1
+--hide@file1:img_mode==0
+--hide@file2:img_mode==0
+--hide@file3:img_mode==0
+
+local function clamp01(x)
+    return math.max(0.0, math.min(1.0, x))
+end
+
+if show_anchor == 1 then
+    obj.setanchor("kmpos", 2, "xyz", "line")
+end
+
+local def_pos = { -150, 100, 0, 150, 100, 0 }
+local pos = (type(kmpos) == "table" and #kmpos >= 4) and kmpos or def_pos
+
+local function get_pt(idx)
+    local stride = (#pos >= 6) and 3 or 2
+    local base = (idx - 1) * stride
+    return pos[base + 1] or 0, pos[base + 2] or 0, (stride == 3 and pos[base + 3] or 0)
+end
+
+local sx1, sy1, sz1 = get_pt(1)
+local sx2, sy2, sz2 = get_pt(2)
+
+-- 風ベクトル（角度・傾き・移動範囲）
+local rad_yaw = math.rad(wind_angle)
+local rad_pitch = math.rad(wind_pitch)
+local wind_x = math.sin(rad_yaw) * math.cos(rad_pitch) * move_dist
+local wind_y = -math.sin(rad_pitch) * move_dist
+local wind_z = math.cos(rad_yaw) * math.cos(rad_pitch) * move_dist
+
+-- 密度による発生エリア幅調整
+local density_scale = density * 0.01
+local center_x = (sx1 + sx2) * 0.5
+local center_y = (sy1 + sy2) * 0.5
+local center_z = (sz1 + sz2) * 0.5
+
+local line_sx1 = center_x + (sx1 - center_x) * density_scale
+local line_sy1 = center_y + (sy1 - center_y) * density_scale
+local line_sz1 = center_z + (sz1 - center_z) * density_scale
+
+local line_sx2 = center_x + (sx2 - center_x) * density_scale
+local line_sy2 = center_y + (sy2 - center_y) * density_scale
+local line_sz2 = center_z + (sz2 - center_z) * density_scale
+
+local valid_files = {}
+if img_mode > 0 then
+    for _, f in ipairs({ file1, file2, file3 }) do
+        if f ~= nil and f ~= "" then
+            valid_files[#valid_files + 1] = f
+        end
+    end
+end
+local active_img_mode = img_mode
+if active_img_mode > 0 and #valid_files == 0 then
+    active_img_mode = 0
+end
+
+local base_h, base_s, base_v = HSV(base_color)
+
+local spd = speed * 10.0
+local life = math.max(1.0, move_dist) / math.max(1.0, spd)
+local num = math.max(1, math.floor(count + 0.5))
+local interval = life / num
+
+local raw_total = math.floor((obj.totaltime + life) / interval)
+local total_particles = math.min(50000, math.max(1, raw_total))
+
+-- 現在時刻で生存し得るインデックス区間のみに絞り込み
+local i_min = math.max(0, math.floor((obj.time - 1.0) / interval))
+local i_max = math.min(total_particles - 1, math.ceil((obj.time + life) / interval))
+
+local fig_names = { "円", "四角形", "三角形", "五角形", "六角形", "星型" }
+local fig_idx_fixed = math.min(6, math.max(1, math.floor(fig_type + 0.5) + 1))
+local curl_val = curl / 20.0
+local twist_val = twist / 20.0
+local accel_val = accel * 0.01
+local mesh_div = (curl > 0 or twist > 0) and 3 or 1
+local seed_offset = math.floor(seed + 0.5) * 1000
+local rspd_val = math.max(1, math.floor(speed_err + 0.5))
+
+-- Zソート用のカメラ視線情報取得
+local cam_mode = obj.getoption("camera_mode")
+local cam = nil
+local cam_fwd_x, cam_fwd_y, cam_fwd_z = 0.0, 0.0, 1.0
+local has_cam_dir = false
+if cam_mode ~= 0 then
+    cam = obj.getoption("camera_param")
+    if cam ~= nil then
+        local fx = cam.tx - cam.x
+        local fy = cam.ty - cam.y
+        local fz = cam.tz - cam.z
+        local flen = math.sqrt(fx * fx + fy * fy + fz * fz)
+        if flen > 1e-6 then
+            cam_fwd_x = fx / flen
+            cam_fwd_y = fy / flen
+            cam_fwd_z = fz / flen
+            has_cam_dir = true
+        end
+    end
+end
+
+local obj_pos_x = obj.x + obj.ox
+local obj_pos_y = obj.y + obj.oy
+local obj_pos_z = obj.z + obj.oz
+
+local function calc_depth(lx, ly, lz)
+    if cam ~= nil then
+        local dx = (obj_pos_x + lx) - cam.x
+        local dy = (obj_pos_y + ly) - cam.y
+        local dz = (obj_pos_z + lz) - cam.z
+        if has_cam_dir then
+            return dx * cam_fwd_x + dy * cam_fwd_y + dz * cam_fwd_z
+        else
+            return dx * dx + dy * dy + dz * dz
+        end
+    else
+        return lz
+    end
+end
+
+local main_render_queue = {}
+local shadow_render_queue = {}
+
+for i = i_min, i_max do
+    local particle_id = i + seed_offset
+    local rti = obj.rand(0, rspd_val, particle_id, 100) * 0.01
+    local life_dur = life + rti
+
+    local t_start = i * interval - life
+    local elapsed = obj.time - t_start
+    local txa = elapsed / life_dur
+
+    if txa >= 0.0 and txa <= 1.0 then
+        local tt = txa ^ accel_val
+        local srd = obj.rand(0, 1000, particle_id + 100, 1) * 0.001
+
+        local sxx = line_sx1 + (line_sx2 - line_sx1) * srd
+        local syy = line_sy1 + (line_sy2 - line_sy1) * srd
+        local szz = line_sz1 + (line_sz2 - line_sz1) * srd
+
+        local exx = sxx + wind_x
+        local eyy = syy + wind_y
+        local ezz = szz + wind_z
+
+        local t_sway = elapsed * 2.5 + particle_id * 0.15
+        local flutter_angle = math.sin(t_sway * 2.0) * 45.0
+        local slide_x = math.cos(t_sway * 1.2) * sway
+        local slide_z = math.sin(t_sway * 1.5) * (sway * 0.5)
+
+        local xx = sxx + (exx - sxx) * tt + slide_x
+        local yy = syy + (eyy - syy) * tt
+        local zz = szz + (ezz - szz) * tt + slide_z
+
+        local al1 = (end_fade == 0) and 1.0 or (1.0 - tt)
+        local al2 = (start_fade == 0) and 1.0 or (tt * 4.0)
+        local al3 = 1.0 - obj.rand(0, flicker, particle_id, 101) * 0.01
+        local alpha = clamp01(al1 * al2 * al3)
+
+        if alpha > 0.0 then
+            local rx = flutter_angle + obj.rand(-20, 20, particle_id, 7)
+            local ry = math.cos(t_sway * 1.0) * 45.0 + obj.rand(-180, 180, particle_id, 8)
+            local rz = math.sin(t_sway * 0.7) * 30.0 + obj.rand(-180, 180, particle_id, 9)
+
+            local rad_x, rad_y, rad_z = math.rad(rx), math.rad(ry), math.rad(rz)
+            local sin_x, cos_x = math.sin(rad_x), math.cos(rad_x)
+            local sin_y, cos_y = math.sin(rad_y), math.cos(rad_y)
+            local sin_z, cos_z = math.sin(rad_z), math.cos(rad_z)
+
+            local nx = sin_y
+            local ny = -sin_x * cos_y
+            local nz = cos_x * cos_y
+            local dot = nx * 0.3 + ny * 0.6 + nz * 0.7
+            local is_back = (nz < 0.0)
+
+            local light_factor = 1.0
+            if light_int > 0 then
+                local diff = math.abs(dot)
+                local li = light_int * 0.01
+                light_factor = (1.0 - li) + li * (0.5 + 0.5 * diff)
+            end
+            if is_back and back_dark > 0 then
+                light_factor = light_factor * (1.0 - back_dark * 0.01 * 0.3)
+            end
+
+            local particle_color = nil
+            if active_img_mode == 1 then
+                local lum = math.floor(clamp01(light_factor) * 255.0 + 0.5)
+                particle_color = RGB(lum, lum, lum)
+            else
+                local cur_h = (base_h + i * color_change + elapsed * 10.0) % 360.0
+                local cr, cg, cb = RGB(HSV(cur_h, base_s, base_v))
+                local final_r = math.floor(clamp01(cr * light_factor / 255.0) * 255.0 + 0.5)
+                local final_g = math.floor(clamp01(cg * light_factor / 255.0) * 255.0 + 0.5)
+                local final_b = math.floor(clamp01(cb * light_factor / 255.0) * 255.0 + 0.5)
+                particle_color = RGB(final_r, final_g, final_b)
+            end
+
+            local rsz = (obj.rand(-size_rand, size_rand, particle_id, 103) * 0.01) * p_size
+            local cur_sz = math.max(1.0, p_size + rsz)
+            local w, h = cur_sz, cur_sz
+
+            local fig_shape = (fig_random == 1) and fig_names[obj.rand(1, 6, particle_id, 10)] or fig_names[fig_idx_fixed]
+            local tex_path = nil
+            if active_img_mode > 0 then
+                local file_idx = obj.rand(1, #valid_files, particle_id, 12)
+                tex_path = valid_files[file_idx]
+            end
+
+            local p_verts = {}
+            local p_shadow_verts = {}
+
+            local shadow_dy = cur_sz * 0.4
+            local shadow_dz = cur_sz * 0.25
+
+            for row = 0, mesh_div - 1 do
+                for col = 0, mesh_div - 1 do
+                    local u0, u1 = col / mesh_div, (col + 1) / mesh_div
+                    local v0, v1 = row / mesh_div, (row + 1) / mesh_div
+
+                    local quad_coords = {
+                        { u = u0, v = v0 }, { u = u1, v = v0 },
+                        { u = u1, v = v1 }, { u = u0, v = v1 }
+                    }
+
+                    for _, pt in ipairs(quad_coords) do
+                        local nu = pt.u - 0.5
+                        local nv = pt.v - 0.5
+
+                        local bend_z = math.sin(nu * math.pi) * (curl_val * w * 0.1)
+                        local twist_z = (nu * nv) * (twist_val * w * 0.2)
+
+                        local px = nu * w
+                        local py = nv * h
+                        local pz = bend_z + twist_z
+
+                        local y1 = py * cos_x - pz * sin_x
+                        local z1 = py * sin_x + pz * cos_x
+
+                        local x2 = px * cos_y + z1 * sin_y
+                        local z2 = -px * sin_y + z1 * cos_y
+
+                        local x3 = x2 * cos_z - y1 * sin_z
+                        local y3 = x2 * sin_z + y1 * cos_z
+
+                        local final_x = xx + x3
+                        local final_y = yy + y3
+                        local final_z = zz + z3
+
+                        p_verts[#p_verts + 1] = { final_x, final_y, final_z, pt.u, pt.v }
+                        if shadow_enable == 1 then
+                            p_shadow_verts[#p_shadow_verts + 1] = { final_x, final_y + shadow_dy, final_z + shadow_dz, pt.u, pt.v }
+                        end
+                    end
+                end
+            end
+
+            local d_main = calc_depth(xx, yy, zz)
+            main_render_queue[#main_render_queue + 1] = {
+                depth = d_main,
+                draw_type = tex_path and "image" or "figure",
+                name = tex_path or fig_shape,
+                color = particle_color,
+                size = cur_sz,
+                alpha = alpha,
+                verts = p_verts
+            }
+
+            if shadow_enable == 1 then
+                local d_shadow = calc_depth(xx, yy + shadow_dy, zz + shadow_dz)
+                shadow_render_queue[#shadow_render_queue + 1] = {
+                    depth = d_shadow,
+                    draw_type = tex_path and "image" or "figure",
+                    name = tex_path or fig_shape,
+                    size = cur_sz,
+                    alpha = alpha * 0.35,
+                    verts = p_shadow_verts
+                }
+            end
+        end
+    end
+end
+
+local function sort_by_depth(a, b)
+    return a.depth > b.depth
+end
+
+-- 影描画パス
+if shadow_enable == 1 and #shadow_render_queue > 0 then
+    table.sort(shadow_render_queue, sort_by_depth)
+    local last_type = nil
+    local last_name = nil
+    local last_res = 0
+
+    for _, item in ipairs(shadow_render_queue) do
+        if item.draw_type == "image" then
+            if last_type ~= "image" or last_name ~= item.name then
+                obj.load("image", item.name)
+                obj.effect("単色化", "強さ", 100, "色", 0x000000, "輝度を保持する", 0)
+                last_type = "image"
+                last_name = item.name
+                last_res = 0
+            end
+        else
+            local fig_res = math.max(16, math.ceil(item.size))
+            if last_type ~= "figure" or last_name ~= item.name or last_res ~= fig_res then
+                obj.load("figure", item.name, 0x000000, fig_res)
+                last_type = "figure"
+                last_name = item.name
+                last_res = fig_res
+            end
+        end
+        obj.drawpoly(item.verts, 4, item.alpha)
+    end
+end
+
+-- 本体描画パス
+if #main_render_queue > 0 then
+    table.sort(main_render_queue, sort_by_depth)
+    local last_type = nil
+    local last_name = nil
+    local last_color = nil
+    local last_res = 0
+
+    for _, item in ipairs(main_render_queue) do
+        if item.draw_type == "image" then
+            local apply_tint = (active_img_mode == 2 or item.color ~= 0xffffff)
+            local key_color = apply_tint and item.color or 0xffffff
+            if last_type ~= "image" or last_name ~= item.name or last_color ~= key_color then
+                obj.load("image", item.name)
+                if apply_tint then
+                    obj.effect("単色化", "強さ", 100, "色", key_color, "輝度を保持する", 1)
+                end
+                last_type = "image"
+                last_name = item.name
+                last_color = key_color
+                last_res = 0
+            end
+        else
+            local fig_res = math.max(16, math.ceil(item.size))
+            if last_type ~= "figure" or last_name ~= item.name or last_color ~= item.color or last_res ~= fig_res then
+                obj.load("figure", item.name, item.color, fig_res)
+                last_type = "figure"
+                last_name = item.name
+                last_color = item.color
+                last_res = fig_res
+            end
+        end
+        obj.drawpoly(item.verts, 4, item.alpha)
+    end
+end
+
+-- 基準点のガイド表示
+if show_anchor == 1 then
+    obj.load("figure", "円", 0xff0000, 16)
+    obj.draw(line_sx1, line_sy1, line_sz1)
+    obj.draw(line_sx2, line_sy2, line_sz2)
+end

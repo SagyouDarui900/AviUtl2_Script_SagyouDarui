@@ -1,89 +1,91 @@
 --label:カスタムオブジェクト
---information:クロス・X図形
+--information:十字・X図形
 
---group:形状設定
+--group:形状設定,true
 --track@size:サイズ,1,4000,100,1
 --track@width:幅,1,4000,10,1
---track@line_width:線幅,0,1000,1000,1
+--check@is_fill:塗りつぶし,1
+--track@line_width:線幅,0,1000,10,1
 --track@edge_size:角丸サイズ,0,1000,0,1
 --check@is_x:Xにする,0
---group:
+--hide@line_width:is_fill==1
+--group
 
---group:カラー設定
+--group:カラー設定,true
 --color@col:色,0xffffff
---group:
+--group
 
 --[[pixelshader@universal_cross_ps:
 cbuffer Params : register(b0) {
-    float4 color;        // rgb: col * alpha, a: alpha
+    float4 color;        // rgb: straight color, a: 1.0
     float4 shape_param;  // x: size, y: width, z: line_width, w: radius
-    float4 render_param; // x: fill_mode, y: is_x, z: canvas_size, w: unused
+    float4 render_param; // x: is_fill, y: is_x, z: canvas_size, w: pad
 };
 
-float sdBox(float2 p, float2 b) {
-    float2 d = abs(p) - b;
-    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+static const float INV_SQRT2 = 0.70710678118;
+
+float sdCross(float2 p, float big, float small, float r) {
+    p = abs(p);
+    p = (p.y > p.x) ? p.yx : p.xy;
+    float2 q = p - float2(big, small);
+    float k = max(q.y, q.x);
+    float2 w = (k > 0.0) ? q : float2(small - p.x, -k);
+    float s = (k > 0.0) ? 1.0 : -1.0;
+    return s * length(max(w, 0.0)) - r;
 }
 
 float4 universal_cross_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float canvas_size = render_param.z;
     float2 p = (uv - 0.5) * canvas_size;
-    
-    // Xモード時の45度回転
+
     if (render_param.y > 0.5) {
-        float s = 0.70710678;
-        float c = 0.70710678;
-        p = float2(p.x * c - p.y * s, p.x * s + p.y * c);
+        p = float2(p.x * INV_SQRT2 - p.y * INV_SQRT2, p.x * INV_SQRT2 + p.y * INV_SQRT2);
     }
-    
-    float size_val = shape_param.x;
-    float width_val = shape_param.y;
+
     float radius_val = shape_param.w;
-    
-    float h_len = max(size_val * 0.5 - radius_val, 0.0);
-    float h_wid = max(width_val * 0.5 - radius_val, 0.0);
-    
-    float d1 = sdBox(p, float2(h_len, h_wid));
-    float d2 = sdBox(p, float2(h_wid, h_len));
-    float d = min(d1, d2) - radius_val;
-    
-    // 中抜き（線画）処理
+    float big = max(max(shape_param.x, shape_param.y) * 0.5 - radius_val, 0.0);
+    float small = max(min(shape_param.x, shape_param.y) * 0.5 - radius_val, 0.0);
+
+    float d = sdCross(p, big, small, radius_val);
+
     if (render_param.x < 0.5) {
         float lw = shape_param.z;
         d = abs(d + lw * 0.5) - lw * 0.5;
     }
-    
-    // ピクセル空間適応型アンチエイリアス
+
     float fw = max(fwidth(d), 0.0001);
     float alpha = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
-    
+
     return color * alpha;
 }
 ]]
 
-if size <= 0 or width <= 0 then
+if size <= 0 or width <= 0 or (is_fill == 0 and line_width <= 0) then
+    obj.clearbuffer("object", 1, 1)
     return
 end
 
-local min_dim = (size < width) and size or width
+local min_dim = math.min(size, width)
+local max_dim = math.max(size, width)
 local max_radius = min_dim * 0.5
-local radius = (edge_size < max_radius) and edge_size or max_radius
+local radius = math.min(edge_size, max_radius)
 
-local fill_mode = (line_width >= max_radius) and 1.0 or 0.0
+local fill_mode = (is_fill == 1) and 1.0 or 0.0
 local is_x_mode = (is_x == 1) and 1.0 or 0.0
 
--- 中抜き時の外側拡張分を含めた基本サイズの算出
-local outer_size = size + ((fill_mode < 0.5) and line_width or 0)
--- Xモード時の対角線長基準キャンバスサイズ計算
-local canvas_size = (is_x_mode > 0.5) and math.ceil(outer_size * 1.41421356 + 4) or math.ceil(outer_size + 4)
+local canvas_size = (is_x_mode > 0.5) and math.ceil(max_dim * 1.41421356 + 4) or math.ceil(max_dim + 4)
 
-local obj_alpha = obj.alpha
+local max_w, max_h = obj.getinfo("image_max")
+if max_w and max_w > 0 and max_h and max_h > 0 then
+    local max_canvas = math.min(max_w, max_h)
+    canvas_size = math.min(canvas_size, max_canvas)
+end
+
 local r, g, b = RGB(col)
-local c_r = (r / 255.0) * obj_alpha
-local c_g = (g / 255.0) * obj_alpha
-local c_b = (b / 255.0) * obj_alpha
+local c_r = r / 255.0
+local c_g = g / 255.0
+local c_b = b / 255.0
 
--- 描画バッファの確保と初期化
 obj.clearbuffer("object", canvas_size, canvas_size)
 
 obj.pixelshader(
@@ -91,7 +93,7 @@ obj.pixelshader(
     "object",
     {},
     {
-        c_r, c_g, c_b, obj_alpha,
+        c_r, c_g, c_b, 1.0,
         size, width, line_width, radius,
         fill_mode, is_x_mode, canvas_size, 0.0
     }

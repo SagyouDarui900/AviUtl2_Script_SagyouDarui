@@ -1,0 +1,504 @@
+--label:カスタムオブジェクト
+--select@shape_type:形状=0,三つ葉結び目=0,トーラス結び目=1,レムニスケート=2,リサジュー曲線=3,エピサイクロイド=4,ハイポサイクロイド=5,スーパーシェイプ=6
+
+--group:基本設定,true
+--track@size:サイズ,1,5000,300,1
+--track@line_width:線の太さ,0.1,200,4,0.1
+--check@scale_width:太さをサイズに連動,1
+--color@line_color:線の色,0xffffff
+--track@opacity:不透明度,0,100,100,0.1
+--select@billboard_mode:リボンの向き=0,常に正面（均一幅）=0,3D立体リボン=1
+--group
+
+--group:アニメーション,true
+--track@progress:描画割合,0,100,100,0.1
+--track@phase_offset:位相オフセット,-3600,3600,0,0.1
+--group
+
+--group@grp_torus:トーラスパラメータ,true
+--track@knot_p:結び目P,1,20,2,1
+--track@knot_q:結び目Q,1,20,3,1
+--trackgroup@knot_p,knot_q:トーラスパラメータ
+--group
+
+--group@grp_curve:曲線パラメータ,true
+--track@param_a:パラメータA,1,20,4,0.1
+--track@param_b:パラメータB,1,20,3,0.1
+--trackgroup@param_a,param_b:曲線パラメータ
+--group
+
+--group:詳細設定,false
+--track@resolution:分割数,32,5000,720,1
+--group
+
+--hide@grp_torus:shape_type~=1
+--hide@knot_p:shape_type~=1
+--hide@knot_q:shape_type~=1
+--hide@grp_curve:shape_type<3
+--hide@param_a:shape_type<3
+--hide@param_b:shape_type<3
+--hide@param_b:shape_type==4
+--hide@param_b:shape_type==5
+
+if progress <= 0 or resolution < 2 or opacity <= 0 or obj.alpha <= 0 or line_width <= 0 or size <= 0 then
+    return
+end
+
+local base_size = 300
+local effective_width = scale_width and (line_width * (size / base_size)) or line_width
+if effective_width <= 0 then
+    return
+end
+
+local pi2 = math.pi * 2
+local rad_offset = math.rad(phase_offset)
+local exact_points = resolution * (progress / 100)
+local int_points = math.floor(exact_points)
+
+local function eval_curve(t)
+    local x, y, z = 0, 0, 0
+
+    if shape_type == 0 then
+        -- 三つ葉結び目
+        x = (math.sin(t) + 2 * math.sin(2 * t)) / 3
+        y = (math.cos(t) - 2 * math.cos(2 * t)) / 3
+        z = (-math.sin(3 * t)) / 3
+    elseif shape_type == 1 then
+        -- トーラス結び目 (p, q)
+        local r = (math.cos(knot_q * t) + 2) / 3
+        x = r * math.cos(knot_p * t)
+        y = r * math.sin(knot_p * t)
+        z = (-math.sin(knot_q * t)) / 3
+    elseif shape_type == 2 then
+        -- レムニスケート
+        x = math.cos(t)
+        y = math.sin(2 * t) * 0.5
+        z = math.sin(t) * 0.2
+    elseif shape_type == 3 then
+        -- リサジュー曲線
+        x = math.sin(param_a * t)
+        y = math.sin(param_b * t)
+        z = math.cos((param_a + param_b) * 0.5 * t) * 0.2
+    elseif shape_type == 4 then
+        -- エピサイクロイド / カージオイド
+        local r_val = 1
+        local k_val = (param_a + r_val) / r_val
+        local scale_factor = param_a + 2 * r_val
+        x = ((param_a + r_val) * math.cos(t) - r_val * math.cos(k_val * t)) / scale_factor
+        y = ((param_a + r_val) * math.sin(t) - r_val * math.sin(k_val * t)) / scale_factor
+        z = math.sin(k_val * t) * 0.1
+    elseif shape_type == 5 then
+        -- ハイポサイクロイド / アステロイド
+        local a_val = math.max(param_a, 1.1)
+        local r_val = 1
+        local k_val = (a_val - r_val) / r_val
+        local scale_factor = math.max(a_val, 1)
+        x = ((a_val - r_val) * math.cos(t) + r_val * math.cos(k_val * t)) / scale_factor
+        y = ((a_val - r_val) * math.sin(t) - r_val * math.sin(k_val * t)) / scale_factor
+        z = math.cos(k_val * t) * 0.1
+    elseif shape_type == 6 then
+        -- スーパーシェイプ
+        local m = param_a
+        local n2 = param_b
+        local n3 = param_b
+        local part1 = math.abs(math.cos(m * t * 0.25)) ^ n2
+        local part2 = math.abs(math.sin(m * t * 0.25)) ^ n3
+        local denom = part1 + part2
+        local r_val = denom > 0.0000001 and (denom ^ -1) or 0
+        x = r_val * math.cos(t)
+        y = r_val * math.sin(t)
+        z = 0
+    end
+
+    return x * size, y * size, z * size
+end
+
+local px = {}
+local py = {}
+local pz = {}
+local n_pts = 0
+
+for i = 0, int_points do
+    local t = (i / resolution) * pi2 + rad_offset
+    n_pts = n_pts + 1
+    px[n_pts], py[n_pts], pz[n_pts] = eval_curve(t)
+end
+
+-- 小数部の終端点を補間追加してアニメーションを連続化
+local frac = exact_points - int_points
+if frac > 0.00001 and int_points < resolution then
+    local t_end = (exact_points / resolution) * pi2 + rad_offset
+    local ex, ey, ez = eval_curve(t_end)
+    local dx_f = ex - px[n_pts]
+    local dy_f = ey - py[n_pts]
+    local dz_f = ez - pz[n_pts]
+    if (dx_f * dx_f + dy_f * dy_f + dz_f * dz_f) > 0.000001 then
+        n_pts = n_pts + 1
+        px[n_pts], py[n_pts], pz[n_pts] = ex, ey, ez
+    end
+end
+
+if n_pts < 2 then
+    return
+end
+
+-- 始点と終点の距離から閉曲線を判定
+local dx_end = px[n_pts] - px[1]
+local dy_end = py[n_pts] - py[1]
+local dz_end = pz[n_pts] - pz[1]
+local is_closed = (dx_end * dx_end + dy_end * dy_end + dz_end * dz_end) < 0.0001
+
+if is_closed then
+    px[n_pts] = px[1]
+    py[n_pts] = py[1]
+    pz[n_pts] = pz[1]
+end
+
+-- 各セグメントの単位接線ベクトルを算出
+local seg_count = n_pts - 1
+local seg_tx = {}
+local seg_ty = {}
+local seg_tz = {}
+
+for i = 1, seg_count do
+    local dx = px[i + 1] - px[i]
+    local dy = py[i + 1] - py[i]
+    local dz = pz[i + 1] - pz[i]
+    local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    if len >= 0.000001 then
+        seg_tx[i] = dx / len
+        seg_ty[i] = dy / len
+        seg_tz[i] = dz / len
+    elseif i > 1 then
+        seg_tx[i] = seg_tx[i - 1]
+        seg_ty[i] = seg_ty[i - 1]
+        seg_tz[i] = seg_tz[i - 1]
+    else
+        seg_tx[i], seg_ty[i], seg_tz[i] = 1, 0, 0
+    end
+end
+
+local nx = {}
+local ny = {}
+local nz = {}
+
+if billboard_mode == 0 then
+    -- ローカル空間における視線方向ベクトルを算出
+    local vx, vy, vz = 0, 0, 1
+    local cam_mode = obj.getoption("camera_mode")
+    if cam_mode ~= 0 then
+        local cam = obj.getoption("camera_param")
+        if cam then
+            local wx = (obj.x + obj.ox) - cam.x
+            local wy = (obj.y + obj.oy) - cam.y
+            local wz = (obj.z + obj.oz) - cam.z
+            local wlen = math.sqrt(wx * wx + wy * wy + wz * wz)
+            if wlen >= 0.0001 then
+                vx = wx / wlen
+                vy = wy / wlen
+                vz = wz / wlen
+            end
+        end
+    end
+
+    -- オブジェクト回転の逆変換で視線ベクトルをローカル座標へ変換
+    local rx_rad = math.rad(obj.rx)
+    local ry_rad = math.rad(obj.ry)
+    local rz_rad = math.rad(obj.rz)
+    local cx, sx = math.cos(rx_rad), math.sin(rx_rad)
+    local cy, sy = math.cos(ry_rad), math.sin(ry_rad)
+    local cz, sz = math.cos(rz_rad), math.sin(rz_rad)
+
+    local x1 = vx * cz + vy * sz
+    local y1 = -vx * sz + vy * cz
+    local z1 = vz
+
+    local x2 = x1 * cy - z1 * sy
+    local y2 = y1
+    local z2 = x1 * sy + z1 * cy
+
+    local view_x = x2
+    local view_y = y2 * cx + z2 * sx
+    local view_z = -y2 * sx + z2 * cx
+
+    -- セグメントごとの視線直交法線
+    local seg_nx = {}
+    local seg_ny = {}
+    local seg_nz = {}
+
+    for i = 1, seg_count do
+        local mx = seg_ty[i] * view_z - seg_tz[i] * view_y
+        local my = seg_tz[i] * view_x - seg_tx[i] * view_z
+        local mz = seg_tx[i] * view_y - seg_ty[i] * view_x
+        local mlen = math.sqrt(mx * mx + my * my + mz * mz)
+
+        if mlen >= 0.00001 then
+            seg_nx[i] = mx / mlen
+            seg_ny[i] = my / mlen
+            seg_nz[i] = mz / mlen
+        elseif i > 1 then
+            seg_nx[i] = seg_nx[i - 1]
+            seg_ny[i] = seg_ny[i - 1]
+            seg_nz[i] = seg_nz[i - 1]
+        else
+            seg_nx[i], seg_ny[i], seg_nz[i] = 0, 1, 0
+        end
+    end
+
+    -- 頂点ごとのマイター法線（折れ曲がり部分の線幅を均一化）
+    for i = 1, n_pts do
+        local s_prev = i > 1 and (i - 1) or (is_closed and seg_count or 1)
+        local s_next = i <= seg_count and i or (is_closed and 1 or seg_count)
+
+        local ax = seg_nx[s_prev] + seg_nx[s_next]
+        local ay = seg_ny[s_prev] + seg_ny[s_next]
+        local az = seg_nz[s_prev] + seg_nz[s_next]
+        local alen = math.sqrt(ax * ax + ay * ay + az * az)
+
+        if alen >= 0.0001 then
+            local ux = ax / alen
+            local uy = ay / alen
+            local uz = az / alen
+            local dot = ux * seg_nx[s_next] + uy * seg_ny[s_next] + uz * seg_nz[s_next]
+            local miter_scale = 1.0 / math.max(dot, 0.55)
+            nx[i] = ux * miter_scale
+            ny[i] = uy * miter_scale
+            nz[i] = uz * miter_scale
+        else
+            nx[i] = seg_nx[s_next]
+            ny[i] = seg_ny[s_next]
+            nz[i] = seg_nz[s_next]
+        end
+    end
+else
+    -- 3D立体リボンモード（平行移動フレーム）
+    local ux, uy, uz = 0, 0, 1
+    if math.abs(seg_tz[1]) > 0.9 then
+        ux, uy, uz = 0, 1, 0
+    end
+
+    local nx0 = seg_ty[1] * uz - seg_tz[1] * uy
+    local ny0 = seg_tz[1] * ux - seg_tx[1] * uz
+    local nz0 = seg_tx[1] * uy - seg_ty[1] * ux
+    local nlen0 = math.sqrt(nx0 * nx0 + ny0 * ny0 + nz0 * nz0)
+
+    if nlen0 >= 0.000001 then
+        nx[1] = nx0 / nlen0
+        ny[1] = ny0 / nlen0
+        nz[1] = nz0 / nlen0
+    else
+        nx[1], ny[1], nz[1] = 0, 1, 0
+    end
+
+    for i = 2, n_pts do
+        local s_idx = i <= seg_count and i or seg_count
+        local prev_nx = nx[i - 1]
+        local prev_ny = ny[i - 1]
+        local prev_nz = nz[i - 1]
+        local cur_tx = seg_tx[s_idx]
+        local cur_ty = seg_ty[s_idx]
+        local cur_tz = seg_tz[s_idx]
+
+        local dot = prev_nx * cur_tx + prev_ny * cur_ty + prev_nz * cur_tz
+        local cur_nx = prev_nx - dot * cur_tx
+        local cur_ny = prev_ny - dot * cur_ty
+        local cur_nz = prev_nz - dot * cur_tz
+        local nlen = math.sqrt(cur_nx * cur_nx + cur_ny * cur_ny + cur_nz * cur_nz)
+
+        if nlen >= 0.000001 then
+            nx[i] = cur_nx / nlen
+            ny[i] = cur_ny / nlen
+            nz[i] = cur_nz / nlen
+        else
+            nx[i] = prev_nx
+            ny[i] = prev_ny
+            nz[i] = prev_nz
+        end
+    end
+
+    if is_closed and n_pts > 2 then
+        local cos_t = nx[n_pts] * nx[1] + ny[n_pts] * ny[1] + nz[n_pts] * nz[1]
+        local cx = ny[n_pts] * nz[1] - nz[n_pts] * ny[1]
+        local cy = nz[n_pts] * nx[1] - nx[n_pts] * nz[1]
+        local cz = nx[n_pts] * ny[1] - ny[n_pts] * nx[1]
+        local sin_t = seg_tx[1] * cx + seg_ty[1] * cy + seg_tz[1] * cz
+        local twist_angle = math.atan2(sin_t, cos_t)
+
+        if math.abs(twist_angle) > 0.000001 then
+            local inv_span = 1 / (n_pts - 1)
+            for i = 2, n_pts do
+                local s_idx = i <= seg_count and i or seg_count
+                local ang = twist_angle * ((i - 1) * inv_span)
+                local c = math.cos(ang)
+                local s = math.sin(ang)
+                local cur_nx, cur_ny, cur_nz = nx[i], ny[i], nz[i]
+                local cur_tx, cur_ty, cur_tz = seg_tx[s_idx], seg_ty[s_idx], seg_tz[s_idx]
+
+                local bx = cur_ty * cur_nz - cur_tz * cur_ny
+                local by = cur_tz * cur_nx - cur_tx * cur_nz
+                local bz = cur_tx * cur_ny - cur_ty * cur_nx
+
+                nx[i] = cur_nx * c + bx * s
+                ny[i] = cur_ny * c + by * s
+                nz[i] = cur_nz * c + bz * s
+            end
+        end
+    end
+end
+
+-- アンチエイリアス幅とプリマルチプライドアルファ色計算
+local aa_width = 2.0
+local half_w = effective_width * 0.5
+local inner_w = math.max(0, half_w - aa_width * 0.5)
+local outer_w = inner_w + aa_width
+
+local line_scale = 1.0
+if half_w < aa_width * 0.5 then
+    line_scale = half_w / (aa_width * 0.5)
+end
+
+local r8, g8, b8 = RGB(line_color)
+local base_a = (opacity / 100) * obj.alpha * line_scale
+local pr = (r8 / 255) * base_a
+local pg = (g8 / 255) * base_a
+local pb = (b8 / 255) * base_a
+local pa = base_a
+
+local vertices = {}
+local v_count = 0
+
+-- パス1: 中央本体帯
+if inner_w > 0 then
+    local p0_in_lx = px[1] + nx[1] * inner_w
+    local p0_in_ly = py[1] + ny[1] * inner_w
+    local p0_in_lz = pz[1] + nz[1] * inner_w
+    local p0_in_rx = px[1] - nx[1] * inner_w
+    local p0_in_ry = py[1] - ny[1] * inner_w
+    local p0_in_rz = pz[1] - nz[1] * inner_w
+
+    for i = 2, n_pts do
+        local p1_in_lx = px[i] + nx[i] * inner_w
+        local p1_in_ly = py[i] + ny[i] * inner_w
+        local p1_in_lz = pz[i] + nz[i] * inner_w
+        local p1_in_rx = px[i] - nx[i] * inner_w
+        local p1_in_ry = py[i] - ny[i] * inner_w
+        local p1_in_rz = pz[i] - nz[i] * inner_w
+
+        v_count = v_count + 1
+        vertices[v_count] = {
+            p0_in_lx, p0_in_ly, p0_in_lz,
+            p1_in_lx, p1_in_ly, p1_in_lz,
+            p1_in_rx, p1_in_ry, p1_in_rz,
+            p0_in_rx, p0_in_ry, p0_in_rz,
+            pr, pg, pb, pa,
+            pr, pg, pb, pa,
+            pr, pg, pb, pa,
+            pr, pg, pb, pa
+        }
+
+        p0_in_lx, p0_in_ly, p0_in_lz = p1_in_lx, p1_in_ly, p1_in_lz
+        p0_in_rx, p0_in_ry, p0_in_rz = p1_in_rx, p1_in_ry, p1_in_rz
+    end
+end
+
+-- パス2: 左右アンチエイリアス境界帯
+local p0_out_lx = px[1] + nx[1] * outer_w
+local p0_out_ly = py[1] + ny[1] * outer_w
+local p0_out_lz = pz[1] + nz[1] * outer_w
+local p0_in_lx = px[1] + nx[1] * inner_w
+local p0_in_ly = py[1] + ny[1] * inner_w
+local p0_in_lz = pz[1] + nz[1] * inner_w
+local p0_in_rx = px[1] - nx[1] * inner_w
+local p0_in_ry = py[1] - ny[1] * inner_w
+local p0_in_rz = pz[1] - nz[1] * inner_w
+local p0_out_rx = px[1] - nx[1] * outer_w
+local p0_out_ry = py[1] - ny[1] * outer_w
+local p0_out_rz = pz[1] - nz[1] * outer_w
+
+for i = 2, n_pts do
+    local p1_out_lx = px[i] + nx[i] * outer_w
+    local p1_out_ly = py[i] + ny[i] * outer_w
+    local p1_out_lz = pz[i] + nz[i] * outer_w
+    local p1_in_lx = px[i] + nx[i] * inner_w
+    local p1_in_ly = py[i] + ny[i] * inner_w
+    local p1_in_lz = pz[i] + nz[i] * inner_w
+    local p1_in_rx = px[i] - nx[i] * inner_w
+    local p1_in_ry = py[i] - ny[i] * inner_w
+    local p1_in_rz = pz[i] - nz[i] * inner_w
+    local p1_out_rx = px[i] - nx[i] * outer_w
+    local p1_out_ry = py[i] - ny[i] * outer_w
+    local p1_out_rz = pz[i] - nz[i] * outer_w
+
+    -- 左側アンチエイリアス境界帯
+    v_count = v_count + 1
+    vertices[v_count] = {
+        p0_out_lx, p0_out_ly, p0_out_lz,
+        p1_out_lx, p1_out_ly, p1_out_lz,
+        p1_in_lx,  p1_in_ly,  p1_in_lz,
+        p0_in_lx,  p0_in_ly,  p0_in_lz,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        pr, pg, pb, pa,
+        pr, pg, pb, pa
+    }
+
+    -- 右側アンチエイリアス境界帯
+    v_count = v_count + 1
+    vertices[v_count] = {
+        p0_in_rx,  p0_in_ry,  p0_in_rz,
+        p1_in_rx,  p1_in_ry,  p1_in_rz,
+        p1_out_rx, p1_out_ry, p1_out_rz,
+        p0_out_rx, p0_out_ry, p0_out_rz,
+        pr, pg, pb, pa,
+        pr, pg, pb, pa,
+        0, 0, 0, 0,
+        0, 0, 0, 0
+    }
+
+    p0_out_lx, p0_out_ly, p0_out_lz = p1_out_lx, p1_out_ly, p1_out_lz
+    p0_in_lx,  p0_in_ly,  p0_in_lz  = p1_in_lx,  p1_in_ly,  p1_in_lz
+    p0_in_rx,  p0_in_ry,  p0_in_rz  = p1_in_rx,  p1_in_ry,  p1_in_rz
+    p0_out_rx, p0_out_ry, p0_out_rz = p1_out_rx, p1_out_ry, p1_out_rz
+end
+
+-- パス3: 開曲線の始点・終点フェードキャップ
+if not is_closed then
+    local cap_len = aa_width * 0.5
+
+    -- 始点キャップ
+    local s_cx = px[1] - seg_tx[1] * cap_len
+    local s_cy = py[1] - seg_ty[1] * cap_len
+    local s_cz = pz[1] - seg_tz[1] * cap_len
+    v_count = v_count + 1
+    vertices[v_count] = {
+        s_cx + nx[1] * outer_w, s_cy + ny[1] * outer_w, s_cz + nz[1] * outer_w,
+        px[1] + nx[1] * outer_w, py[1] + ny[1] * outer_w, pz[1] + nz[1] * outer_w,
+        px[1] - nx[1] * outer_w, py[1] - ny[1] * outer_w, pz[1] - nz[1] * outer_w,
+        s_cx - nx[1] * outer_w, s_cy - ny[1] * outer_w, s_cz - nz[1] * outer_w,
+        0, 0, 0, 0,
+        pr * 0.5, pg * 0.5, pb * 0.5, pa * 0.5,
+        pr * 0.5, pg * 0.5, pb * 0.5, pa * 0.5,
+        0, 0, 0, 0
+    }
+
+    -- 終点キャップ
+    local e_cx = px[n_pts] + seg_tx[seg_count] * cap_len
+    local e_cy = py[n_pts] + seg_ty[seg_count] * cap_len
+    local e_cz = pz[n_pts] + seg_tz[seg_count] * cap_len
+    v_count = v_count + 1
+    vertices[v_count] = {
+        px[n_pts] + nx[n_pts] * outer_w, py[n_pts] + ny[n_pts] * outer_w, pz[n_pts] + nz[n_pts] * outer_w,
+        e_cx + nx[n_pts] * outer_w, e_cy + ny[n_pts] * outer_w, e_cz + nz[n_pts] * outer_w,
+        e_cx - nx[n_pts] * outer_w, e_cy - ny[n_pts] * outer_w, e_cz - nz[n_pts] * outer_w,
+        px[n_pts] - nx[n_pts] * outer_w, py[n_pts] - ny[n_pts] * outer_w, pz[n_pts] - nz[n_pts] * outer_w,
+        pr * 0.5, pg * 0.5, pb * 0.5, pa * 0.5,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        pr * 0.5, pg * 0.5, pb * 0.5, pa * 0.5
+    }
+end
+
+if v_count > 0 then
+    obj.drawpoly(vertices)
+end
