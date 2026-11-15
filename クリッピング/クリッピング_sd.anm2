@@ -1,15 +1,15 @@
 --label:クリッピング
---information:クリッピング
+--information:各方向を角度付きでクリッピングします
 --filter
 
 --group:基本設定,true
 --check@invert_clip:クリッピングを反転,0
---group:
+--group
 
 --group:上方向設定,true
 --track@clip_top:上::クリッピング(%),0.0,100.0,0.0,0.1
 --track@angle_top:上角度::角度,-360.0,360.0,0.0,0.1
---group:
+--group
 
 --group:下方向設定,true
 --check@sync_tb:上下同期(下を上に),0
@@ -17,12 +17,12 @@
 --track@angle_bottom:下角度::角度,-360.0,360.0,0.0,0.1
 --hide@clip_bottom:sync_tb==1
 --hide@angle_bottom:sync_tb==1
---group:
+--group
 
 --group:左方向設定,true
 --track@clip_left:左::クリッピング(%),0.0,100.0,0.0,0.1
 --track@angle_left:左角度::角度,-360.0,360.0,0.0,0.1
---group:
+--group
 
 --group:右方向設定,true
 --check@sync_lr:左右同期(右を左に),0
@@ -30,57 +30,55 @@
 --track@angle_right:右角度::角度,-360.0,360.0,0.0,0.1
 --hide@clip_right:sync_lr==1
 --hide@angle_right:sync_lr==1
---group:
+--group
 
-if obj.w <= 0 or obj.h <= 0 then
+local obj_w, obj_h = obj.w, obj.h
+if obj_w <= 0 or obj_h <= 0 then
     return
 end
 
-local c_top = clip_top
-local a_top = angle_top
-local c_bottom = (sync_tb == 1) and c_top or clip_bottom
-local a_bottom = (sync_tb == 1) and a_top or angle_bottom
-
-local c_left = clip_left
-local a_left = angle_left
-local c_right = (sync_lr == 1) and c_left or clip_right
-local a_right = (sync_lr == 1) and a_left or angle_right
+local c_bottom = (sync_tb == 1) and clip_top or clip_bottom
+local a_bottom = (sync_tb == 1) and angle_top or angle_bottom
+local c_right = (sync_lr == 1) and clip_left or clip_right
+local a_right = (sync_lr == 1) and angle_left or angle_right
 
 local function calc_plane(clip_pct, angle_deg, dir)
+    if clip_pct <= 0.0 then
+        return 0.0, 0.0, 0.0, 0.0
+    end
+
     local rad = math.rad(angle_deg)
     local sin_val = math.sin(rad)
     local cos_val = math.cos(rad)
-    local nx, ny, dist
-    local w, h = obj.w, obj.h
+    local nx, ny = 0.0, 0.0
 
     if dir == "top" then
         nx = sin_val
         ny = -cos_val
-        dist = (-h * 0.5 + h * clip_pct * 0.01) * ny
     elseif dir == "bottom" then
         nx = -sin_val
         ny = cos_val
-        dist = (h * 0.5 - h * clip_pct * 0.01) * ny
     elseif dir == "left" then
         nx = -cos_val
         ny = -sin_val
-        dist = (-w * 0.5 + w * clip_pct * 0.01) * nx
     elseif dir == "right" then
         nx = cos_val
         ny = sin_val
-        dist = (w * 0.5 - w * clip_pct * 0.01) * nx
     end
 
-    local is_active = (clip_pct > 0.0 or angle_deg ~= 0.0) and 1.0 or 0.0
-    return nx, ny, dist, is_active
+    -- 法線方向に対するオブジェクト矩形の投影半幅を基準に距離を算出
+    local half_span = 0.5 * (math.abs(nx) * obj_w + math.abs(ny) * obj_h)
+    local dist = half_span * (1.0 - clip_pct * 0.02)
+
+    return nx, ny, dist, 1.0
 end
 
-local n_top_x, n_top_y, d_top, act_t = calc_plane(c_top, a_top, "top")
+local n_top_x, n_top_y, d_top, act_t = calc_plane(clip_top, angle_top, "top")
 local n_bot_x, n_bot_y, d_bot, act_b = calc_plane(c_bottom, a_bottom, "bottom")
-local n_left_x, n_left_y, d_left, act_l = calc_plane(c_left, a_left, "left")
+local n_left_x, n_left_y, d_left, act_l = calc_plane(clip_left, angle_left, "left")
 local n_right_x, n_right_y, d_right, act_r = calc_plane(c_right, a_right, "right")
 
-if act_t + act_b + act_l + act_r == 0.0 then
+if act_t == 0.0 and act_b == 0.0 and act_l == 0.0 and act_r == 0.0 then
     return
 end
 
@@ -90,26 +88,29 @@ cbuffer Params : register(b0) {
     float4 plane_bottom;
     float4 plane_left;
     float4 plane_right;
-    float4 render_size;
+    float2 render_size;
+    float invert_clip;
+    float pad;
 };
 
 Texture2D t0 : register(t0);
 SamplerState s0 : register(s0);
 
 float clip_plane(float2 p, float4 plane) {
+    if (plane.w <= 0.0) {
+        return 1.0;
+    }
     float d = dot(p, plane.xy) - plane.z;
-    float fw = max(fwidth(d), 0.0001);
-    float clip_val = 1.0 - smoothstep(-fw * 0.5, fw * 0.5, d);
-    return lerp(1.0, clip_val, plane.w);
+    return 1.0 - smoothstep(-0.5, 0.5, d);
 }
 
 float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     float4 color = t0.Sample(s0, uv);
     if (color.a <= 0.0) {
-        return color;
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    float2 p = (uv - 0.5) * render_size.xy;
+    float2 p = (uv - 0.5) * render_size;
 
     float alpha_mult = 1.0;
     alpha_mult *= clip_plane(p, plane_top);
@@ -117,7 +118,7 @@ float4 clipping_sd_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     alpha_mult *= clip_plane(p, plane_left);
     alpha_mult *= clip_plane(p, plane_right);
 
-    alpha_mult = abs(render_size.z - alpha_mult);
+    alpha_mult = lerp(alpha_mult, 1.0 - alpha_mult, invert_clip);
 
     return color * alpha_mult;
 }
@@ -132,7 +133,7 @@ obj.pixelshader(
         n_bot_x, n_bot_y, d_bot, act_b,
         n_left_x, n_left_y, d_left, act_l,
         n_right_x, n_right_y, d_right, act_r,
-        obj.w, obj.h, (invert_clip == 1) and 1.0 or 0.0, 0.0
+        obj_w, obj_h, (invert_clip == 1) and 1.0 or 0.0, 0.0
     },
     "copy",
     "clamp"
