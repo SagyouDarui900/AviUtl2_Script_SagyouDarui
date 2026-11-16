@@ -52,7 +52,7 @@
     float get_density(float4 color) {
         if (color.a <= 0.0) return 0.0;
         float3 rgb = color.rgb / color.a;
-        return 1.0 - dot(rgb, float3(0.299, 0.587, 0.114));
+        return (1.0 - dot(rgb, float3(0.299, 0.587, 0.114))) * color.a;
     }
 
     float4 dmg_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
@@ -70,12 +70,19 @@
 
         float col_sample_dens = 0.0;
         if (crosstalk > 0.0) {
-            float step_y = 4.0 / grid_num.y;
-            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - step_y * 2.0))));
-            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - step_y))));
-            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + step_y))));
-            col_sample_dens += get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + step_y * 2.0))));
-            col_sample_dens *= 0.25;
+            float dy1 = 1.0 / grid_num.y;
+            float dy2 = 2.0 / grid_num.y;
+            float dy4 = 4.0 / grid_num.y;
+            float dy8 = 8.0 / grid_num.y;
+            float d_near = get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - dy1))))
+                         + get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + dy1))));
+            float d_mid  = get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - dy2))))
+                         + get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + dy2))));
+            float d_far1 = get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - dy4))))
+                         + get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + dy4))));
+            float d_far2 = get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y - dy8))))
+                         + get_density(tex.Sample(samp, float2(pixel_uv.x, saturate(pixel_uv.y + dy8))));
+            col_sample_dens = (d_near * 0.35 + d_mid * 0.30 + d_far1 * 0.20 + d_far2 * 0.15) * 0.5;
         }
 
         float rad = angle * 3.14159265 / 180.0;
@@ -100,10 +107,10 @@
         bg_color = lerp(bg_color, p_col3, col_sample_dens * crosstalk * 0.35);
 
         float3 fg_color;
-        if (density > 0.8) fg_color = p_col1;
-        else if (density > 0.5) fg_color = p_col2;
-        else if (density > 0.2) fg_color = p_col3;
-        else fg_color = p_col4;
+        if (density > 0.75) fg_color = p_col1;
+        else if (density > 0.50) fg_color = p_col2;
+        else if (density > 0.25) fg_color = p_col3;
+        else fg_color = bg_color;
 
         float2 inner_uv = frac(uv * grid_num);
         float cell_w = res.x / grid_num.x;
@@ -114,26 +121,25 @@
         float dot_mask = smoothstep(border - smooth_edge, border + smooth_edge, min(dx, dy));
 
         float3 grid_color = lerp(p_col4, p_col1, 0.15);
-        bg_color = lerp(bg_color, grid_color, (1.0 - dot_mask) * grid_a);
+        float3 cell_bg = lerp(bg_color, grid_color, (1.0 - dot_mask) * saturate(grid_a));
 
-        float3 final_color = lerp(bg_color, fg_color, dot_mask * density);
-        if (density < 0.1) {
-            final_color = lerp(final_color, p_col3, dot_mask * 0.05);
+        float3 final_color = lerp(cell_bg, fg_color, dot_mask);
+        if (density <= 0.25 && density > 0.08) {
+            final_color = lerp(final_color, p_col3, dot_mask * 0.12);
         }
 
         return float4(saturate(final_color) * original_color.a, original_color.a);
     }
 ]]
 
-local p_type = palette_type or 0
-local is_pix = (pixelate == 1 or pixelate == true)
-local gx, gy
+if obj.w <= 0 or obj.h <= 0 then return end
 
-if is_pix then
+local gx, gy
+if pixelate == 1 then
     gy = 144
     gx = 160
 else
-    local s = math.max(scale or 4.0, 0.1)
+    local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
     gy = math.max(1, math.floor(obj.h / s + 0.5))
 end
@@ -141,13 +147,13 @@ end
 obj.pixelshader("dmg_lcd", "object", {"object"}, {
     obj.w, obj.h,
     gx, gy,
-    (grid_a or 60) / 100.0,
-    shadow or 1.5,
-    angle or 45,
-    p_type,
-    (crosstalk or 25) / 100.0,
+    grid_a / 100.0,
+    shadow,
+    angle,
+    palette_type,
+    crosstalk / 100.0,
     0.0, 0.0, 0.0
-})
+}, "copy", "clip")
 
 @GB電源OFF
 --filter
@@ -189,6 +195,12 @@ obj.pixelshader("dmg_lcd", "object", {"object"}, {
         }
     }
 
+    float3 sample_straight(float2 sample_uv) {
+        float4 s = tex.Sample(samp, sample_uv);
+        if (s.a <= 0.0) return float3(0.0, 0.0, 0.0);
+        return saturate(s.rgb / s.a);
+    }
+
     float4 gb_power_off(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         if (progress <= 0.0) return tex.Sample(samp, uv);
 
@@ -204,11 +216,11 @@ obj.pixelshader("dmg_lcd", "object", {"object"}, {
 
         float blur_amount = p_contrast * 0.008;
         if (blur_amount > 0.0) {
-            float3 c_l = tex.Sample(samp, uv + float2(-blur_amount, 0.0)).rgb;
-            float3 c_r = tex.Sample(samp, uv + float2(blur_amount, 0.0)).rgb;
-            float3 c_u = tex.Sample(samp, uv + float2(0.0, -blur_amount * 0.5)).rgb;
-            float3 c_d = tex.Sample(samp, uv + float2(0.0, blur_amount * 0.5)).rgb;
-            
+            float3 c_l = sample_straight(uv + float2(-blur_amount, 0.0));
+            float3 c_r = sample_straight(uv + float2(blur_amount, 0.0));
+            float3 c_u = sample_straight(uv + float2(0.0, -blur_amount * 0.5));
+            float3 c_d = sample_straight(uv + float2(0.0, blur_amount * 0.5));
+
             float3 blur_max = max(max(c_l, c_r), max(c_u, c_d));
             rgb = lerp(rgb, max(rgb, blur_max), p_contrast * 0.6);
             rgb = lerp(rgb, float3(0.5, 0.5, 0.5), p_contrast * 0.7);
@@ -229,10 +241,10 @@ obj.pixelshader("dmg_lcd", "object", {"object"}, {
     }
 ]]
 
-local p = progress or 0
-local p_type_off = palette_type or 0
+if obj.w <= 0 or obj.h <= 0 then return end
+
 obj.pixelshader("gb_power_off", "object", {"object"}, {
-    p / 100.0,
-    p_type_off,
+    progress / 100.0,
+    palette_type,
     0.0, 0.0
-})
+}, "copy", "clip")

@@ -8,6 +8,8 @@
 --track@brightness:明るさ,0,200,100,1
 --track@gap_a:ピクセル隙間濃度,0,100,60,1
 --check@use_subpixel:サブピクセル表示,1
+--select@subpixel_order:サブピクセル配列=0,機種自動(実機準拠)=0,RGB=1,BGR=2
+--hide@subpixel_order:use_subpixel==0
 
 --[[pixelshader@nds_lcd:
     cbuffer params : register(b0) {
@@ -18,7 +20,8 @@
         float gap_a;
         float use_subpixel;
         float brightness;
-        float3 pad;
+        float subpixel_order;
+        float2 pad;
     };
 
     Texture2D tex : register(t0);
@@ -40,27 +43,22 @@
         float hw_gap = gap_a;
         float3 lcd_color = rgb;
 
-        // 1. モデル別 液晶発色・ガンマ・開口率
         if (model < 0.5) {
-            // 初代DS (NTR): 低コントラスト、やや青白いバックライト、標準格子
-            lcd_color = lerp(float3(luma, luma, luma), rgb, 0.88); 
-            lcd_color *= float3(0.95, 0.97, 1.02); 
-            lcd_color = pow(max(lcd_color, 0.0), 1.05); 
-            hw_gap *= 0.85; 
+            lcd_color = lerp(float3(luma, luma, luma), rgb, 0.88);
+            lcd_color *= float3(0.95, 0.97, 1.02);
+            lcd_color = pow(max(lcd_color, 0.0), 1.05);
+            hw_gap *= 0.85;
         } else if (model < 1.5) {
-            // DS Lite (USG): 高輝度・ニュートラル、高開口率で格子が細い
-            lcd_color *= float3(1.0, 1.0, 0.98); 
-            lcd_color = pow(max(lcd_color, 0.0), 0.98); 
-            hw_gap *= 0.45; 
+            lcd_color *= float3(1.0, 1.0, 0.98);
+            lcd_color = pow(max(lcd_color, 0.0), 0.98);
+            hw_gap *= 0.45;
         } else {
-            // DSi LL (UTL): 広色域IPS、大画面化に伴いピクセルピッチと網目が目立つ
-            lcd_color = lerp(float3(luma, luma, luma), rgb, 1.15); 
-            lcd_color *= float3(0.98, 1.0, 1.02); 
-            lcd_color = pow(max(lcd_color, 0.0), 0.95); 
-            hw_gap *= 1.25; 
+            lcd_color = lerp(float3(luma, luma, luma), rgb, 1.15);
+            lcd_color *= float3(0.98, 1.0, 1.02);
+            lcd_color = pow(max(lcd_color, 0.0), 0.95);
+            hw_gap *= 1.25;
         }
 
-        // 2. 抵抗膜タッチパネル層（下画面のみ）
         bool is_lower = (screen > 0.5);
         if (is_lower) {
             lcd_color *= float3(0.94, 0.95, 0.90);
@@ -71,7 +69,6 @@
 
         lcd_color = saturate(lcd_color * brightness);
 
-        // 3. サブピクセル（RGB縦ストライプ）とブラックマトリクス
         float2 inner_uv = frac(uv * grid_num);
         float cell_w = res.x / grid_num.x;
 
@@ -79,60 +76,60 @@
         float shape = 1.0;
 
         if (use_subpixel > 0.5 && cell_w >= 2.5) {
-            float x = inner_uv.x;
-            
-            // RGBストライプ分割
+            bool is_bgr = (subpixel_order > 1.5) || (subpixel_order < 0.5 && model > 0.5 && model < 1.5);
+            float x = is_bgr ? (1.0 - inner_uv.x) : inner_uv.x;
+
             float r = saturate((0.383 - x) / 0.08);
             float g = saturate((x - 0.283) / 0.08) * saturate((0.716 - x) / 0.08);
             float b = saturate((x - 0.616) / 0.08);
             sub_mask = float3(r, g, b) * 2.85;
 
-            // 各サブピクセルの外枠マトリクス
             float sub_x = frac(inner_uv.x * 3.0);
             float sub_y = inner_uv.y;
             float sm = max(0.02, 1.0 / (cell_w * 2.0));
+            float gap_clamped = saturate(hw_gap);
 
-            float box_x = saturate((sub_x - 0.08 * hw_gap) / sm) * saturate((1.0 - 0.08 * hw_gap - sub_x) / sm);
-            float box_y = saturate((sub_y - 0.06 * hw_gap) / sm) * saturate((1.0 - 0.06 * hw_gap - sub_y) / sm);
+            float box_x = saturate((sub_x - 0.08 * gap_clamped) / sm) * saturate((1.0 - 0.08 * gap_clamped - sub_x) / sm);
+            float box_y = saturate((sub_y - 0.06 * gap_clamped) / sm) * saturate((1.0 - 0.06 * gap_clamped - sub_y) / sm);
             shape = box_x * box_y;
 
-            // 縮小時のモアレ低減
             float moire = saturate((cell_w - 2.5) / 4.0);
             sub_mask = lerp(float3(1.0, 1.0, 1.0), sub_mask, moire);
             shape = lerp(1.0, shape, moire);
         } else {
-            // 単純グリッド
-            float border_x = 0.05 * hw_gap;
-            float border_y = 0.06 * hw_gap;
+            float gap_clamped = saturate(hw_gap);
+            float border_x = 0.05 * gap_clamped;
+            float border_y = 0.06 * gap_clamped;
             float sm = max(0.01, 1.0 / (cell_w * 3.0));
-            
+
             float dx = min(inner_uv.x, 1.0 - inner_uv.x);
             float dy = min(inner_uv.y, 1.0 - inner_uv.y);
             shape = smoothstep(border_x - sm, border_x + sm, dx) * smoothstep(border_y - sm, border_y + sm, dy);
         }
 
-        // 4. 輝度補償と最終合成
-        float luma_comp = (use_subpixel > 0.5 && cell_w >= 2.5) 
-            ? lerp(1.0, 2.2, saturate((cell_w - 2.5) / 5.0)) 
-            : (1.0 + hw_gap * 0.15);
+        float gap_norm = saturate(hw_gap);
+        float luma_comp = (use_subpixel > 0.5 && cell_w >= 2.5)
+            ? lerp(1.0, 1.08, saturate((cell_w - 2.5) / 5.0))
+            : (1.0 + gap_norm * 0.10);
 
         float3 out_rgb = lcd_color * sub_mask * luma_comp;
         float3 matrix_color = float3(0.015, 0.015, 0.015);
-        float3 final_rgb = lerp(matrix_color, out_rgb, lerp(1.0, shape, hw_gap));
+        float3 final_rgb = lerp(matrix_color, out_rgb, lerp(1.0, shape, gap_norm));
 
         return float4(saturate(final_rgb) * original.a, original.a);
     }
 ]]
 
-local is_pix = (pixelate == 1 or pixelate == true)
-local sp = (use_subpixel == 1 or use_subpixel == true) and 1.0 or 0.0
+if obj.w <= 0 or obj.h <= 0 then return end
+
+local sp = (use_subpixel == 1) and 1.0 or 0.0
 local gx, gy
 
-if is_pix then
+if pixelate == 1 then
     gy = 192
     gx = 256
 else
-    local s = math.max(scale or 4.0, 0.1)
+    local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
     gy = math.max(1, math.floor(obj.h / s + 0.5))
 end
@@ -140,10 +137,11 @@ end
 obj.pixelshader("nds_lcd", "object", {"object"}, {
     obj.w, obj.h,
     gx, gy,
-    model or 0,
-    screen or 0,
-    (gap_a or 60) / 100.0,
+    model,
+    screen,
+    gap_a / 100.0,
     sp,
-    (brightness or 100) / 100.0,
-    0.0, 0.0, 0.0
-})
+    brightness / 100.0,
+    subpixel_order,
+    0.0, 0.0
+}, "copy", "clamp")

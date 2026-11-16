@@ -54,18 +54,18 @@
         gbc_color_mixed.r = c_lin.r * 0.800 + c_lin.g * 0.150 + c_lin.b * 0.050;
         gbc_color_mixed.g = c_lin.r * 0.100 + c_lin.g * 0.720 + c_lin.b * 0.180;
         gbc_color_mixed.b = c_lin.r * 0.080 + c_lin.g * 0.180 + c_lin.b * 0.740;
-        gbc_color_mixed = pow(max(gbc_color_mixed, 0.0), 1.0 / 2.2);
+        gbc_color_mixed = pow(max(gbc_color_mixed, 0.0), 1.0 / 2.6);
 
         float3 gbc_color = lerp(rgb, gbc_color_mixed, color_correct);
 
-        float3 ref_bg = float3(0.65, 0.68, 0.62) * ambient;
+        float3 ref_bg = float3(0.68, 0.71, 0.65) * ambient;
         float3 lcd_black = float3(0.12, 0.15, 0.12) * ambient;
 
         float rad = angle * 3.14159265 / 180.0;
         float2 shadow_offset = float2(cos(rad), sin(rad)) * shadow / grid_num;
         float2 shadow_block = floor((uv - shadow_offset) * grid_num);
         float2 shadow_pixel_uv = (shadow_block + 0.5) / grid_num;
-        
+
         float4 shadow_sample = tex.Sample(samp, shadow_pixel_uv);
         float shadow_density = 0.0;
         if (shadow_sample.a > 0.0) {
@@ -76,11 +76,10 @@
 
         float3 bg_color = ref_bg;
         if (shadow_density > 0.05) {
-            bg_color = lerp(ref_bg, lcd_black, shadow_density * 0.6);
+            bg_color = lerp(ref_bg, lcd_black, shadow_density * 0.55);
         }
 
-        float3 pixel_color = lerp(lcd_black, bg_color * (gbc_color * 1.2 + 0.1), gbc_color);
-        pixel_color = min(pixel_color, bg_color);
+        float3 pixel_color = lerp(lcd_black, bg_color, gbc_color);
 
         float2 inner_uv = frac(uv * grid_num);
         float cell_w = res.x / grid_num.x;
@@ -90,35 +89,36 @@
             float r_mask = 1.0 - smoothstep(0.283, 0.383, x);
             float g_mask = smoothstep(0.283, 0.383, x) * (1.0 - smoothstep(0.616, 0.716, x));
             float b_mask = smoothstep(0.616, 0.716, x);
-            
-            float3 stripe_tint = float3(r_mask, g_mask, b_mask) * 2.5;
+
+            float3 stripe_tint = float3(r_mask, g_mask, b_mask) * 3.0;
             float stripe_strength = saturate((cell_w - 3.0) / 5.0);
             pixel_color = lerp(pixel_color, pixel_color * stripe_tint, stripe_strength * 0.8);
         }
 
-        float border = 0.08; 
+        float border = 0.08;
         float sm = max(0.02, 1.0 / (cell_w * 3.0));
         float dx = min(inner_uv.x, 1.0 - inner_uv.x);
         float dy = min(inner_uv.y, 1.0 - inner_uv.y);
         float grid_mask = smoothstep(border - sm, border + sm, dx) * smoothstep(border - sm, border + sm, dy);
 
         float3 grid_color_val = float3(0.05, 0.07, 0.05) * ambient;
-        float3 final_color = lerp(grid_color_val, pixel_color, lerp(1.0, grid_mask, grid_a));
+        float3 final_color = lerp(grid_color_val, pixel_color, lerp(1.0, grid_mask, saturate(grid_a)));
 
         return float4(saturate(final_color) * original.a, original.a);
     }
 ]]
 
-local sp = (use_subpixel == 1 or use_subpixel == true) and 1.0 or 0.0
-local qz = (quantize == 1 or quantize == true) and 1.0 or 0.0
-local is_pix = (pixelate == 1 or pixelate == true)
+if obj.w <= 0 or obj.h <= 0 then return end
+
+local sp = (use_subpixel == 1) and 1.0 or 0.0
+local qz = (quantize == 1) and 1.0 or 0.0
 local gx, gy
 
-if is_pix then
+if pixelate == 1 then
     gy = 144
     gx = 160
 else
-    local s = math.max(scale or 4.0, 0.1)
+    local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
     gy = math.max(1, math.floor(obj.h / s + 0.5))
 end
@@ -126,15 +126,15 @@ end
 obj.pixelshader("gbc_lcd", "object", {"object"}, {
     obj.w, obj.h,
     gx, gy,
-    (ambient or 100) / 100.0,
-    (color_correct or 100) / 100.0,
-    (grid_a or 60) / 100.0,
-    shadow or 1.0,
-    angle or 45,
+    ambient / 100.0,
+    color_correct / 100.0,
+    grid_a / 100.0,
+    shadow,
+    angle,
     sp,
     qz,
     0.0
-})
+}, "copy", "clip")
 
 @GBC電源OFF
 --filter
@@ -162,10 +162,9 @@ obj.pixelshader("gbc_lcd", "object", {"object"}, {
         float p_loss = saturate(progress / 0.15);
         float p_fade = saturate((progress - 0.15) / 0.45);
         float p_shrink = saturate((progress - 0.6) / 0.3);
-        
+
         float lum = dot(rgb, float3(0.299, 0.587, 0.114));
-        float3 desat = lerp(rgb, float3(lum, lum, lum), p_loss);
-        rgb = lerp(rgb, desat, p_loss);
+        rgb = lerp(rgb, float3(lum, lum, lum), p_loss);
         rgb = lerp(rgb, panel_color, p_loss * 0.5 + p_fade * 0.5);
 
         if (p_shrink > 0.0) {
@@ -174,7 +173,7 @@ obj.pixelshader("gbc_lcd", "object", {"object"}, {
             float wipe = smoothstep(1.0 - p_shrink * 1.5, 1.0 - p_shrink, dist);
             rgb = lerp(rgb, panel_color, wipe);
         }
-        
+
         if (progress >= 0.9) {
             rgb = panel_color;
         }
@@ -183,8 +182,9 @@ obj.pixelshader("gbc_lcd", "object", {"object"}, {
     }
 ]]
 
-local p = progress or 0
+if obj.w <= 0 or obj.h <= 0 then return end
+
 obj.pixelshader("gbc_power_off", "object", {"object"}, {
-    p / 100.0,
+    progress / 100.0,
     0.0, 0.0, 0.0
-})
+}, "copy", "clamp")
