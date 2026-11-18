@@ -1,0 +1,321 @@
+--label:抽出
+--filter
+--information:画像・イラストから輪郭（エッジ）を高精度に抽出します。
+
+--group:基本設定,true
+--track@intensity:抽出強度,0,500,200,1
+--track@thickness:線の太さ,0.1,10.0,1.0,0.1
+--track@threshold:しきい値,0,100,5,0.1
+--color@line_col:線の色,0x000000
+--group
+
+--group:詳細設定,false
+--select@algo_mode:検出法=0,カラーエッジ(イラスト推奨)=0,輝度エッジ(Sobel)=1,輝度エッジ(Scharr)=2,アルファエッジ=3
+--track@softness:滑らかさ,0,100,20,0.1
+--select@bg_mode:背景=0,透過(線のみ)=0,元画像に合成=1,黒背景=2,白背景=3
+--check@invert:線を反転,false
+--group
+
+--[[pixelshader@line_edge_ps:
+    Texture2D tex : register(t0);
+    SamplerState sam : register(s0);
+
+    cbuffer cb_edge : register(b0) {
+        float intensity;
+        float radius_px;
+        float algo_mode;
+        float inv_w;
+
+        float inv_h;
+        float pad0;
+        float pad1;
+        float pad2;
+    };
+
+    float3 srgb_to_linear(float3 c) {
+        float3 safe_c = max(c, 0.0);
+        float3 lo = safe_c / 12.92;
+        float3 hi = pow(max((safe_c + 0.055) / 1.055, 0.0), 2.4);
+        return lerp(lo, hi, step(0.04045, safe_c));
+    }
+
+    float4 sample_premult_linear(float2 uv) {
+        float4 c = tex.SampleLevel(sam, uv, 0.0);
+        if (c.a <= 1e-5) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+        float a = saturate(c.a);
+        float3 straight_srgb = saturate(c.rgb / c.a);
+        return float4(srgb_to_linear(straight_srgb) * a, a);
+    }
+
+    float sample_premult_luma(float2 uv) {
+        float4 lin = sample_premult_linear(uv);
+        return dot(lin.rgb, float3(0.2126, 0.7152, 0.0722));
+    }
+
+    float sample_premult_alpha(float2 uv) {
+        return saturate(tex.SampleLevel(sam, uv, 0.0).a);
+    }
+
+    void sample_luma_3x3(
+        float2 uv, float2 off_x, float2 off_y,
+        out float v00, out float v10, out float v20,
+        out float v01, out float v21,
+        out float v02, out float v12, out float v22
+    ) {
+        v00 = sample_premult_luma(uv - off_x - off_y);
+        v10 = sample_premult_luma(uv - off_y);
+        v20 = sample_premult_luma(uv + off_x - off_y);
+        v01 = sample_premult_luma(uv - off_x);
+        v21 = sample_premult_luma(uv + off_x);
+        v02 = sample_premult_luma(uv - off_x + off_y);
+        v12 = sample_premult_luma(uv + off_y);
+        v22 = sample_premult_luma(uv + off_x + off_y);
+    }
+
+    float4 line_edge_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        int mode = (int)round(algo_mode);
+        float2 off_x = float2(inv_w * radius_px, 0.0);
+        float2 off_y = float2(0.0, inv_h * radius_px);
+        float edge = 0.0;
+
+        switch (mode) {
+            case 0: {
+                // カラーエッジ（Linear空間でのRGB勾配ノルムとアルファ勾配の最大値）
+                float4 c00 = sample_premult_linear(uv - off_x - off_y);
+                float4 c10 = sample_premult_linear(uv - off_y);
+                float4 c20 = sample_premult_linear(uv + off_x - off_y);
+                float4 c01 = sample_premult_linear(uv - off_x);
+                float4 c21 = sample_premult_linear(uv + off_x);
+                float4 c02 = sample_premult_linear(uv - off_x + off_y);
+                float4 c12 = sample_premult_linear(uv + off_y);
+                float4 c22 = sample_premult_linear(uv + off_x + off_y);
+
+                float4 gx = -c00 + c20 - 2.0 * c01 + 2.0 * c21 - c02 + c22;
+                float4 gy = -c00 - 2.0 * c10 - c20 + c02 + 2.0 * c12 + c22;
+
+                float rgb_grad = sqrt(dot(gx.rgb, gx.rgb) + dot(gy.rgb, gy.rgb)) * 0.577350269;
+                float alpha_grad = sqrt(gx.a * gx.a + gy.a * gy.a);
+                edge = max(rgb_grad, alpha_grad) * intensity;
+                break;
+            }
+            case 1: {
+                // 輝度エッジ（Sobel）
+                float v00, v10, v20, v01, v21, v02, v12, v22;
+                sample_luma_3x3(uv, off_x, off_y, v00, v10, v20, v01, v21, v02, v12, v22);
+
+                float gx = -v00 + v20 - 2.0 * v01 + 2.0 * v21 - v02 + v22;
+                float gy = -v00 - 2.0 * v10 - v20 + v02 + 2.0 * v12 + v22;
+                edge = sqrt(gx * gx + gy * gy) * intensity;
+                break;
+            }
+            case 2: {
+                // 輝度エッジ（Scharr: Sobel最大勾配4に対してScharr最大勾配16のため0.25で正規化）
+                float v00, v10, v20, v01, v21, v02, v12, v22;
+                sample_luma_3x3(uv, off_x, off_y, v00, v10, v20, v01, v21, v02, v12, v22);
+
+                float gx = -3.0 * v00 + 3.0 * v20 - 10.0 * v01 + 10.0 * v21 - 3.0 * v02 + 3.0 * v22;
+                float gy = -3.0 * v00 - 10.0 * v10 - 3.0 * v20 + 3.0 * v02 + 10.0 * v12 + 3.0 * v22;
+                edge = (sqrt(gx * gx + gy * gy) * 0.25) * intensity;
+                break;
+            }
+            default: {
+                // アルファエッジ
+                float a00 = sample_premult_alpha(uv - off_x - off_y);
+                float a10 = sample_premult_alpha(uv - off_y);
+                float a20 = sample_premult_alpha(uv + off_x - off_y);
+                float a01 = sample_premult_alpha(uv - off_x);
+                float a21 = sample_premult_alpha(uv + off_x);
+                float a02 = sample_premult_alpha(uv - off_x + off_y);
+                float a12 = sample_premult_alpha(uv + off_y);
+                float a22 = sample_premult_alpha(uv + off_x + off_y);
+
+                float gx = -a00 + a20 - 2.0 * a01 + 2.0 * a21 - a02 + a22;
+                float gy = -a00 - 2.0 * a10 - a20 + a02 + 2.0 * a12 + a22;
+                edge = sqrt(gx * gx + gy * gy) * intensity;
+                break;
+            }
+        }
+
+        return float4(edge, 0.0, 0.0, 1.0);
+    }
+]]
+
+--[[pixelshader@line_dilate_h_ps:
+    Texture2D edgeTex : register(t0);
+    SamplerState sam : register(s0);
+
+    cbuffer cb_dilate_h : register(b0) {
+        float expand_radius;
+        float inv_w;
+        float pad0;
+        float pad1;
+    };
+
+    float4 line_dilate_h_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        int max_r = clamp((int)ceil(expand_radius + 0.5), 1, 6);
+        float limit_r = expand_radius + 0.5;
+        float best_score = 0.0;
+        float best_edge = 0.0;
+        float best_dx = 0.0;
+
+        [loop]
+        for (int dx = -max_r; dx <= max_r; dx++) {
+            float adx = abs((float)dx);
+            if (adx <= limit_r) {
+                float e = edgeTex.SampleLevel(sam, uv + float2((float)dx * inv_w, 0.0), 0.0).r;
+                float score = e * saturate(limit_r - adx);
+                if (score > best_score) {
+                    best_score = score;
+                    best_edge = e;
+                    best_dx = adx;
+                }
+            }
+        }
+
+        return float4(best_edge, best_dx, 0.0, 1.0);
+    }
+]]
+
+--[[pixelshader@line_composite_ps:
+    Texture2D origTex : register(t0);
+    Texture2D edgeTex : register(t1);
+    SamplerState sam : register(s0);
+
+    cbuffer cb_composite : register(b0) {
+        float3 line_color;
+        float  expand_radius;
+
+        float  threshold;
+        float  softness;
+        float  bg_mode;
+        float  invert_line;
+
+        float  inv_h;
+        float  pad0;
+        float  pad1;
+        float  pad2;
+    };
+
+    float4 sample_premult_srgb(float2 uv) {
+        float4 c = origTex.SampleLevel(sam, uv, 0.0);
+        if (c.a <= 1e-5) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+        return float4(clamp(c.rgb, 0.0, c.a), saturate(c.a));
+    }
+
+    float4 line_composite_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        int bg = (int)round(bg_mode);
+        float edge = 0.0;
+
+        if (expand_radius > 0.001) {
+            int max_r = clamp((int)ceil(expand_radius + 0.5), 1, 6);
+            float limit_r = expand_radius + 0.5;
+
+            [loop]
+            for (int dy = -max_r; dy <= max_r; dy++) {
+                float2 data = edgeTex.SampleLevel(sam, uv + float2(0.0, (float)dy * inv_h), 0.0).rg;
+                float dist = sqrt(data.y * data.y + (float)(dy * dy));
+                float falloff = saturate(limit_r - dist);
+                edge = max(edge, data.x * falloff);
+            }
+        } else {
+            edge = edgeTex.SampleLevel(sam, uv, 0.0).r;
+        }
+
+        float sf = max(0.0001, softness);
+        float line_alpha = smoothstep(threshold, threshold + sf, edge);
+
+        float4 center_col = sample_premult_srgb(uv);
+
+        if (invert_line > 0.5) {
+            line_alpha = (1.0 - line_alpha) * center_col.a;
+        }
+
+        float4 src_line = float4(line_color * line_alpha, line_alpha);
+
+        switch (bg) {
+            case 1:
+                return src_line + center_col * (1.0 - line_alpha);
+            case 2:
+                return src_line + float4(0.0, 0.0, 0.0, 1.0) * (1.0 - line_alpha);
+            case 3:
+                return src_line + float4(1.0, 1.0, 1.0, 1.0) * (1.0 - line_alpha);
+            default:
+                return src_line;
+        }
+    }
+]]
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+if intensity <= 0 and not invert and bg_mode == 1 then
+    return
+end
+
+local r, g, b = RGB(line_col)
+local f_invert = invert and 1.0 or 0.0
+
+local inv_w = 1.0 / obj.w
+local inv_h = 1.0 / obj.h
+
+local is_filter = obj.getinfo("filter")
+local sampler_mode = is_filter and "clamp" or "clip"
+
+local id_suffix = tostring(obj.id) .. "_" .. tostring(obj.effect_id)
+local cache_edge = "cache:line_extract_edge_" .. id_suffix
+
+obj.clearbuffer(cache_edge, obj.w, obj.h)
+
+-- パス1: 基本カーネル（最大1px半径）によるエッジ強度抽出
+local base_radius = math.min(thickness, 1.0)
+local edge_constants = {
+    intensity * 0.01,
+    base_radius,
+    algo_mode,
+    inv_w,
+    inv_h,
+    0.0,
+    0.0,
+    0.0
+}
+obj.pixelshader("line_edge_ps", cache_edge, { "object" }, edge_constants, "copy", sampler_mode)
+
+-- パス2（thickness > 1.0 時のみ）: 水平方向の円形膨張準備
+local expand_radius = math.max((thickness - 1.0) * 0.5, 0.0)
+local final_edge_tex = cache_edge
+
+if expand_radius > 0.001 then
+    local cache_dilate = "cache:line_extract_dilate_" .. id_suffix
+    obj.clearbuffer(cache_dilate, obj.w, obj.h)
+
+    local dilate_h_constants = {
+        expand_radius,
+        inv_w,
+        0.0,
+        0.0
+    }
+    obj.pixelshader("line_dilate_h_ps", cache_dilate, { cache_edge }, dilate_h_constants, "copy", "clip")
+    final_edge_tex = cache_dilate
+end
+
+-- パス3: 垂直方向の円形膨張および最終カラー合成
+local composite_constants = {
+    r / 255.0,
+    g / 255.0,
+    b / 255.0,
+    expand_radius,
+    threshold * 0.01,
+    softness * 0.01,
+    bg_mode,
+    f_invert,
+    inv_h,
+    0.0,
+    0.0,
+    0.0
+}
+obj.pixelshader("line_composite_ps", "object", { "object", final_edge_tex }, composite_constants, "copy", sampler_mode)
