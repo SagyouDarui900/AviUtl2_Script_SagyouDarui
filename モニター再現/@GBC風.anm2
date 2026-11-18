@@ -2,6 +2,8 @@
 --filter
 --label:画面効果\モニター再現
 --check@pixelate:実機解像度に合わせる,1
+--check@keep_aspect:ドット比率を正方形に保つ,1
+--hide@keep_aspect:pixelate==0
 --track@scale:ドットサイズ,1,50,4,0.1
 --hide@scale:pixelate==1
 --track@ambient:環境光(明るさ),0,200,100,1
@@ -54,7 +56,7 @@
         gbc_color_mixed.r = c_lin.r * 0.800 + c_lin.g * 0.150 + c_lin.b * 0.050;
         gbc_color_mixed.g = c_lin.r * 0.100 + c_lin.g * 0.720 + c_lin.b * 0.180;
         gbc_color_mixed.b = c_lin.r * 0.080 + c_lin.g * 0.180 + c_lin.b * 0.740;
-        gbc_color_mixed = pow(max(gbc_color_mixed, 0.0), 1.0 / 2.6);
+        gbc_color_mixed = pow(max(gbc_color_mixed, 0.0), 1.0 / 2.2);
 
         float3 gbc_color = lerp(rgb, gbc_color_mixed, color_correct);
 
@@ -90,7 +92,7 @@
             float g_mask = smoothstep(0.283, 0.383, x) * (1.0 - smoothstep(0.616, 0.716, x));
             float b_mask = smoothstep(0.616, 0.716, x);
 
-            float3 stripe_tint = float3(r_mask, g_mask, b_mask) * 3.0;
+            float3 stripe_tint = float3(r_mask, g_mask, b_mask) * 2.7;
             float stripe_strength = saturate((cell_w - 3.0) / 5.0);
             pixel_color = lerp(pixel_color, pixel_color * stripe_tint, stripe_strength * 0.8);
         }
@@ -115,8 +117,18 @@ local qz = (quantize == 1) and 1.0 or 0.0
 local gx, gy
 
 if pixelate == 1 then
-    gy = 144
-    gx = 160
+    local base_w, base_h = 160, 144
+    if keep_aspect == 1 then
+        if (obj.w / obj.h) > (base_w / base_h) then
+            gy = base_h
+            gx = math.max(1, math.floor(base_h * (obj.w / obj.h) + 0.5))
+        else
+            gx = base_w
+            gy = math.max(1, math.floor(base_w * (obj.h / obj.w) + 0.5))
+        end
+    else
+        gx, gy = base_w, base_h
+    end
 else
     local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
