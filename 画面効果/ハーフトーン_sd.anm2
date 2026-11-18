@@ -1,6 +1,5 @@
 --label:画面効果
 --filter
-
 --track@cell_size:間隔,1,500,16,0.1
 --track@dot_scale:サイズ倍率,0,300,100,0.1
 --track@min_size:最小サイズ,0,100,0,0.1
@@ -16,7 +15,7 @@
 --track@offset_y:位置Y,-2000,2000,0,1
 --trackgroup@offset_x,offset_y:位置
 
---group:グラデーション設定
+--group@grp_grad:グラデーション設定
 --track@grad_angle:角度,-360,360,0,0.1
 --track@grad_width:幅,1,5000,500,1
 --track@grad_start:開始サイズ%,0,500,100,0.1
@@ -46,13 +45,7 @@
 --hide@bg_alpha:transparent_bg==1
 --hide@dot_col:color_mode>1
 --hide@dot_alpha:color_mode>2
-
---hide@grad_angle:tone_mode==0
---hide@grad_width:tone_mode==0
---hide@grad_start:tone_mode==0
---hide@grad_end:tone_mode==0
---hide@grad_pos_x:tone_mode==0
---hide@grad_pos_y:tone_mode==0
+--hide@grp_grad:tone_mode==0
 
 --[[pixelshader@ps_halftone:
 Texture2D InputTexture : register(t0);
@@ -100,6 +93,25 @@ cbuffer Params : register(b0) {
     float3 col_bg;
     float pad2;
 };
+
+float3 srgb_to_linear(float3 c) {
+    c = max(c, 0.0);
+    float3 lo = c / 12.92;
+    float3 hi = pow((c + 0.055) / 1.055, 2.4);
+    return lerp(lo, hi, step(0.04045, c));
+}
+
+float3 linear_to_srgb(float3 c) {
+    c = max(c, 0.0);
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    return lerp(lo, hi, step(0.0031308, c));
+}
+
+float3 unpremultiply_linear(float4 c) {
+    float3 straight_srgb = (c.a > 0.0001) ? saturate(c.rgb / c.a) : float3(0.0, 0.0, 0.0);
+    return srgb_to_linear(straight_srgb);
+}
 
 float2 rot_2d(float2 p, float rad) {
     float s = sin(rad);
@@ -167,13 +179,13 @@ float get_mask(float screen_val, float density) {
     }
 
     float val = screen_val - target_density;
-    float fw = clamp(fwidth(val), 0.001, 0.5);
+    float fw = clamp(1.5 / max(cell_size, 1.0), 0.001, 0.5);
     return 1.0 - smoothstep(-fw, fw, val);
 }
 
-float3 sample_smoothed_rgb(float2 uv) {
+float3 sample_smoothed_linear(float2 uv) {
     float4 c0 = InputTexture.SampleLevel(LinearSampler, uv, 0);
-    float3 col0 = (c0.a > 0.0001) ? (c0.rgb / c0.a) : c0.rgb;
+    float3 col0 = unpremultiply_linear(c0);
 
     if (smoothness <= 0.001) {
         return col0;
@@ -182,23 +194,14 @@ float3 sample_smoothed_rgb(float2 uv) {
     float2 resolution = float2(res_w, res_h);
     float2 off = (smoothness * 0.75) / resolution;
 
-    float4 c1 = InputTexture.SampleLevel(LinearSampler, uv + float2( off.x,   0.0), 0);
-    float4 c2 = InputTexture.SampleLevel(LinearSampler, uv - float2( off.x,   0.0), 0);
-    float4 c3 = InputTexture.SampleLevel(LinearSampler, uv + float2(  0.0,  off.y), 0);
-    float4 c4 = InputTexture.SampleLevel(LinearSampler, uv - float2(  0.0, -off.y), 0);
-    float4 c5 = InputTexture.SampleLevel(LinearSampler, uv + float2( off.x,  off.y), 0);
-    float4 c6 = InputTexture.SampleLevel(LinearSampler, uv + float2(-off.x,  off.y), 0);
-    float4 c7 = InputTexture.SampleLevel(LinearSampler, uv + float2( off.x, -off.y), 0);
-    float4 c8 = InputTexture.SampleLevel(LinearSampler, uv + float2(-off.x, -off.y), 0);
-
-    float3 col1 = (c1.a > 0.0001) ? (c1.rgb / c1.a) : c1.rgb;
-    float3 col2 = (c2.a > 0.0001) ? (c2.rgb / c2.a) : c2.rgb;
-    float3 col3 = (c3.a > 0.0001) ? (c3.rgb / c3.a) : c3.rgb;
-    float3 col4 = (c4.a > 0.0001) ? (c4.rgb / c4.a) : c4.rgb;
-    float3 col5 = (c5.a > 0.0001) ? (c5.rgb / c5.a) : c5.rgb;
-    float3 col6 = (c6.a > 0.0001) ? (c6.rgb / c6.a) : c6.rgb;
-    float3 col7 = (c7.a > 0.0001) ? (c7.rgb / c7.a) : c7.rgb;
-    float3 col8 = (c8.a > 0.0001) ? (c8.rgb / c8.a) : c8.rgb;
+    float3 col1 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv + float2( off.x,   0.0), 0));
+    float3 col2 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv - float2( off.x,   0.0), 0));
+    float3 col3 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv + float2(  0.0,  off.y), 0));
+    float3 col4 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv - float2(  0.0,  off.y), 0));
+    float3 col5 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv + float2( off.x,  off.y), 0));
+    float3 col6 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv + float2(-off.x,  off.y), 0));
+    float3 col7 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv + float2( off.x, -off.y), 0));
+    float3 col8 = unpremultiply_linear(InputTexture.SampleLevel(LinearSampler, uv + float2(-off.x, -off.y), 0));
 
     return col0 * 0.25 + (col1 + col2 + col3 + col4) * 0.125 + (col5 + col6 + col7 + col8) * 0.0625;
 }
@@ -224,15 +227,17 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
 
     float4 orig_tex = InputTexture.SampleLevel(LinearSampler, uv, 0);
 
-    float3 out_rgb = float3(0.0, 0.0, 0.0);
-    float out_alpha = 0.0;
+    float3 s_rgb_lin = sample_smoothed_linear(uv);
+    float3 dot_col_lin = srgb_to_linear(col_dot);
+    float3 bg_col_lin = srgb_to_linear(col_bg);
 
-    float3 s_rgb = sample_smoothed_rgb(uv);
+    float3 out_rgb_lin = float3(0.0, 0.0, 0.0);
+    float out_alpha = 0.0;
 
     if (color_mode < 2.5) {
         float screen_val = get_screen(screen_p, angle);
 
-        float lum = dot(s_rgb, float3(0.2126, 0.7152, 0.0722));
+        float lum = dot(s_rgb_lin, float3(0.2126, 0.7152, 0.0722));
         lum = pow(max(lum, 0.0), gamma_val);
         if (invert_val > 0.5) lum = 1.0 - lum;
 
@@ -245,26 +250,27 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
 
         float mask = get_mask(screen_val, density);
 
-        float3 fg_color = (color_mode > 1.5) ? s_rgb : col_dot;
-        float3 bg_color_val = (color_mode > 0.5 && color_mode < 1.5) ? col_bg : float3(1.0, 1.0, 1.0);
+        float3 fg_color_lin = (color_mode > 1.5) ? s_rgb_lin : dot_col_lin;
+        float3 bg_color_lin = (color_mode > 0.5 && color_mode < 1.5) ? bg_col_lin : float3(1.0, 1.0, 1.0);
 
         float effective_dot_a = dot_alpha * mask;
-        float effective_bg_a = (transparent_bg > 0.5) ? 0.0 : bg_alpha * (1.0 - mask);
+        float effective_bg_a = (transparent_bg > 0.5) ? 0.0 : bg_alpha * (1.0 - effective_dot_a);
 
         out_alpha = saturate(effective_dot_a + effective_bg_a);
-        out_rgb = (fg_color * effective_dot_a) + (bg_color_val * effective_bg_a);
+        out_rgb_lin = (fg_color_lin * effective_dot_a) + (bg_color_lin * effective_bg_a);
     } else {
         float screen_c = get_screen(screen_p, angle + 15.0);
         float screen_m = get_screen(screen_p, angle + 75.0);
         float screen_y = get_screen(screen_p, angle + 0.0);
         float screen_k = get_screen(screen_p, angle + 45.0);
 
-        float k_val = 1.0 - max(max(s_rgb.r, s_rgb.g), s_rgb.b);
+        float3 s_rgb_srgb = linear_to_srgb(s_rgb_lin);
+        float k_val = 1.0 - max(max(s_rgb_srgb.r, s_rgb_srgb.g), s_rgb_srgb.b);
         float div_k = max(1.0 - k_val, 0.0001);
 
-        float c_density = saturate((1.0 - s_rgb.r - k_val) / div_k);
-        float m_density = saturate((1.0 - s_rgb.g - k_val) / div_k);
-        float y_density = saturate((1.0 - s_rgb.b - k_val) / div_k);
+        float c_density = saturate((1.0 - s_rgb_srgb.r - k_val) / div_k);
+        float m_density = saturate((1.0 - s_rgb_srgb.g - k_val) / div_k);
+        float y_density = saturate((1.0 - s_rgb_srgb.b - k_val) / div_k);
         float k_density = saturate(k_val);
 
         c_density = pow(max(c_density, 0.0), gamma_val);
@@ -281,10 +287,16 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
 
         if (tone_mode > 0.5 && tone_mode < 1.5) {
             float grad = calc_spatial_gradient(uv);
-            c_density *= grad; m_density *= grad; y_density *= grad; k_density *= grad;
+            c_density = grad;
+            m_density = grad;
+            y_density = grad;
+            k_density = grad;
         } else if (tone_mode > 1.5) {
             float grad = calc_spatial_gradient(uv);
-            c_density *= grad; m_density *= grad; y_density *= grad; k_density *= grad;
+            c_density *= grad;
+            m_density *= grad;
+            y_density *= grad;
+            k_density *= grad;
         }
 
         float mask_c = get_mask(screen_c, c_density);
@@ -292,31 +304,29 @@ float4 ps_halftone(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
         float mask_y = get_mask(screen_y, y_density);
         float mask_k = get_mask(screen_k, k_density);
 
-        float3 ink_c = float3(0.0, 1.0, 1.0);
-        float3 ink_m = float3(1.0, 0.0, 1.0);
-        float3 ink_y = float3(1.0, 1.0, 0.0);
+        float3 ink_rgb_lin = lerp(float3(1.0, 1.0, 1.0), float3(0.0, 1.0, 1.0), mask_c);
+        ink_rgb_lin *= lerp(float3(1.0, 1.0, 1.0), float3(1.0, 0.0, 1.0), mask_m);
+        ink_rgb_lin *= lerp(float3(1.0, 1.0, 1.0), float3(1.0, 1.0, 0.0), mask_y);
+        ink_rgb_lin *= (1.0 - mask_k);
 
-        float3 ink_rgb = lerp(float3(1.0, 1.0, 1.0), ink_c, mask_c);
-        ink_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_m, mask_m);
-        ink_rgb *= lerp(float3(1.0, 1.0, 1.0), ink_y, mask_y);
-        ink_rgb *= (1.0 - mask_k);
+        float3 bg_color_lin = float3(1.0, 1.0, 1.0);
 
-        float3 bg_color_val = float3(1.0, 1.0, 1.0);
-
-        float total_mask = saturate(mask_c + mask_m + mask_y + mask_k);
+        float total_mask = 1.0 - (1.0 - mask_c) * (1.0 - mask_m) * (1.0 - mask_y) * (1.0 - mask_k);
         float effective_dot_a = dot_alpha * total_mask;
-        float effective_bg_a = (transparent_bg > 0.5) ? 0.0 : bg_alpha * (1.0 - total_mask);
+        float effective_bg_a = (transparent_bg > 0.5) ? 0.0 : bg_alpha * (1.0 - effective_dot_a);
 
         out_alpha = saturate(effective_dot_a + effective_bg_a);
-        out_rgb = (ink_rgb * effective_dot_a) + (bg_color_val * effective_bg_a);
+        out_rgb_lin = (ink_rgb_lin * effective_dot_a) + (bg_color_lin * effective_bg_a);
     }
 
+    float3 out_straight_lin = (out_alpha > 0.0001) ? (out_rgb_lin / out_alpha) : float3(0.0, 0.0, 0.0);
+    float3 out_straight_srgb = saturate(linear_to_srgb(out_straight_lin));
+
     if (keep_alpha > 0.5) {
-        out_rgb *= orig_tex.a;
         out_alpha *= orig_tex.a;
     }
 
-    float4 result = float4(out_rgb, out_alpha);
+    float4 result = float4(out_straight_srgb * out_alpha, out_alpha);
     return lerp(orig_tex, result, mix_rate);
 }
 ]]
@@ -328,6 +338,8 @@ end
 local dot_r, dot_g, dot_b = RGB(dot_col)
 local bg_r, bg_g, bg_b = RGB(bg_col)
 local safe_cell_size = math.max(cell_size, 1.0)
+local effective_dot_alpha = (color_mode > 2) and 1.0 or (dot_alpha * 0.01)
+local effective_bg_alpha = (color_mode ~= 1) and 1.0 or (bg_alpha * 0.01)
 
 local constants = {
     -- Param 0
@@ -339,17 +351,17 @@ local constants = {
     -- Param 1
     dot_angle,
     gamma_val,
-    (invert == 1 or invert == true) and 1.0 or 0.0,
+    (invert == 1) and 1.0 or 0.0,
     shape_type,
 
     -- Param 2
-    (stagger == 1 or stagger == true) and 1.0 or 0.0,
+    (stagger == 1) and 1.0 or 0.0,
     color_mode,
     tone_mode,
-    (transparent_bg == 1 or transparent_bg == true) and 1.0 or 0.0,
+    (transparent_bg == 1) and 1.0 or 0.0,
 
     -- Param 3
-    (keep_alpha == 1 or keep_alpha == true) and 1.0 or 0.0,
+    (keep_alpha == 1) and 1.0 or 0.0,
     smoothness,
     mix_rate * 0.01,
     grad_angle,
@@ -358,10 +370,10 @@ local constants = {
     grad_width,
     grad_start * 0.01,
     grad_end * 0.01,
-    dot_alpha * 0.01,
+    effective_dot_alpha,
 
     -- Param 5
-    bg_alpha * 0.01,
+    effective_bg_alpha,
     offset_x,
     offset_y,
     grad_pos_x,
