@@ -2,6 +2,8 @@
 --filter
 --label:画面効果\モニター再現
 --check@pixelate:実機解像度に合わせる,1
+--check@keep_aspect:ドット比率を正方形に保つ,1
+--hide@keep_aspect:pixelate==0
 --track@scale:ドットサイズ,1,50,4,0.1
 --hide@scale:pixelate==1
 --track@grid_a:グリッド濃度,0,100,60,1
@@ -136,8 +138,18 @@ if obj.w <= 0 or obj.h <= 0 then return end
 
 local gx, gy
 if pixelate == 1 then
-    gy = 144
-    gx = 160
+    local base_w, base_h = 160, 144
+    if keep_aspect == 1 then
+        if (obj.w / obj.h) > (base_w / base_h) then
+            gy = base_h
+            gx = math.max(1, math.floor(base_h * (obj.w / obj.h) + 0.5))
+        else
+            gx = base_w
+            gy = math.max(1, math.floor(base_w * (obj.h / obj.w) + 0.5))
+        end
+    else
+        gx, gy = base_w, base_h
+    end
 else
     local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
