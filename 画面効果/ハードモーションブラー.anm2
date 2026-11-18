@@ -1,0 +1,276 @@
+--label:画面効果
+--information:ラフモーションブラー v2.2 (AviUtl2 Optimized)
+--filter
+
+--group:基本設定,true
+--select@style:スタイル=0,標準=0,クレヨン=1,スプレー=2,グリッチ=3,ギザギザ=4
+--track@length:長さ,0,1000,150,1
+--track@angle:角度,-3600,3600,0,0.1
+--track@curve:曲げ,-500,500,0,0.1
+--check@show_org:元画像を表示,true
+--group:
+
+--group:質感調整,true
+--track@density:密度,1,100,20,1
+--track@threshold:発生量,0,100,20,0.1
+--track@grain:粒子サイズ,1,100,5,1
+--track@randomness:乱れ/ノイズ,0,100,20,1
+--group:
+
+--group:高度な設定,false
+--track@len_rand:長さランダム,0,100,50,1
+--track@taper:先細り,-100,100,0,1
+--track@posterize:パキパキ度,0,100,100,1
+--track@speed:速度,0,1000,0,1
+--track@extend:領域拡張,0,1000,150,1
+--select@order:合成順=0,手前(加算)=0,奥(背景)=1,ブラーのみ=2
+--color@tint:着色,0xffffff
+--group:
+
+if (obj.w or 0) <= 0 or (obj.h or 0) <= 0 then
+    return
+end
+
+local safe_length = math.max(length or 0.0, 0.0)
+local show_original = (show_org == true or show_org == 1)
+
+if safe_length <= 0.0 and show_original then
+    return
+end
+
+--[[pixelshader@PS_RoughBlurV22:
+    Texture2D tex0 : register(t0);
+    SamplerState smp : register(s0);
+
+    cbuffer Param : register(b0) {
+        float p_length;     // [0].x
+        float p_angle_rad;  // [0].y
+        float p_threshold;  // [0].z
+        float p_density;    // [0].w
+        
+        float p_style;      // [1].x (0:Std, 1:Crayon, 2:Spray, 3:Glitch, 4:Jaggy)
+        float p_grain;      // [1].y
+        float p_randomness; // [1].z
+        float p_len_rand;   // [1].w
+
+        float p_taper;      // [2].x
+        float p_posterize;  // [2].y
+        float p_speed_seed; // [2].z
+        float p_extend;     // [2].w
+
+        float3 p_tint_color;// [3].xyz
+        float p_aspect;     // [3].w
+
+        float p_curve;      // [4].x
+        float p_order;      // [4].y (0:手前加算, 1:奥, 2:ブラーのみ)
+        float p_show_org;   // [4].z
+        float p_padding;    // [4].w
+    };
+
+    float hash(float2 p) {
+        return frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+    }
+
+    static const float bayer[16] = {
+         0.0/16.0, 12.0/16.0,  3.0/16.0, 15.0/16.0,
+         8.0/16.0,  4.0/16.0, 11.0/16.0,  7.0/16.0,
+         2.0/16.0, 14.0/16.0,  1.0/16.0, 13.0/16.0,
+        10.0/16.0,  6.0/16.0,  9.0/16.0,  5.0/16.0
+    };
+
+    float4 PS_RoughBlurV22(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float4 orig_color = tex0.SampleLevel(smp, uv, 0);
+        float4 acc_color = float4(0.0, 0.0, 0.0, 0.0);
+        
+        float step_px = max(0.5, (p_style == 2.0 ? 5.0 : 20.0) / max(p_density, 0.001));
+        int steps = min(512, (int)(p_length / step_px));
+        
+        if (steps > 0) {
+            float2 current_uv = uv;
+            float base_angle = p_angle_rad + 3.14159265;
+            float curve_step = (p_curve * 0.01745329) / float(steps);
+
+            float2 noise_scale = float2(p_grain, p_grain);
+            if (p_style == 1.0) noise_scale = float2(p_grain * 5.0, 1.0);
+            if (p_style == 3.0) noise_scale = float2(p_grain * 2.0, p_grain * 2.0);
+
+            [loop]
+            for (int i = 1; i <= steps; i++) {
+                float dist = step_px * float(i);
+                base_angle += curve_step;
+
+                float angle_offset = 0.0;
+                float pos_offset = 0.0;
+
+                if (p_style == 3.0) {
+                    float block = floor(dist / max(1.0, p_grain * 2.0));
+                    angle_offset = (hash(float2(block, p_speed_seed)) - 0.5) * p_randomness * 0.05;
+                } else if (p_style == 4.0) {
+                    float wave = frac(dist / max(1.0, p_grain * 2.0)) * 2.0 - 1.0;
+                    pos_offset = wave * p_randomness * 0.5;
+                } else {
+                    if (p_randomness > 0.0) {
+                        angle_offset = (hash(float2(float(i) * 0.1, p_speed_seed)) - 0.5) * p_randomness * 0.005;
+                    }
+                }
+
+                float cur_ang = base_angle + angle_offset;
+                float2 dir = float2(cos(cur_ang), sin(cur_ang));
+                float2 right_vec = float2(-dir.y, dir.x);
+                
+                float2 move_vec = dir * step_px;
+                float2 offset_vec = right_vec * pos_offset;
+                float2 uv_step = (move_vec + offset_vec) * float2(1.0 / max(p_aspect, 0.0001), 1.0) * 0.001;
+                current_uv += uv_step;
+
+                if (current_uv.x < 0.0 || current_uv.x > 1.0 || current_uv.y < 0.0 || current_uv.y > 1.0) {
+                    continue;
+                }
+
+                float4 src = tex0.SampleLevel(smp, current_uv, 0);
+
+                if (src.a > 0.05) {
+                    float2 seed_uv = (current_uv * float2(p_aspect, 1.0) * 1000.0) / max(1.0, noise_scale);
+                    float2 block_uv = floor(seed_uv);
+                    float rnd = hash(block_uv + float2(floor(p_speed_seed), floor(p_speed_seed) * 0.1));
+                    
+                    if (rnd > p_threshold) {
+                        float life_rnd = hash(block_uv + 12.34 + floor(p_speed_seed));
+                        float dist_ratio = float(i) / float(steps);
+                        float life_limit = 1.0 - (1.0 - life_rnd) * p_len_rand;
+                        
+                        if (dist_ratio <= life_limit) {
+                            float taper_factor = max(0.0, 1.0 - dist_ratio * p_taper);
+                            float alpha = src.a * taper_factor;
+                            
+                            if (p_posterize < 1.0) {
+                                alpha *= lerp(1.0 - dist_ratio, 1.0, p_posterize);
+                            }
+
+                            if (p_style == 2.0) {
+                                uint dx = (uint)pos.x % 4;
+                                uint dy = (uint)pos.y % 4;
+                                float dither_val = bayer[dy * 4 + dx];
+                                alpha = step(dither_val, alpha);
+                            }
+
+                            float3 col = src.rgb * p_tint_color;
+                            acc_color.rgb = max(acc_color.rgb, col);
+                            acc_color.a = max(acc_color.a, alpha);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 最終2値化
+        if (p_posterize > 0.5) {
+            float mask = step(0.1, acc_color.a);
+            acc_color.a = mask;
+            acc_color.rgb *= mask;
+        }
+
+        if (p_show_org < 0.5) {
+            return acc_color;
+        }
+
+        float4 final_col = float4(0.0, 0.0, 0.0, 0.0);
+        if (p_order < 0.5) {
+            final_col.rgb = orig_color.rgb + acc_color.rgb;
+            final_col.a = saturate(orig_color.a + acc_color.a);
+            final_col.rgb = min(final_col.rgb, final_col.a); // Premultiplied Alpha 整合性保持
+        } else if (p_order < 1.5) {
+            final_col = orig_color + acc_color * (1.0 - orig_color.a);
+        } else {
+            final_col = acc_color;
+        }
+
+        return final_col;
+    }
+]]
+
+--[[pixelshader@PS_Expand:
+    Texture2D tex_src : register(t0);
+    SamplerState smp : register(s0);
+
+    cbuffer Param : register(b0) {
+        float2 scale_ratio;
+        float2 dummy;
+    };
+
+    float4 PS_Expand(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float2 uv_src = (uv - 0.5) * scale_ratio + 0.5;
+        if (uv_src.x < 0.0 || uv_src.x > 1.0 || uv_src.y < 0.0 || uv_src.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+        return tex_src.Sample(smp, uv_src);
+    }
+]]
+
+local math = math
+local abs = math.abs
+local max = math.max
+local min = math.min
+local floor = math.floor
+local rad = math.rad
+
+local is_filter = obj.getinfo("filter")
+local w_org = max(1, floor(abs(obj.w or 1) * abs(obj.sx or 1.0)))
+local h_org = max(1, floor(abs(obj.h or 1) * abs(obj.sy or 1.0)))
+local w_new, h_new = w_org, h_org
+
+local safe_extend = max(extend or 0.0, 0.0)
+if not is_filter and safe_extend > 0.0 then
+    w_new = w_org + floor(safe_extend * 2.0)
+    h_new = h_org + floor(safe_extend * 2.0)
+end
+
+local aspect = (h_new > 0) and (w_new / h_new) or 1.0
+local time_seed = floor((obj.time or 0.0) * (speed or 0.0) * 0.1)
+
+local r, g, b = RGB(tint or 0xffffff)
+local r_norm, g_norm, b_norm = r / 255.0, g / 255.0, b / 255.0
+
+local params = {
+    safe_length,
+    rad(angle or 0.0),
+    min(max(threshold or 0.0, 0.0), 100.0) * 0.01,
+    max(density or 1.0, 0.001),
+    
+    min(max(style or 0, 0), 4),
+    max(grain or 1.0, 0.001),
+    min(max(randomness or 0.0, 0.0), 100.0) * 0.01,
+    min(max(len_rand or 0.0, 0.0), 100.0) * 0.01,
+    
+    (taper or 0.0) * 0.01,
+    min(max(posterize or 0.0, 0.0), 100.0) * 0.01,
+    time_seed,
+    safe_extend,
+    
+    r_norm,
+    g_norm,
+    b_norm,
+    aspect,
+    
+    curve or 0.0,
+    min(max(order or 0, 0), 2),
+    show_original and 1.0 or 0.0,
+    0.0
+}
+
+if not is_filter and safe_extend > 0.0 then
+    local buf_src = "cache:rough_orig"
+    obj.copybuffer(buf_src, "object")
+    obj.setoption("drawtarget", "tempbuffer", w_new, h_new)
+    
+    local scale_x = w_new / max(1, w_org)
+    local scale_y = h_new / max(1, h_org)
+    obj.pixelshader("PS_Expand", "tempbuffer", {buf_src}, {scale_x, scale_y, 0.0, 0.0}, "copy", "clamp")
+    
+    obj.copybuffer(buf_src, "tempbuffer")
+    obj.pixelshader("PS_RoughBlurV22", "tempbuffer", {buf_src}, params, "copy", "clamp")
+    obj.copybuffer("object", "tempbuffer")
+    obj.setoption("drawtarget", "framebuffer")
+else
+    obj.pixelshader("PS_RoughBlurV22", "object", {"object"}, params, "copy", "clamp")
+end
