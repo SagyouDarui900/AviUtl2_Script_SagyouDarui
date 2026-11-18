@@ -1,28 +1,50 @@
 --label:アニメーション効果
---group:基本設定,1
+--information:パーティクル配置アニメーション
+
+--group:基本設定,true
 --select@anim_pattern:動作パターン=0,回転=0,浮遊=1,拡散=2,収束=3,波動=4,渦=5,螺旋=6,脈動=7,落下=8
 --select@shape:配置形状=0,球体=0,立方体=1,平面=2
 --track@count:個数,1,1000,100,1
 --track@radius:半径,0,5000,300,1
 --track@size:サイズ,5,500,50,1
 --track@seed:乱数シード,0,1000,0,1
---group:全体角度,0
+--group
+
+--group:全体角度,false
 --track@rot_x:回転X,-360,360,0,1
 --track@rot_y:回転Y,-360,360,0,1
 --track@rot_z:回転Z,-360,360,0,1
 --trackgroup@rot_x,rot_y,rot_z:全体回転
---group:アニメーション調整,1
+--group
+
+--group:アニメーション調整,true
 --track@speed:全体速度,0,500,50,1
 --track@amp:動きの幅,0,1000,50,1
 --track@freq:周期・波長,1,500,50,1
 --track@randomness:ランダム感,0,100,50,1
 --track@spin_speed:自転速度,0,500,0,1
---group:描画設定,1
+--hide@amp:anim_pattern==0
+--group
+
+--group:描画設定,true
 --track@size_rand:サイズばらつき,0,100,0,1
 --track@alpha_rand:不透明度ばらつき,0,100,0,1
---check@billboard:カメラに正面を向ける,1
+--check@billboard:カメラに正面を向ける,true
+--group
 
---hide@amp:anim_pattern==0
+local obj_w = obj.w
+local obj_h = obj.h
+local base_alpha = obj.alpha
+
+if count <= 0 or obj_w <= 0 or obj_h <= 0 or base_alpha <= 0 then
+    obj.alpha = 0
+    return
+end
+
+-- スクリプト以降のフィルタ効果を元画像に事前適用
+if not obj.getinfo("filter") then
+    obj.effect()
+end
 
 local math_sin = math.sin
 local math_cos = math.cos
@@ -30,33 +52,103 @@ local math_acos = math.acos
 local math_rad = math.rad
 local math_sqrt = math.sqrt
 local math_max = math.max
+local math_min = math.min
 local math_floor = math.floor
 local math_pi = math.pi
+local obj_rand1 = obj.rand1
 
-local function pseudo_rand(seed_val, idx, offset)
-    local n = math_sin(seed_val * 12.9898 + idx * 78.233 + offset * 37.719) * 43758.5453
-    return n - math_floor(n)
+local seed_int = math_floor(seed)
+local function particle_rand(idx, offset)
+    return obj_rand1(-(seed_int * 8192 + idx * 8 + offset), 0)
 end
 
-local cam_rx = 0
-local cam_ry = 0
-local cam_rz = 0
+-- カメラ正面（ビルボード）用のローカル平面基底ベクトルを算出
+local base_rx, base_ry, base_rz = 1.0, 0.0, 0.0
+local base_dx, base_dy, base_dz = 0.0, 1.0, 0.0
 
-if type(obj.getcamera) == "function" then
-    local ok, cam = pcall(obj.getcamera)
-    if ok and type(cam) == "table" then
-        cam_rx = cam.rx or cam.angle_x or 0
-        cam_ry = cam.ry or cam.angle_y or 0
-        cam_rz = cam.rz or cam.angle_z or 0
+if billboard and obj.getoption("camera_mode") > 0 then
+    local cam = obj.getoption("camera_param")
+    if cam then
+        local fx = cam.tx - cam.x
+        local fy = cam.ty - cam.y
+        local fz = cam.tz - cam.z
+        local f_len = math_sqrt(fx * fx + fy * fy + fz * fz)
+
+        if f_len > 1e-6 then
+            fx, fy, fz = fx / f_len, fy / f_len, fz / f_len
+
+            -- 左手系（X右・Y下・Z奥）における右ベクトル: cross(fwd, cam_up)
+            local rx = fy * cam.uz - fz * cam.uy
+            local ry = fz * cam.ux - fx * cam.uz
+            local rz = fx * cam.uy - fy * cam.ux
+            local r_len = math_sqrt(rx * rx + ry * ry + rz * rz)
+
+            if r_len > 1e-6 then
+                rx, ry, rz = rx / r_len, ry / r_len, rz / r_len
+                -- 下ベクトル: cross(fwd, right)
+                local dx = fy * rz - fz * ry
+                local dy = fz * rx - fx * rz
+                local dz = fx * ry - fy * rx
+
+                -- カメラロール角（cam.rz）を反映
+                if cam.rz ~= 0 then
+                    local cr = math_rad(cam.rz)
+                    local cos_c, sin_c = math_cos(cr), math_sin(cr)
+                    local nrx = rx * cos_c + dx * sin_c
+                    local nry = ry * cos_c + dy * sin_c
+                    local nrz = rz * cos_c + dz * sin_c
+                    local ndx = -rx * sin_c + dx * cos_c
+                    local ndy = -ry * sin_c + dy * cos_c
+                    local ndz = -rz * sin_c + dz * cos_c
+                    rx, ry, rz = nrx, nry, nrz
+                    dx, dy, dz = ndx, ndy, ndz
+                end
+
+                -- オブジェクト自身の回転（obj.rx, obj.ry, obj.rz）の逆変換を適用
+                if obj.rx ~= 0 or obj.ry ~= 0 or obj.rz ~= 0 then
+                    local orx = math_rad(obj.rx)
+                    local ory = math_rad(obj.ry)
+                    local orz = math_rad(obj.rz)
+                    local cx, sx = math_cos(orx), math_sin(orx)
+                    local cy, sy = math_cos(ory), math_sin(ory)
+                    local cz, sz = math_cos(orz), math_sin(orz)
+
+                    local om11 = cy * cz
+                    local om12 = -cy * sz
+                    local om13 = sy
+                    local om21 = sx * sy * cz + cx * sz
+                    local om22 = -sx * sy * sz + cx * cz
+                    local om23 = -sx * cy
+                    local om31 = -cx * sy * cz + sx * sz
+                    local om32 = cx * sy * sz + sx * cz
+                    local om33 = cx * cy
+
+                    local irx = om11 * rx + om21 * ry + om31 * rz
+                    local iry = om12 * rx + om22 * ry + om32 * rz
+                    local irz = om13 * rx + om23 * ry + om33 * rz
+
+                    local idx = om11 * dx + om21 * dy + om31 * dz
+                    local idy = om12 * dx + om22 * dy + om32 * dz
+                    local idz = om13 * dx + om23 * dy + om33 * dz
+
+                    rx, ry, rz = irx, iry, irz
+                    dx, dy, dz = idx, idy, idz
+                end
+
+                base_rx, base_ry, base_rz = rx, ry, rz
+                base_dx, base_dy, base_dz = dx, dy, dz
+            end
+        end
     end
 end
 
-local t = obj.time * (speed / 50) * 0.1
-local f_factor = freq / 50
-local rand_factor = randomness / 100
-local size_rand_factor = size_rand / 100
-local alpha_rand_factor = alpha_rand / 100
+local t = obj.time * (speed / 50.0) * 0.1
+local f_factor = freq / 50.0
+local rand_factor = randomness / 100.0
+local size_rand_factor = size_rand / 100.0
+local alpha_rand_factor = alpha_rand / 100.0
 
+-- 全体角度回転行列（Z -> Y -> X 順）の事前合成
 local grx = math_rad(rot_x)
 local gry = math_rad(rot_y)
 local grz = math_rad(rot_z)
@@ -65,88 +157,117 @@ local cos_gx, sin_gx = math_cos(grx), math_sin(grx)
 local cos_gy, sin_gy = math_cos(gry), math_sin(gry)
 local cos_gz, sin_gz = math_cos(grz), math_sin(grz)
 
-local base_size = math_max(obj.w, obj.h, 1)
+local m11 = cos_gy * cos_gz
+local m12 = -cos_gy * sin_gz
+local m13 = sin_gy
+local m21 = sin_gx * sin_gy * cos_gz + cos_gx * sin_gz
+local m22 = -sin_gx * sin_gy * sin_gz + cos_gx * cos_gz
+local m23 = -sin_gx * cos_gy
+local m31 = -cos_gx * sin_gy * cos_gz + sin_gx * sin_gz
+local m32 = cos_gx * sin_gy * sin_gz + sin_gx * cos_gz
+local m33 = cos_gx * cos_gy
+
+local has_global_rot = (rot_x ~= 0 or rot_y ~= 0 or rot_z ~= 0)
+local base_size = math_max(obj_w, obj_h, 1)
 local base_scale = size / base_size
-local pi2 = math_pi * 2
+local half_w0 = obj_w * 0.5
+local half_h0 = obj_h * 0.5
+local pi2 = math_pi * 2.0
+
+-- パターン別事前計算定数
+local rot_y_anim = t * 0.5 * f_factor
+local rot_x_anim = t * 0.3 * f_factor
+local cos_ay, sin_ay = math_cos(rot_y_anim), math_sin(rot_y_anim)
+local cos_ax, sin_ax = math_cos(rot_x_anim), math_sin(rot_x_anim)
+
+local use_alpha_buckets = (alpha_rand > 0)
+local num_buckets = 16
+local buckets = {}
+if use_alpha_buckets then
+    for b = 1, num_buckets do
+        buckets[b] = {}
+    end
+end
+local single_quads = {}
 
 for i = 1, count do
-    local u1 = pseudo_rand(seed, i, 1)
-    local u2 = pseudo_rand(seed, i, 2)
-    local u3 = pseudo_rand(seed, i, 3)
+    local u1 = particle_rand(i, 1)
+    local u2 = particle_rand(i, 2)
+    local u3 = particle_rand(i, 3)
 
-    local x, y, z = 0, 0, 0
+    local x, y, z = 0.0, 0.0, 0.0
 
     if shape == 0 then
         local theta = u1 * pi2
-        local phi = math_acos(2 * u2 - 1)
-        local r = radius * (u3 ^ (1 / 3))
-        x = r * math_sin(phi) * math_cos(theta)
-        y = r * math_sin(phi) * math_sin(theta)
+        local phi = math_acos(2.0 * u2 - 1.0)
+        local r = radius * (u3 ^ (1.0 / 3.0))
+        local sin_phi = math_sin(phi)
+        x = r * sin_phi * math_cos(theta)
+        y = r * sin_phi * math_sin(theta)
         z = r * math_cos(phi)
     elseif shape == 1 then
-        x = (u1 - 0.5) * radius * 2
-        y = (u2 - 0.5) * radius * 2
-        z = (u3 - 0.5) * radius * 2
+        x = (u1 - 0.5) * radius * 2.0
+        y = (u2 - 0.5) * radius * 2.0
+        z = (u3 - 0.5) * radius * 2.0
     else
-        x = (u1 - 0.5) * radius * 2
-        y = (u2 - 0.5) * radius * 2
-        z = 0
+        x = (u1 - 0.5) * radius * 2.0
+        y = (u2 - 0.5) * radius * 2.0
+        z = 0.0
     end
 
     local px, py, pz = x, y, z
 
     if anim_pattern == 0 then
-        local rot_y_anim = t * 0.5 * f_factor
-        local rot_x_anim = t * 0.3 * f_factor
-        local cos_y, sin_y = math_cos(rot_y_anim), math_sin(rot_y_anim)
-        local cos_x, sin_x = math_cos(rot_x_anim), math_sin(rot_x_anim)
-        local x1 = x * cos_y + z * sin_y
-        local z1 = -x * sin_y + z * cos_y
+        local x1 = x * cos_ay + z * sin_ay
+        local z1 = -x * sin_ay + z * cos_ay
         px = x1
-        py = y * cos_x - z1 * sin_x
-        pz = y * sin_x + z1 * cos_x
+        py = y * cos_ax - z1 * sin_ax
+        pz = y * sin_ax + z1 * cos_ax
     elseif anim_pattern == 1 then
-        local phase1 = t * 1.5 * f_factor + u1 * 6.28 * rand_factor
-        local phase2 = t * 2.0 * f_factor + u2 * 6.28 * rand_factor
-        local phase3 = t * 1.8 * f_factor + u3 * 6.28 * rand_factor
+        local phase1 = t * 1.5 * f_factor + u1 * pi2 * rand_factor
+        local phase2 = t * 2.0 * f_factor + u2 * pi2 * rand_factor
+        local phase3 = t * 1.8 * f_factor + u3 * pi2 * rand_factor
         px = x + math_sin(phase1) * (amp * 0.5)
         py = y + math_sin(phase2) * amp
         pz = z + math_cos(phase3) * (amp * 0.5)
     elseif anim_pattern == 2 then
-        local dir_x, dir_y, dir_z = x, y, z
-        local len = math_sqrt(x * x + y * y + z * z)
-        if len > 0 then
-            dir_x, dir_y, dir_z = x / len, y / len, z / len
+        if radius > 0 then
+            local len = math_sqrt(x * x + y * y + z * z)
+            local dir_x, dir_y, dir_z = 0.0, 1.0, 0.0
+            if len > 0 then
+                dir_x, dir_y, dir_z = x / len, y / len, z / len
+            end
+            local offset_dist = u1 * radius * rand_factor
+            local dist = (len + t * amp * 5.0 * f_factor + offset_dist) % radius
+            px = dir_x * dist
+            py = dir_y * dist
+            pz = dir_z * dist
         else
-            dir_x, dir_y, dir_z = 0, 1, 0
+            px, py, pz = 0.0, 0.0, 0.0
         end
-        local offset_dist = u1 * radius * rand_factor
-        local dist = (len + t * amp * 5 * f_factor + offset_dist) % (radius + 1)
-        px = dir_x * dist
-        py = dir_y * dist
-        pz = dir_z * dist
     elseif anim_pattern == 3 then
-        local dir_x, dir_y, dir_z = x, y, z
-        local len = math_sqrt(x * x + y * y + z * z)
-        if len > 0 then
-            dir_x, dir_y, dir_z = x / len, y / len, z / len
+        if radius > 0 then
+            local len = math_sqrt(x * x + y * y + z * z)
+            local dir_x, dir_y, dir_z = 0.0, 1.0, 0.0
+            if len > 0 then
+                dir_x, dir_y, dir_z = x / len, y / len, z / len
+            end
+            local offset_dist = u1 * radius * rand_factor
+            local dist = radius - ((len + t * amp * 5.0 * f_factor + offset_dist) % radius)
+            px = dir_x * dist
+            py = dir_y * dist
+            pz = dir_z * dist
         else
-            dir_x, dir_y, dir_z = 0, 1, 0
+            px, py, pz = 0.0, 0.0, 0.0
         end
-        local offset_dist = u1 * radius * rand_factor
-        local dist = radius - ((len + t * amp * 5 * f_factor + offset_dist) % (radius + 1))
-        px = dir_x * dist
-        py = dir_y * dist
-        pz = dir_z * dist
     elseif anim_pattern == 4 then
-        local phase = t * 3 * f_factor + (x * 0.01 + z * 0.01) * f_factor + u1 * 3.14 * rand_factor
-        local wave = math_sin(phase)
+        local phase = t * 3.0 * f_factor + (x * 0.01 + z * 0.01) * f_factor + u1 * math_pi * rand_factor
         px = x
-        py = y + wave * amp
+        py = y + math_sin(phase) * amp
         pz = z
     elseif anim_pattern == 5 then
         local dist = math_sqrt(x * x + z * z)
-        local angle = t * 1.0 * f_factor + dist * 0.005 * (amp / 50) * f_factor + u1 * 6.28 * rand_factor
+        local angle = t * 1.0 * f_factor + dist * 0.005 * (amp / 50.0) * f_factor + u1 * pi2 * rand_factor
         local cos_a, sin_a = math_cos(angle), math_sin(angle)
         px = x * cos_a - z * sin_a
         py = y
@@ -160,43 +281,77 @@ for i = 1, count do
         py = y + math_sin(t * 1.5 * f_factor + u3 * pi2) * amp
         pz = r * sin_a
     elseif anim_pattern == 7 then
-        local pulse = 1.0 + math_sin(t * 3.0 * f_factor + u1 * pi2 * rand_factor) * (amp / 200)
+        local pulse = 1.0 + math_sin(t * 3.0 * f_factor + u1 * pi2 * rand_factor) * (amp / 200.0)
         px = x * pulse
         py = y * pulse
         pz = z * pulse
     elseif anim_pattern == 8 then
-        local height_range = radius * 2 + 1
-        local move_y = y - (t * amp * 5 * f_factor + u1 * height_range * rand_factor)
-        py = ((move_y + radius) % height_range) - radius
+        if radius > 0 then
+            local height_range = radius * 2.0
+            local move_y = y - (t * amp * 5.0 * f_factor + u1 * height_range * rand_factor)
+            py = ((move_y + radius) % height_range) - radius
+        else
+            py = y
+        end
         px = x + math_sin(t * 2.0 + u2 * pi2) * (amp * 0.1 * rand_factor)
         pz = z + math_cos(t * 2.0 + u3 * pi2) * (amp * 0.1 * rand_factor)
     end
 
-    if rot_z ~= 0 then
-        local rx_z = px * cos_gz - py * sin_gz
-        local ry_z = px * sin_gz + py * cos_gz
-        px, py = rx_z, ry_z
-    end
-    if rot_y ~= 0 then
-        local rx_y = px * cos_gy + pz * sin_gy
-        local rz_y = -px * sin_gy + pz * cos_gy
-        px, pz = rx_y, rz_y
-    end
-    if rot_x ~= 0 then
-        local ry_x = py * cos_gx - pz * sin_gx
-        local rz_x = py * sin_gx + pz * cos_gx
-        py, pz = ry_x, rz_x
+    if has_global_rot then
+        local gx = m11 * px + m12 * py + m13 * pz
+        local gy = m21 * px + m22 * py + m23 * pz
+        local gz = m31 * px + m32 * py + m33 * pz
+        px, py, pz = gx, gy, gz
     end
 
     local p_scale = base_scale * (1.0 - u2 * size_rand_factor * 0.8)
-    local p_alpha = 1.0 - u3 * alpha_rand_factor * 0.9
+    local hw = half_w0 * p_scale
+    local hh = half_h0 * p_scale
 
-    local self_rot = (obj.time * spin_speed * 2) + (u1 * 360 * rand_factor)
-    local prx = (billboard == 1) and -cam_rx or 0
-    local pry = (billboard == 1) and -cam_ry or 0
-    local prz = (billboard == 1) and (-cam_rz + self_rot) or self_rot
+    -- 自転角を適用したクワッドの右ベクトル・下ベクトル
+    local self_rot_rad = math_rad((obj.time * spin_speed * 2.0) + (u1 * 360.0 * rand_factor))
+    local cos_s = math_cos(self_rot_rad)
+    local sin_s = math_sin(self_rot_rad)
 
-    obj.draw(px, py, pz, p_scale, p_alpha, prx, pry, prz)
+    local rx = (base_rx * cos_s + base_dx * sin_s) * hw
+    local ry = (base_ry * cos_s + base_dy * sin_s) * hw
+    local rz = (base_rz * cos_s + base_dz * sin_s) * hw
+
+    local dx = (-base_rx * sin_s + base_dx * cos_s) * hh
+    local dy = (-base_ry * sin_s + base_dy * cos_s) * hh
+    local dz = (-base_rz * sin_s + base_dz * cos_s) * hh
+
+    local quad = {
+        px - rx - dx, py - ry - dy, pz - rz - dz,
+        px + rx - dx, py + ry - dy, pz + rz - dz,
+        px + rx + dx, py + ry + dy, pz + rz + dz,
+        px - rx + dx, py - ry + dy, pz - rz + dz,
+        0, 0,
+        obj_w, 0,
+        obj_w, obj_h,
+        0, obj_h
+    }
+
+    if use_alpha_buckets then
+        local rel_alpha = 1.0 - u3 * alpha_rand_factor * 0.9
+        local b_idx = math_min(num_buckets, math_max(1, math_floor(rel_alpha * num_buckets + 0.5)))
+        local bucket = buckets[b_idx]
+        bucket[#bucket + 1] = quad
+    else
+        single_quads[#single_quads + 1] = quad
+    end
 end
 
-obj.alpha = 0
+if use_alpha_buckets then
+    for b = 1, num_buckets do
+        local bucket = buckets[b]
+        if #bucket > 0 then
+            local bucket_alpha = base_alpha * ((b - 0.5) / num_buckets)
+            obj.drawpoly(bucket, bucket_alpha)
+        end
+    end
+else
+    if #single_quads > 0 then
+        obj.drawpoly(single_quads, base_alpha)
+    end
+end
