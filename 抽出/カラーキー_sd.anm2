@@ -1,4 +1,5 @@
 --label:抽出
+--filter
 --select@mode:処理モード=0,カラーキー（指定色を透過）=0,カラーキープ（指定色以外を透過）=1,色置換=2
 --color@key_color:対象色,0x00ff00
 --color@rep_color:置換色,0xff0000
@@ -42,22 +43,40 @@ float4 olm_colorkey(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float4 col = srcTex.Sample(srcSmp, uv);
     if (col.a <= 0.0) return col;
 
-    float3 straight_rgb = col.a > 0.001 ? col.rgb / col.a : col.rgb;
+    // Premultiplied RGBA から Straight RGB への安全な展開（HDR値を保持）
+    float3 raw_straight = col.rgb / max(col.a, 0.00001);
+    float3 straight_rgb = saturate(raw_straight);
 
     float dist = 0.0;
     if (color_space < 0.5) {
-        dist = distance(straight_rgb, key_rgb);
+        // RGB空間: 最大距離 sqrt(3) ~= 1.7320508 で正規化 (許容範囲100%で全域カバー)
+        dist = distance(straight_rgb, key_rgb) / 1.7320508;
     } else if (color_space < 1.5) {
+        // HSV空間: 円柱座標系 (S*cos(2pi*H), S*sin(2pi*H), V) に変換して距離を計算
+        // 彩度Sが0に近い無彩色・暗部での色相(H)のノイズ・飛びを幾何学的に解消
         float3 hsv_cur = rgb2hsv(straight_rgb);
         float3 hsv_key = rgb2hsv(key_rgb);
-        float dh = min(abs(hsv_cur.x - hsv_key.x), 1.0 - abs(hsv_cur.x - hsv_key.x));
-        float ds = abs(hsv_cur.y - hsv_key.y);
-        float dv = abs(hsv_cur.z - hsv_key.z);
-        dist = sqrt(dh * dh + ds * ds + dv * dv);
+
+        float ang_cur = hsv_cur.x * 6.2831853;
+        float ang_key = hsv_key.x * 6.2831853;
+
+        float2 chroma_cur = float2(cos(ang_cur), sin(ang_cur)) * hsv_cur.y;
+        float2 chroma_key = float2(cos(ang_key), sin(ang_key)) * hsv_key.y;
+
+        float2 d_chroma = chroma_cur - chroma_key;
+        float d_val = hsv_cur.z - hsv_key.z;
+
+        // 最大距離 sqrt(2^2 + 1^2) = sqrt(5) ~= 2.236068 で正規化
+        dist = sqrt(dot(d_chroma, d_chroma) + d_val * d_val) / 2.236068;
     } else {
+        // YUV空間: クロマキー用途に適するよう色差(UV)を重視し、輝度(Y)の過剰な影響を抑制
         float3 yuv_cur = rgb2yuv(straight_rgb);
         float3 yuv_key = rgb2yuv(key_rgb);
-        dist = distance(yuv_cur, yuv_key);
+        float3 diff_yuv = yuv_cur - yuv_key;
+
+        // 輝度差0.25倍、UV色差2.0倍の加重距離をRGB立方体内の最大距離(約1.7998275)で正規化
+        float dist_sq = (diff_yuv.x * diff_yuv.x * 0.25) + dot(diff_yuv.yz, diff_yuv.yz) * 2.0;
+        dist = sqrt(dist_sq) / 1.7998275;
     }
 
     float t_low = threshold;
@@ -65,31 +84,40 @@ float4 olm_colorkey(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     float factor = smoothstep(t_low, t_high, dist);
 
     if (mode < 0.5) {
+        // カラーキー（指定色を透過）
         col.rgb *= factor;
         col.a *= factor;
     } else if (mode < 1.5) {
+        // カラーキープ（指定色以外を透過）
         float keep_factor = 1.0 - factor;
         col.rgb *= keep_factor;
         col.a *= keep_factor;
     } else {
-        float3 new_rgb = lerp(rep_rgb, straight_rgb, factor);
-        col.rgb = new_rgb * col.a;
+        // 色置換（指定色を置換色に変更）
+        if (factor < 1.0) {
+            float3 new_rgb = lerp(rep_rgb, raw_straight, factor);
+            col.rgb = new_rgb * col.a;
+        }
     }
 
     return col;
 }
 ]]
 
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
 local key_r, key_g, key_b = RGB(key_color)
 local rep_r, rep_g, rep_b = RGB(rep_color)
 
 local constants = {
-    key_r / 255, key_g / 255, key_b / 255, 0.0,
-    rep_r / 255, rep_g / 255, rep_b / 255, 0.0,
-    threshold / 100,
-    softness / 100,
+    key_r / 255.0, key_g / 255.0, key_b / 255.0, 0.0,
+    rep_r / 255.0, rep_g / 255.0, rep_b / 255.0, 0.0,
+    threshold / 100.0,
+    softness / 100.0,
     mode,
     color_space
 }
 
-obj.pixelshader("olm_colorkey", "object", { "object" }, constants)
+obj.pixelshader("olm_colorkey", "object", { "object" }, constants, "copy", "clamp")
