@@ -2,6 +2,8 @@
 --label:画面効果\モニター再現
 --select@model:モデル=0,初代GBA(反射型)=0,GBA SP(フロントライト)=1,GBA SP(バックライト)=2
 --check@pixelate:実機解像度に合わせる,1
+--check@keep_aspect:ドット比率を正方形に保つ,1
+--hide@keep_aspect:pixelate==0
 --track@scale:ドットサイズ,1,50,4,0.1
 --hide@scale:pixelate==1
 --track@brightness:明度補正,0,200,100,1
@@ -80,7 +82,7 @@
 
             float3 bg_ref = lerp(panel_off_color, panel_off_color * 0.3, s_den);
             float3 transmit = pow(max(filter_color, 0.0), 1.2);
-            final_pixel_color = bg_ref * transmit * 2.2;
+            final_pixel_color = bg_ref * transmit * 1.55;
         } else if (m == 1) {
             float3 panel_off_color = float3(0.50, 0.55, 0.60) * brightness;
             float2 shadow_offset = float2(0.8, 0.8) / grid_num;
@@ -93,7 +95,7 @@
 
             float3 bg_ref = lerp(panel_off_color, panel_off_color * 0.4, s_den);
             float3 transmit = pow(max(filter_color, 0.0), 0.95);
-            float3 reflected = bg_ref * transmit * 2.0;
+            float3 reflected = bg_ref * transmit * 1.45;
             float3 glare = float3(0.12, 0.18, 0.25) * brightness;
             final_pixel_color = reflected + glare * (1.0 - transmit * 0.4);
         } else {
@@ -139,7 +141,7 @@
         }
 
         float luma_comp = (use_subpixel > 0.5 && cell_w >= 3.0)
-            ? lerp(1.0, 2.5, saturate((cell_w - 3.0) / 5.0))
+            ? lerp(1.0, 1.08, saturate((cell_w - 3.0) / 5.0))
             : lerp(1.0, 1.08, saturate((cell_w - 1.0) / 5.0));
 
         float3 out_rgb = final_pixel_color * sub_mask * luma_comp;
@@ -158,8 +160,18 @@ local bgr = (bgr_order == 1) and 1.0 or 0.0
 local gx, gy
 
 if pixelate == 1 then
-    gy = 160
-    gx = 240
+    local base_w, base_h = 240, 160
+    if keep_aspect == 1 then
+        if (obj.w / obj.h) > (base_w / base_h) then
+            gy = base_h
+            gx = math.max(1, math.floor(base_h * (obj.w / obj.h) + 0.5))
+        else
+            gx = base_w
+            gy = math.max(1, math.floor(base_w * (obj.h / obj.w) + 0.5))
+        end
+    else
+        gx, gy = base_w, base_h
+    end
 else
     local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
