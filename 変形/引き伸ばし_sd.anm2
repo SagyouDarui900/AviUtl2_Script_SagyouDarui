@@ -1,27 +1,28 @@
 --label:変形
 --information:引き伸ばし
+--filter
 
---group:伸長設定
+--group:伸長設定,true
 --track@ext_len:伸長量(px),0.0,4000.0,100.0,1.0
 --track@stretch_width:引き伸ばし幅(px),0.0,4000.0,50.0,1.0
 --select@stretch_mode:基準方向=0,中心(両側)=0,＋方向(右/下)=1,－方向(左/上)=2
---check@is_half_alpha:引き伸ばし部分を半透明,0
---group:
+--check@is_half_alpha:引き伸ばし部分を半透明,false
+--group
 
---group:基準座標・角度
+--group:基準座標・角度,true
 --track@center_x:中心X,-4000.0,4000.0,0.0,0.1
 --track@center_y:中心Y,-4000.0,4000.0,0.0,0.1
 --trackgroup@center_x,center_y:中心座標
 --track@angle:角度,-360.0,360.0,0.0,0.1
 --track@blur_adjust:滲み取り微調整,-5.0,5.0,0.0,0.1
---group:
+--group
 
 --[[pixelshader@stretch_ps:
 cbuffer Params : register(b0) {
     float4 p_geom;    // x: cx, y: cy, z: cos_a, w: sin_a
     float4 p_stretch; // x: ext_len, y: stretch_width, z: is_half_alpha, w: stretch_mode
     float4 p_size;    // x: obj_w, y: obj_h, z: new_w, w: new_h
-    float4 p_center;  // x: center_nx, y: center_ny, z: blur_adjust, w: obj_alpha
+    float4 p_center;  // x: center_nx, y: center_ny, z: blur_adjust, w: pad0
 };
 
 Texture2D tex : register(t0);
@@ -32,34 +33,34 @@ float4 stretch_ps(float4 vpos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
     float new_h = p_size.w;
     float px = uv.x * new_w;
     float py = uv.y * new_h;
-    
+
     // バッファ座標から元のローカル座標へ変換
     float local_x = px - new_w * 0.5 + p_center.x;
     float local_y = py - new_h * 0.5 + p_center.y;
-    
+
     float cx = p_geom.x;
     float cy = p_geom.y;
     float cos_a = p_geom.z;
     float sin_a = p_geom.w;
-    
+
     float lx = local_x - cx;
     float ly = local_y - cy;
-    
+
     // 逆回転して引き伸ばし軸に投影
     float rx = lx * cos_a + ly * sin_a;
     float ry = -lx * sin_a + ly * cos_a;
-    
+
     float stretch_width = p_stretch.y;
     float stretch_half = stretch_width * 0.5;
     float ext_len = p_stretch.x;
     float blur_adjust = p_center.z;
     float is_half_alpha = p_stretch.z;
-    float stretch_mode = p_stretch.w;
+    int mode = (int)round(p_stretch.w);
 
     float origin_rx = rx;
     float alpha_mult = 1.0;
-    
-    if (stretch_mode < 0.5) {
+
+    if (mode == 0) {
         // 中心(両側)
         if (rx > stretch_half + ext_len) {
             origin_rx = rx - ext_len;
@@ -72,7 +73,7 @@ float4 stretch_ps(float4 vpos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
             origin_rx = -stretch_half + blur_adjust;
             if (is_half_alpha > 0.5) alpha_mult = 0.5;
         }
-    } else if (stretch_mode < 1.5) {
+    } else if (mode == 1) {
         // ＋方向(右/下)
         if (rx > stretch_width + ext_len) {
             origin_rx = rx - ext_len;
@@ -89,161 +90,124 @@ float4 stretch_ps(float4 vpos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
             if (is_half_alpha > 0.5) alpha_mult = 0.5;
         }
     }
-    
+
     // 再回転して元座標系へ復元
     float ox = origin_rx * cos_a - ry * sin_a;
     float oy = origin_rx * sin_a + ry * cos_a;
-    
+
     float src_x = ox + cx;
     float src_y = oy + cy;
-    
+
     float obj_w = p_size.x;
     float obj_h = p_size.y;
     float u = (src_x + obj_w * 0.5) / obj_w;
     float v = (src_y + obj_h * 0.5) / obj_h;
-    
+
     if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
-    
+
     float4 col = tex.Sample(samp, float2(u, v));
-    return col * (alpha_mult * p_center.w);
+    return col * alpha_mult;
 }
 ]]
 
-obj.setanchor("center_x,center_y", 0, "line")
+if obj.index == 0 then
+    obj.setanchor("center_x,center_y", 0, "line")
+end
 
-local obj_w = obj.w or 0
-local obj_h = obj.h or 0
-local ext = math.max(0.0, ext_len or 0.0)
+local obj_w = obj.w
+local obj_h = obj.h
+local ext = math.max(0.0, ext_len)
 
 if obj_w <= 0 or obj_h <= 0 or ext <= 0.0 then
     return
 end
 
-local width = math.max(0.0, stretch_width or 0.0)
-local mode = math.min(2, math.max(0, math.floor(stretch_mode or 0)))
-local alpha_flag = (is_half_alpha == true or is_half_alpha == 1) and 1.0 or 0.0
-local blur = blur_adjust or 0.0
+local width = math.max(0.0, stretch_width)
+local mode = math.min(2, math.max(0, math.floor(stretch_mode + 0.5)))
+local alpha_flag = is_half_alpha and 1.0 or 0.0
 
-local rad_val = math.rad(angle or 0.0)
+local rad_val = math.rad(angle)
 local cos_a = math.cos(rad_val)
 local sin_a = math.sin(rad_val)
 
-local cx = center_x or 0.0
-local cy = center_y or 0.0
-
+local cx = center_x
+local cy = center_y
 local stretch_half = width * 0.5
 
--- 4隅のAABB算出処理 (インライン計算によるアロケーションフリー化)
+-- 4隅のAABB算出処理
 local min_x = 10000000.0
 local max_x = -10000000.0
 local min_y = 10000000.0
 local max_y = -10000000.0
 
+local function expand_bounds(x, y)
+    local lx = x - cx
+    local ly = y - cy
+    local rx = lx * cos_a + ly * sin_a
+    local ry = -lx * sin_a + ly * cos_a
+    if mode == 0 then
+        if rx > stretch_half then
+            rx = rx + ext
+        elseif rx < -stretch_half then
+            rx = rx - ext
+        end
+    elseif mode == 1 then
+        if rx > width then
+            rx = rx + ext
+        end
+    elseif mode == 2 then
+        if rx < -width then
+            rx = rx - ext
+        end
+    end
+    local nx = rx * cos_a - ry * sin_a + cx
+    local ny = rx * sin_a + ry * cos_a + cy
+    if nx < min_x then min_x = nx end
+    if nx > max_x then max_x = nx end
+    if ny < min_y then min_y = ny end
+    if ny > max_y then max_y = ny end
+end
+
 local w2 = obj_w * 0.5
 local h2 = obj_h * 0.5
+expand_bounds(-w2, -h2)
+expand_bounds( w2, -h2)
+expand_bounds( w2,  h2)
+expand_bounds(-w2,  h2)
 
--- 4頂点のローカル座標 (1:左上, 2:右上, 3:右下, 4:左下)
-local x1, y1 = -w2, -h2
-local x2, y2 =  w2, -h2
-local x3, y3 =  w2,  h2
-local x4, y4 = -w2,  h2
-
--- 頂点1
-local lx = x1 - cx
-local ly = y1 - cy
-local rx = lx * cos_a + ly * sin_a
-local ry = -lx * sin_a + ly * cos_a
-if mode == 0 then
-    if rx > stretch_half then rx = rx + ext elseif rx < -stretch_half then rx = rx - ext end
-elseif mode == 1 then
-    if rx > width then rx = rx + ext end
-elseif mode == 2 then
-    if rx < -width then rx = rx - ext end
-end
-local nx = rx * cos_a - ry * sin_a + cx
-local ny = rx * sin_a + ry * cos_a + cy
-if nx < min_x then min_x = nx end; if nx > max_x then max_x = nx end
-if ny < min_y then min_y = ny end; if ny > max_y then max_y = ny end
-
--- 頂点2
-lx = x2 - cx
-ly = y2 - cy
-rx = lx * cos_a + ly * sin_a
-ry = -lx * sin_a + ly * cos_a
-if mode == 0 then
-    if rx > stretch_half then rx = rx + ext elseif rx < -stretch_half then rx = rx - ext end
-elseif mode == 1 then
-    if rx > width then rx = rx + ext end
-elseif mode == 2 then
-    if rx < -width then rx = rx - ext end
-end
-nx = rx * cos_a - ry * sin_a + cx
-ny = rx * sin_a + ry * cos_a + cy
-if nx < min_x then min_x = nx end; if nx > max_x then max_x = nx end
-if ny < min_y then min_y = ny end; if ny > max_y then max_y = ny end
-
--- 頂点3
-lx = x3 - cx
-ly = y3 - cy
-rx = lx * cos_a + ly * sin_a
-ry = -lx * sin_a + ly * cos_a
-if mode == 0 then
-    if rx > stretch_half then rx = rx + ext elseif rx < -stretch_half then rx = rx - ext end
-elseif mode == 1 then
-    if rx > width then rx = rx + ext end
-elseif mode == 2 then
-    if rx < -width then rx = rx - ext end
-end
-nx = rx * cos_a - ry * sin_a + cx
-ny = rx * sin_a + ry * cos_a + cy
-if nx < min_x then min_x = nx end; if nx > max_x then max_x = nx end
-if ny < min_y then min_y = ny end; if ny > max_y then max_y = ny end
-
--- 頂点4
-lx = x4 - cx
-ly = y4 - cy
-rx = lx * cos_a + ly * sin_a
-ry = -lx * sin_a + ly * cos_a
-if mode == 0 then
-    if rx > stretch_half then rx = rx + ext elseif rx < -stretch_half then rx = rx - ext end
-elseif mode == 1 then
-    if rx > width then rx = rx + ext end
-elseif mode == 2 then
-    if rx < -width then rx = rx - ext end
-end
-nx = rx * cos_a - ry * sin_a + cx
-ny = rx * sin_a + ry * cos_a + cy
-if nx < min_x then min_x = nx end; if nx > max_x then max_x = nx end
-if ny < min_y then min_y = ny end; if ny > max_y then max_y = ny end
+local max_w, max_h = obj.getinfo("image_max")
+max_w = max_w or 8192
+max_h = max_h or 8192
 
 local new_w = math.max(1, math.ceil(max_x - min_x) + 4)
 local new_h = math.max(1, math.ceil(max_y - min_y) + 4)
 if new_w % 2 ~= 0 then new_w = new_w + 1 end
 if new_h % 2 ~= 0 then new_h = new_h + 1 end
+new_w = math.min(new_w, max_w)
+new_h = math.min(new_h, max_h)
 
 local center_nx = (max_x + min_x) * 0.5
 local center_ny = (max_y + min_y) * 0.5
 
-obj.setoption("drawtarget", "tempbuffer", new_w, new_h)
+local cache_name = string.format("cache:stretch_%s_%s", tostring(obj.id), tostring(obj.effect_id))
+obj.copybuffer(cache_name, "object")
+obj.clearbuffer("object", new_w, new_h)
 
 obj.pixelshader(
     "stretch_ps",
-    "tempbuffer",
-    { "object" },
+    "object",
+    { cache_name },
     {
         cx, cy, cos_a, sin_a,
         ext, width, alpha_flag, mode,
         obj_w, obj_h, new_w, new_h,
-        center_nx, center_ny, blur, obj.alpha or 1.0
+        center_nx, center_ny, blur_adjust, 0.0
     },
     "copy",
     "clip"
 )
-
-obj.copybuffer("object", "tempbuffer")
-obj.setoption("drawtarget", "framebuffer")
 
 obj.ox = obj.ox + center_nx
 obj.oy = obj.oy + center_ny
