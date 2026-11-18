@@ -1,19 +1,21 @@
 --label:クリッピング
+--information:十字クリッピング
+--filter
+
 --group:サイズ設定,true
 --track@size:サイズ(%),0,1000,100,0.1
 --track@cross_w:幅(%),0,2000,20,0.1
 --track@cross_h:高さ(%),0,2000,20,0.1
 --trackgroup@cross_w,cross_h:縦横個別
---group:
+--group
 
 --group:配置・回転,true
 --track@center_x:中心X,-20000,20000,0,0.1
 --track@center_y:中心Y,-20000,20000,0,0.1
 --trackgroup@center_x,center_y:中心座標
 --track@angle:角度,-3600,3600,0,0.1
---group:
-
 --check@invert:反転,false
+--group
 
 local w, h = obj.w, obj.h
 if w <= 0 or h <= 0 then
@@ -36,7 +38,9 @@ cbuffer params : register(b0) {
 
 float4 cross_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 color = tex.Sample(samp, uv);
-    if (color.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
+    if (color.a <= 0.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
 
     // UV座標から中心基準のローカルピクセル座標へ変換
     float2 p = float2((uv.x - 0.5) * obj_size.x, (uv.y - 0.5) * obj_size.y);
@@ -47,13 +51,12 @@ float4 cross_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targe
     local_p.x =  p_rel.x * cos_angle + p_rel.y * sin_angle;
     local_p.y = -p_rel.x * sin_angle + p_rel.y * cos_angle;
 
-    // 縦帯・横帯の外側までの符号付き距離を計算
-    float dist_v = abs(local_p.x) - cross_half.x;
-    float dist_h = abs(local_p.y) - cross_half.y;
-    float dist = min(dist_v, dist_h);
-
-    // 1ピクセル幅のアンチエイリアス処理
-    float alpha = saturate(0.5 - dist);
+    // 1ピクセル幅のボックスフィルタ積分による縦帯・横帯の被覆率計算
+    float ax = abs(local_p.x);
+    float ay = abs(local_p.y);
+    float cov_v = saturate(cross_half.x + 0.5 - ax) - saturate(-cross_half.x + 0.5 - ax);
+    float cov_h = saturate(cross_half.y + 0.5 - ay) - saturate(-cross_half.y + 0.5 - ay);
+    float alpha = max(cov_v, cov_h);
 
     if (invert > 0.5) {
         alpha = 1.0 - alpha;
@@ -64,19 +67,27 @@ float4 cross_clip_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targe
 ]]
 
 -- プレビュー画面での中心操作用アンカー
-obj.setanchor("center_x,center_y", 0, "arm")
+if obj.index == 0 then
+    obj.setanchor("center_x,center_y", 0, "arm")
+end
 
-local math = math
 local base_size = math.min(w, h)
+local scale = math.max(0.0, size) * 0.01
+local half_w = (base_size * (math.max(0.0, cross_w) * 0.01) * scale) * 0.5
+local half_h = (base_size * (math.max(0.0, cross_h) * 0.01) * scale) * 0.5
+
+-- 帯幅が完全にゼロの場合の早期リターン
+if half_w <= 0.0 and half_h <= 0.0 then
+    if not invert then
+        obj.alpha = 0
+    end
+    return
+end
+
 local rad = math.rad(angle)
 local sin_a = math.sin(rad)
 local cos_a = math.cos(rad)
-
-local scale = size * 0.01
-local half_w = (base_size * (cross_w * 0.01) * scale) * 0.5
-local half_h = (base_size * (cross_h * 0.01) * scale) * 0.5
-
-local is_invert = (invert == 1 or invert == true) and 1.0 or 0.0
+local is_invert = invert and 1.0 or 0.0
 
 -- 定数バッファ（float4 × 3 = 12要素）
 local constants = {
@@ -88,4 +99,4 @@ local constants = {
     0.0, 0.0, 0.0
 }
 
-obj.pixelshader("cross_clip_ps", "object", {"object"}, constants, "copy", "clamp")
+obj.pixelshader("cross_clip_ps", "object", { "object" }, constants, "copy", "clamp")
