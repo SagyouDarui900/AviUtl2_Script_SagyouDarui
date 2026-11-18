@@ -17,25 +17,27 @@
 --group:合成・前処理
 --track@blend_ratio:ブレンド率,0.0,1.0,0.88,0.01
 --track@blur:ぼかし量,0,50,0,1
+--group
 
 if obj.w <= 0 or obj.h <= 0 then
     return
 end
 
 if blur > 0 then
-    obj.effect("ぼかし", "範囲", blur)
+    obj.effect("ぼかし", "範囲", blur, "サイズ固定", 1)
 end
 
---[[pixelshader@ps_holographic
+--[[pixelshader@ps_holographic:
 Texture2D tex : register(t0);
 SamplerState smp : register(s0);
 
 cbuffer Params : register(b0) {
     float4 param_wave;     // x: wave_scale, y: wave_speed, z: cos(ang), w: sin(ang)
     float4 param_material; // x: distortion, y: iridescence, z: gloss, w: blend_ratio
-    float4 param_render;   // x: time, y: width, z: height, w: obj_alpha
+    float4 param_render;   // x: time, y: width, z: height, w: pad
 };
 
+// 3段階のドメインワーピングによる流体状の波高生成
 float liquid_wave(float2 p, float t) {
     float2 q = float2(
         sin(p.x * 1.15 + t * 0.72) + cos(p.y * 1.28 - t * 0.53),
@@ -52,6 +54,7 @@ float liquid_wave(float2 p, float t) {
     return (sin(s.x * 1.18) + cos(s.y * 1.12)) * 0.27 + 0.5;
 }
 
+// 前進差分による勾配(xy)と波高(z)の算出
 float3 get_wave(float2 uv, float t, float scale) {
     float2 p = uv * scale;
     float n  = liquid_wave(p, t);
@@ -61,12 +64,29 @@ float3 get_wave(float2 uv, float t, float scale) {
     return float3(nx / eps, ny / eps, n);
 }
 
-float3 pastel_palette(float t) {
-    float3 a = float3(0.94, 0.945, 0.96);
-    float3 b = float3(0.13, 0.14, 0.16);
-    float3 c = float3(1.0, 1.0, 1.0);
-    float3 d = float3(0.08, 0.35, 0.68);
-    return a + b * cos(6.2831853 * (c * t + d));
+// コサインパレットによるパステル虹色生成（sRGB空間）
+float3 pastel_palette(float t, float sat_boost) {
+    float3 a = float3(0.94, 0.945, 0.96);            // 基底明度
+    float3 b = float3(0.13, 0.14, 0.16) * sat_boost; // 彩度振幅
+    float3 c = float3(1.0, 1.0, 1.0);                // 周波数
+    float3 d = float3(0.08, 0.35, 0.68);             // RGB位相オフセット
+    return saturate(a + b * cos(6.2831853 * (c * t + d)));
+}
+
+float3 srgb_to_linear(float3 c) {
+    return float3(
+        pow(max(c.r, 0.0), 2.2),
+        pow(max(c.g, 0.0), 2.2),
+        pow(max(c.b, 0.0), 2.2)
+    );
+}
+
+float3 linear_to_srgb(float3 c) {
+    return float3(
+        pow(max(c.r, 0.0), 1.0 / 2.2),
+        pow(max(c.g, 0.0), 1.0 / 2.2),
+        pow(max(c.b, 0.0), 1.0 / 2.2)
+    );
 }
 
 float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
@@ -74,6 +94,7 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
     float height = max(param_render.z, 1.0);
     float aspect = width / height;
 
+    // アスペクト比補正と回転
     float2 suv = uv - 0.5;
     suv.x *= aspect;
 
@@ -85,12 +106,13 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
     float t = param_render.x * param_wave.y;
     float3 wave = get_wave(suv, t, param_wave.x);
 
+    // 逆回転した等方勾配（法線用）とUVアスペクト補正済み勾配（歪み用）
     float2x2 inv_rot = float2x2(c, s, -s, c);
-    float2 wave_grad = mul(wave.xy, inv_rot);
-    wave_grad.x /= aspect;
+    float2 iso_grad = mul(wave.xy, inv_rot);
+    float2 uv_grad = float2(iso_grad.x / aspect, iso_grad.y);
 
     float distortion = param_material.x;
-    float2 dist_uv = uv + wave_grad * distortion;
+    float2 dist_uv = uv + uv_grad * distortion;
     float4 col = tex.Sample(smp, dist_uv);
 
     float a = col.a;
@@ -98,10 +120,13 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    float3 rgb = col.rgb / a;
-    float lum = dot(rgb, float3(0.299, 0.587, 0.114));
+    // プリマルチプライ解除および線形空間変換
+    float3 srgb = saturate(col.rgb / a);
+    float3 lin_rgb = srgb_to_linear(srgb);
+    float lum = dot(lin_rgb, float3(0.2126, 0.7152, 0.0722));
 
-    float3 normal    = normalize(float3(-wave_grad.x, -wave_grad.y, 2.75));
+    // 等方勾配に基づく疑似法線とスペキュラ・フレネル光沢
+    float3 normal    = normalize(float3(-iso_grad.x, -iso_grad.y, 2.75));
     float3 light_dir = normalize(float3(0.42, 0.68, 1.55));
     float3 view_dir  = float3(0.0, 0.0, 1.0);
 
@@ -110,46 +135,51 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
     float RdotV = saturate(dot(view_dir, refl));
 
     float gloss = param_material.z;
-    float spec  = pow(saturate(RdotV), 17.0) * gloss;
+    float spec  = pow(RdotV, 17.0) * gloss;
     float fres  = pow(saturate(1.0 - NdotV), 2.7);
     spec += fres * gloss * 0.52;
 
-    float phase = wave.z * 1.55 + normal.x * 0.55 - normal.y * 0.42 + t * 0.17;
-    float3 iri  = pastel_palette(phase);
-
-    float3 tex_iri = iri * (lum * 0.55 + 0.45) + spec * float3(1.0, 0.98, 0.95);
-    
-    float blend_ratio = param_material.w;
+    // 虹色位相の算出と1.0超過分の彩度増幅
     float iridescence = param_material.y;
-    float3 final_rgb = lerp(rgb, tex_iri, blend_ratio * saturate(iridescence));
+    float sat_boost = 1.0 + max(iridescence - 1.0, 0.0) * 0.85;
+    float phase = wave.z * 1.55 + normal.x * 0.55 - normal.y * 0.42 + t * 0.17;
+    float3 lin_iri = srgb_to_linear(pastel_palette(phase, sat_boost));
 
-    float final_a = a * param_render.w;
-    return float4(final_rgb * final_a, final_a);
+    // 線形空間での陰影・光沢合成とブレンド
+    float3 lin_iri_lit = lin_iri * (lum * 0.55 + 0.45) + spec * float3(1.0, 0.96, 0.90);
+    float blend_ratio = param_material.w;
+    float3 lin_final = lerp(lin_rgb, lin_iri_lit, blend_ratio * saturate(iridescence));
+
+    // sRGBへ戻し、プリマルチプライドアルファ形式で出力
+    float3 out_srgb = linear_to_srgb(saturate(lin_final));
+    return float4(out_srgb * a, a);
 }
 ]]
 
 local rad_val = math.rad(wave_angle)
 
+local constants = {
+    wave_scale,
+    wave_speed,
+    math.cos(rad_val),
+    math.sin(rad_val),
+
+    distortion,
+    iridescence,
+    gloss,
+    blend_ratio,
+
+    obj.time,
+    obj.w,
+    obj.h,
+    0.0
+}
+
 obj.pixelshader(
     "ps_holographic",
     "object",
     { "object" },
-    {
-        wave_scale,
-        wave_speed,
-        math.cos(rad_val),
-        math.sin(rad_val),
-
-        distortion,
-        iridescence,
-        gloss,
-        blend_ratio,
-
-        obj.time,
-        obj.w,
-        obj.h,
-        obj.alpha
-    },
+    constants,
     "copy",
-    "clamp"
+    "mirror"
 )
