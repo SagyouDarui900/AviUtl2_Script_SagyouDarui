@@ -1,0 +1,321 @@
+--label:変形
+--select@shape_mode:形状パターン=0,横ベルト（円筒）=0,横円盤（土星の輪・チャクラム）=1,縦ベルト（セロハンテープ巻き）=2,縦円盤（正面リング）=3
+--track@radius:半径,10,2000,250,0.1
+--track@width_scale:テープ幅(%),1,500,100,0.1
+--check@keep_aspect:縦横比を自動維持,true
+--track@repeat_count:繰り返し数,1,20,1,1
+--track@speed:ループ速度(%/秒),-500,500,50,0.1
+--track@offset:位相オフセット(%),-1000,1000,0,0.1
+
+--group:立体・変形設定,true
+--track@tilt_angle:テープ傾き角,-90,90,0,0.1
+--track@spiral_pitch:螺旋ピッチ,-1000,1000,0,0.1
+--track@wave_amp:波打ち振幅,0,500,0,0.1
+--track@wave_freq:波打ち周期,1,10,2,1
+--track@rx:X回転,-3600,3600,0,0.1
+--track@ry:Y回転,-3600,3600,0,0.1
+--track@rz:Z回転,-3600,3600,0,0.1
+--trackgroup@rx,ry,rz:回転
+--group
+
+--group:詳細設定,false
+--track@div:円周分割数,8,256,64,1
+--track@back_alpha:裏面不透明度(%),0,100,100,1
+--check@z_sort:前後関係を自動ソート,true
+--check@use_open_arc:弧の範囲を指定,false
+--track@arc_angle:弧の角度,1,360,360,0.1
+--hide@arc_angle:use_open_arc==0
+--group
+
+local w = obj.w
+local h = obj.h
+if w <= 0 or h <= 0 then
+    return
+end
+
+local mode = math.floor(shape_mode + 0.5)
+local is_vertical = (mode == 2 or mode == 3)
+local is_disc = (mode == 1 or mode == 3)
+
+local base_tilt = 0.0
+if is_disc then
+    base_tilt = math.pi * 0.5
+end
+local eff_tilt = base_tilt + math.rad(tilt_angle)
+local cos_tilt = math.cos(eff_tilt)
+local sin_tilt = math.sin(eff_tilt)
+
+local span_deg = 360.0
+if use_open_arc then
+    span_deg = arc_angle
+end
+local span_rad = math.rad(span_deg)
+local start_rad = -span_rad * 0.5
+
+local seg_count = math.max(8, math.floor(div + 0.5))
+local rep = math.max(1, math.floor(repeat_count + 0.5))
+local scale = width_scale / 100.0
+
+local tape_width
+if keep_aspect then
+    local unit_arc_len = (radius * span_rad) / rep
+    tape_width = unit_arc_len * (h / w) * scale
+else
+    tape_width = h * scale
+end
+local half_width = tape_width * 0.5
+
+local scroll_phase = (offset / 100.0) + (speed / 100.0) * obj.time
+
+local local_rx = math.rad(rx)
+local local_ry = math.rad(ry)
+local local_rz = math.rad(rz)
+
+local cos_x, sin_x = math.cos(local_rx), math.sin(local_rx)
+local cos_y, sin_y = math.cos(local_ry), math.sin(local_ry)
+local cos_z, sin_z = math.cos(local_rz), math.sin(local_rz)
+
+local function rotate_local(x, y, z)
+    local y1 = y * cos_x - z * sin_x
+    local z1 = y * sin_x + z * cos_x
+
+    local x2 = x * cos_y + z1 * sin_y
+    local z2 = -x * sin_y + z1 * cos_y
+
+    local x3 = x2 * cos_z - y1 * sin_z
+    local y3 = x2 * sin_z + y1 * cos_z
+
+    return x3, y3, z2
+end
+
+local cam_mode = obj.getoption("camera_mode")
+local cam = nil
+local cam_fwd_x, cam_fwd_y, cam_fwd_z = 0.0, 0.0, 1.0
+local has_cam_dir = false
+if cam_mode ~= 0 then
+    cam = obj.getoption("camera_param")
+    if cam ~= nil then
+        local fx = cam.tx - cam.x
+        local fy = cam.ty - cam.y
+        local fz = cam.tz - cam.z
+        local flen = math.sqrt(fx * fx + fy * fy + fz * fz)
+        if flen > 1e-6 then
+            cam_fwd_x = fx / flen
+            cam_fwd_y = fy / flen
+            cam_fwd_z = fz / flen
+            has_cam_dir = true
+        end
+    end
+end
+
+local obj_pos_x = obj.x + obj.ox
+local obj_pos_y = obj.y + obj.oy
+local obj_pos_z = obj.z + obj.oz
+
+local obj_cx = obj.cx
+local obj_cy = obj.cy
+local obj_cz = obj.cz
+
+local asp = obj.aspect
+local asp_x = asp > 0.0 and (1.0 - asp) or 1.0
+local asp_y = asp < 0.0 and (1.0 + asp) or 1.0
+
+local obj_sx = obj.sx * obj.zoom * asp_x
+local obj_sy = obj.sy * obj.zoom * asp_y
+local obj_sz = obj.sz * obj.zoom
+
+local obj_rx = math.rad(obj.rx)
+local obj_ry = math.rad(obj.ry)
+local obj_rz = math.rad(obj.rz)
+local o_cos_x, o_sin_x = math.cos(obj_rx), math.sin(obj_rx)
+local o_cos_y, o_sin_y = math.cos(obj_ry), math.sin(obj_ry)
+local o_cos_z, o_sin_z = math.cos(obj_rz), math.sin(obj_rz)
+
+local function calc_depth(lx, ly, lz)
+    local sx = (lx - obj_cx) * obj_sx
+    local sy = (ly - obj_cy) * obj_sy
+    local sz = (lz - obj_cz) * obj_sz
+
+    local y1 = sy * o_cos_x - sz * o_sin_x
+    local z1 = sy * o_sin_x + sz * o_cos_x
+
+    local x2 = sx * o_cos_y + z1 * o_sin_y
+    local z2 = -sx * o_sin_y + z1 * o_cos_y
+
+    local x3 = x2 * o_cos_z - y1 * o_sin_z
+    local y3 = x2 * o_sin_z + y1 * o_cos_z
+
+    if cam ~= nil then
+        local dx = (obj_pos_x + x3) - cam.x
+        local dy = (obj_pos_y + y3) - cam.y
+        local dz = (obj_pos_z + z2) - cam.z
+        if has_cam_dir then
+            return dx * cam_fwd_x + dy * cam_fwd_y + dz * cam_fwd_z
+        else
+            return dx * dx + dy * dy + dz * dz
+        end
+    else
+        return z2
+    end
+end
+
+local function calc_edge_points(t)
+    local theta = start_rad + span_rad * t
+    local sin_t = math.sin(theta)
+    local cos_t = math.cos(theta)
+    local wave_offset = wave_amp * math.sin(theta * wave_freq)
+    local pitch_offset = spiral_pitch * (t - 0.5) + wave_offset
+
+    local cx, cy, cz
+    local bx, by, bz
+
+    if is_vertical then
+        cx = radius * sin_t
+        cy = -radius * cos_t
+        cz = pitch_offset
+
+        bx = -sin_t * sin_tilt
+        by = cos_t * sin_tilt
+        bz = cos_tilt
+    else
+        cx = radius * sin_t
+        cy = pitch_offset
+        cz = -radius * cos_t
+
+        bx = -sin_t * sin_tilt
+        by = cos_tilt
+        bz = cos_t * sin_tilt
+    end
+
+    local top_x, top_y, top_z = rotate_local(cx - bx * half_width, cy - by * half_width, cz - bz * half_width)
+    local bot_x, bot_y, bot_z = rotate_local(cx + bx * half_width, cy + by * half_width, cz + bz * half_width)
+
+    return top_x, top_y, top_z, bot_x, bot_y, bot_z
+end
+
+local items = {}
+local need_back = (back_alpha > 0 and back_alpha < 100)
+
+local function add_segment(t0, t1, p0, p1)
+    local base_k = math.floor((p0 + p1) * 0.5)
+    local u0 = math.max(0.0, math.min(w, (p0 - base_k) * w))
+    local u1 = math.max(0.0, math.min(w, (p1 - base_k) * w))
+
+    local x0, y0, z0, x3, y3, z3 = calc_edge_points(t0)
+    local x1, y1, z1, x2, y2, z2 = calc_edge_points(t1)
+
+    local d = 0.0
+    if z_sort then
+        local mx = (x0 + x1 + x2 + x3) * 0.25
+        local my = (y0 + y1 + y2 + y3) * 0.25
+        local mz = (z0 + z1 + z2 + z3) * 0.25
+        d = calc_depth(mx, my, mz)
+    end
+
+    items[#items + 1] = {
+        depth = d,
+        is_back = false,
+        quad = {
+            x0, y0, z0,
+            x1, y1, z1,
+            x2, y2, z2,
+            x3, y3, z3,
+            u0, 0,
+            u1, 0,
+            u1, h,
+            u0, h
+        }
+    }
+
+    if need_back then
+        items[#items + 1] = {
+            depth = d,
+            is_back = true,
+            quad = {
+                x1, y1, z1,
+                x0, y0, z0,
+                x3, y3, z3,
+                x2, y2, z2,
+                u1, 0,
+                u0, 0,
+                u0, h,
+                u1, h
+            }
+        }
+    end
+end
+
+local eps = 1e-7
+for i = 0, seg_count - 1 do
+    local t0 = i / seg_count
+    local t1 = (i + 1) / seg_count
+    local p0 = t0 * rep + scroll_phase
+    local p1 = t1 * rep + scroll_phase
+
+    local k_start = math.floor(p0) + 1
+    local k_end = math.floor(p1)
+
+    if k_start <= k_end then
+        local cur_t = t0
+        local cur_p = p0
+        local dp = p1 - p0
+        for k = k_start, k_end do
+            if k - cur_p > eps then
+                local ratio = (k - p0) / dp
+                local mid_t = t0 + (t1 - t0) * ratio
+                add_segment(cur_t, mid_t, cur_p, k)
+                cur_t = mid_t
+            end
+            cur_p = k
+        end
+        if p1 - cur_p > eps then
+            add_segment(cur_t, t1, cur_p, p1)
+        end
+    else
+        add_segment(t0, t1, p0, p1)
+    end
+end
+
+if z_sort then
+    table.sort(items, function(a, b)
+        if a.depth ~= b.depth then
+            return a.depth > b.depth
+        end
+        return a.is_back and not b.is_back
+    end)
+end
+
+if back_alpha <= 0 then
+    local quads = {}
+    for i = 1, #items do
+        quads[i] = items[i].quad
+    end
+    obj.setoption("culling", 1)
+    obj.drawpoly(quads, obj.alpha)
+elseif need_back then
+    local front_alpha = obj.alpha
+    local back_pass_alpha = obj.alpha * (back_alpha / 100.0)
+    obj.setoption("culling", 1)
+
+    local batch = {}
+    local cur_is_back = nil
+    for i = 1, #items do
+        local it = items[i]
+        if cur_is_back ~= nil and it.is_back ~= cur_is_back then
+            obj.drawpoly(batch, cur_is_back and back_pass_alpha or front_alpha)
+            batch = {}
+        end
+        cur_is_back = it.is_back
+        batch[#batch + 1] = it.quad
+    end
+    if #batch > 0 then
+        obj.drawpoly(batch, cur_is_back and back_pass_alpha or front_alpha)
+    end
+else
+    local quads = {}
+    for i = 1, #items do
+        quads[i] = items[i].quad
+    end
+    obj.setoption("culling", 0)
+    obj.drawpoly(quads, obj.alpha)
+end
