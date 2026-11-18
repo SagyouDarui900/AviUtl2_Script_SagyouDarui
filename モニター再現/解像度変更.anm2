@@ -29,6 +29,13 @@
     Texture2D tex : register(t0);
     SamplerState samp : register(s0);
 
+    float4 sample_safe(float2 uv) {
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+        return tex.Sample(samp, uv);
+    }
+
     float4 resize_monitor(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float2 px = uv * res;
         float2 screen_min = (res - target_res) * 0.5;
@@ -41,10 +48,12 @@
 
         float2 screen_uv = (px - screen_min) / target_res;
         float2 src_uv = screen_uv;
+        float2 uv_step = 1.0 / target_res;
 
         if (mode < 0.5) {
             float2 src_px = (res * 0.5) - (target_res * 0.5) + (screen_uv * target_res) + center;
             src_uv = src_px / res;
+            uv_step = 1.0 / res;
         } else if (mode < 1.5) {
             float s = min(target_res.x / res.x, target_res.y / res.y);
             float2 draw_size = res * s;
@@ -56,14 +65,17 @@
                 return float4(0.0, 0.0, 0.0, 0.0);
             }
             src_uv = (draw_px - offset) / draw_size;
+            uv_step = 1.0 / draw_size;
         } else if (mode < 2.5) {
             float s = max(target_res.x / res.x, target_res.y / res.y);
             float2 draw_size = res * s;
             float2 offset = (target_res - draw_size) * 0.5;
             float2 draw_px = screen_uv * target_res;
             src_uv = (draw_px - offset) / draw_size + (center / res);
+            uv_step = 1.0 / draw_size;
         } else {
             src_uv = screen_uv;
+            uv_step = 1.0 / target_res;
         }
 
         if (src_uv.x < 0.0 || src_uv.x > 1.0 || src_uv.y < 0.0 || src_uv.y > 1.0) {
@@ -72,6 +84,17 @@
 
         if (pixel_art > 0.5) {
             src_uv = (floor(src_uv * res) + 0.5) / res;
+            return tex.Sample(samp, src_uv);
+        }
+
+        float2 texel_step = uv_step * res;
+        if (texel_step.x > 1.5 || texel_step.y > 1.5) {
+            float2 q = uv_step * 0.25;
+            float4 c0 = sample_safe(src_uv + float2(-q.x, -q.y));
+            float4 c1 = sample_safe(src_uv + float2( q.x, -q.y));
+            float4 c2 = sample_safe(src_uv + float2(-q.x,  q.y));
+            float4 c3 = sample_safe(src_uv + float2( q.x,  q.y));
+            return (c0 + c1 + c2 + c3) * 0.25;
         }
 
         return tex.Sample(samp, src_uv);
