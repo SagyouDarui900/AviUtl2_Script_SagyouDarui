@@ -10,7 +10,7 @@
 --track@space_y:縦の間隔補正(px),-100.0,100.0,0.0,0.1
 --trackgroup@space_x,space_y:間隔補正
 --track@space_align:補正基準(%),0.0,100.0,50.0,0.1
---group:
+--group
 
 --[[pixelshader@shear_simple_ps:
 cbuffer params : register(b0) {
@@ -28,16 +28,33 @@ float4 shear_simple_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Tar
         dot(uv_mat.xy, centered_uv) + uv_offset.x,
         dot(uv_mat.zw, centered_uv) + uv_offset.y
     );
-    return tex.Sample(samp, src_uv);
+
+    float2 fw = max(fwidth(src_uv), 1e-6);
+    float2 edge = smoothstep(-0.5 * fw, 0.5 * fw, src_uv) * smoothstep(-0.5 * fw, 0.5 * fw, 1.0 - src_uv);
+    float aa = edge.x * edge.y;
+
+    float4 col = tex.Sample(samp, src_uv);
+    return col * aa;
 }
 ]]
 
-if obj.w <= 0 or obj.h <= 0 then
+local w = obj.w
+local h = obj.h
+if w <= 0 or h <= 0 then
     return
 end
 
--- 変形・補正パラメータがすべて0の場合は処理をスキップ
-if shear_x == 0 and shear_y == 0 and local_rot == 0 and space_x == 0 and space_y == 0 then
+-- 個別オブジェクト時の文字間隔補正
+if space_x ~= 0 or space_y ~= 0 then
+    local count = math.max(1, obj.num)
+    local pivot_idx = (count - 1) * (space_align * 0.01)
+    local char_offset_idx = obj.index - pivot_idx
+    obj.ox = obj.ox + space_x * char_offset_idx
+    obj.oy = obj.oy + space_y * char_offset_idx
+end
+
+-- 剪断・回転パラメータがすべて0の場合はシェーダー処理をスキップ
+if shear_x == 0 and shear_y == 0 and local_rot == 0 then
     return
 end
 
@@ -63,8 +80,9 @@ local m22 = sin_r * tan_sx + cos_r
 -- 行列式 det(M)
 local det = m11 * m22 - m12 * m21
 
--- 特異行列ガード: 行列式が極小（不可逆・面が潰れる状態）の場合は描画をスキップ
+-- 特異行列ガード: 面が潰れる状態では透明にして描画をスキップ
 if math.abs(det) < 0.0001 then
+    obj.alpha = 0
     return
 end
 
@@ -74,45 +92,38 @@ local inv_m12 = -m12 / det
 local inv_m21 = -m21 / det
 local inv_m22 = m11 / det
 
-local hw = obj.w * 0.5
-local hh = obj.h * 0.5
+local hw = w * 0.5
+local hh = h * 0.5
 
--- 補正基準 (0%: 左/上基準 -space/2, 50%: 中央基準 0, 100%: 右/下基準 +space/2)
-local offset_x = space_x * (space_align * 0.01 - 0.5)
-local offset_y = space_y * (space_align * 0.01 - 0.5)
+-- 変換後バウンディングボックスの半幅・半高
+local max_abs_x = math.abs(m11) * hw + math.abs(m12) * hh
+local max_abs_y = math.abs(m21) * hw + math.abs(m22) * hh
 
--- 変換後バウンディングボックスの半幅・半高（順変換の極大値 + スクリーンオフセット）
-local max_abs_x = math.abs(m11) * hw + math.abs(m12) * hh + math.abs(offset_x)
-local max_abs_y = math.abs(m21) * hw + math.abs(m22) * hh + math.abs(offset_y)
+-- システムの最大画像サイズ上限を考慮して出力バッファサイズを決定（中心対称維持のため偶数化）
+local max_tex_w, max_tex_h = obj.getinfo("image_max")
+local new_w = math.min(math.max(w, math.ceil(max_abs_x) * 2), max_tex_w)
+local new_h = math.min(math.max(h, math.ceil(max_abs_y) * 2), max_tex_h)
 
-local scale_x = max_abs_x / hw
-local scale_y = max_abs_y / hh
--- バッファ拡大率の上限を設定し、極端な角度でのメモリ・描画リソース爆発を防止
-local scale = math.min(math.max(1.0, scale_x, scale_y), 50.0)
+-- 元画像を固有キャッシュに退避し、出力バッファをリサイズ
+local cache_name = string.format("cache:shear_%d_%d", obj.id, obj.effect_id)
+obj.copybuffer(cache_name, "object")
+obj.clearbuffer("object", new_w, new_h)
 
-obj.zoom = obj.zoom * scale
-
--- UVサンプリング逆変換行列の構築
--- ピクセル座標系: (x_s, y_s)^T = M^-1 * (x_d, y_d)^T
--- 正規化UV変換: u_s - 0.5 = inv_m11 * (u_d - 0.5) + inv_m12 * (h/w) * (v_d - 0.5)
---              v_s - 0.5 = inv_m21 * (w/h) * (u_d - 0.5) + inv_m22 * (v_d - 0.5)
-local mat_u_x = inv_m11 * scale
-local mat_u_y = inv_m12 * scale * (obj.h / obj.w)
-local mat_v_x = inv_m21 * scale * (obj.w / obj.h)
-local mat_v_y = inv_m22 * scale
-
--- スクリーン空間でのオフセット量 (offset_x, offset_y) をサンプリング中心へ反映
-local off_u = 0.5 - (inv_m11 * offset_x + inv_m12 * offset_y) / obj.w
-local off_v = 0.5 - (inv_m21 * offset_x + inv_m22 * offset_y) / obj.h
+-- 出力バッファUV (u_d, v_d) から元画像UV (u_s, v_s) への逆変換係数
+-- x_d = (u_d - 0.5) * new_w,  y_d = (v_d - 0.5) * new_h
+local mat_u_x = inv_m11 * (new_w / w)
+local mat_u_y = inv_m12 * (new_h / w)
+local mat_v_x = inv_m21 * (new_w / h)
+local mat_v_y = inv_m22 * (new_h / h)
 
 obj.pixelshader(
     "shear_simple_ps",
     "object",
-    { "object" },
+    { cache_name },
     {
         mat_u_x, mat_u_y, mat_v_x, mat_v_y,
-        off_u, off_v, 0.0, 0.0  -- 16バイトアライメントパディング
+        0.5, 0.5, 0.0, 0.0  -- 16バイトアライメントパディング
     },
     "copy",
-    "clip"
+    "clamp"
 )
