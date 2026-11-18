@@ -24,6 +24,12 @@
     Texture2D tex : register(t0);
     SamplerState samp : register(s0);
 
+    float eval_segment(float luma, float th) {
+        if (th <= 0.001) return 0.0;
+        if (th >= 0.999) return 1.0;
+        return 1.0 - smoothstep(th - 0.05, th + 0.05, luma);
+    }
+
     float4 gw_lcd(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float2 sample_uv = (grid_num.x > 0.0) ? ((floor(uv * grid_num) + 0.5) / grid_num) : uv;
         float4 original = tex.Sample(samp, sample_uv);
@@ -32,7 +38,7 @@
         float3 rgb = original.rgb / original.a;
         float luma = dot(rgb, float3(0.299, 0.587, 0.114));
 
-        float soft_seg = 1.0 - smoothstep(threshold - 0.05, threshold + 0.05, luma);
+        float soft_seg = eval_segment(luma, threshold);
 
         float2 shadow_offset = float2(-1.0, -1.0) / res * shadow;
         float2 shadow_sample_uv = (grid_num.x > 0.0) ? ((floor((uv + shadow_offset) * grid_num) + 0.5) / grid_num) : (uv + shadow_offset);
@@ -41,13 +47,13 @@
         float soft_shadow = 0.0;
         if (c_shadow.a > 0.0) {
             float luma_shadow = dot(c_shadow.rgb / c_shadow.a, float3(0.299, 0.587, 0.114));
-            soft_shadow = 1.0 - smoothstep(threshold - 0.05, threshold + 0.05, luma_shadow);
+            soft_shadow = eval_segment(luma_shadow, threshold);
         }
 
         float dist = distance(uv, float2(0.5, 0.5));
         float3 bg_color = col_bg.rgb * (1.0 - dist * 0.20);
 
-        float ghost_mask = (1.0 - soft_seg) * smoothstep(threshold + 0.40, threshold - 0.05, luma);
+        float ghost_mask = (1.0 - soft_seg) * (1.0 - smoothstep(threshold - 0.05, threshold + 0.40, luma));
         bg_color = lerp(bg_color, col_fg.rgb, ghost_mask * ghost * 0.22);
         bg_color = lerp(bg_color, col_fg.rgb, soft_shadow * 0.18);
         float3 final_color = lerp(bg_color, col_fg.rgb, soft_seg * 0.95);
