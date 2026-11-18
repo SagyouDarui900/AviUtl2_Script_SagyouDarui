@@ -1,0 +1,90 @@
+--label:配置
+--information:フラクタルモザイク
+
+--group:基本設定,true
+--track@x_offset:X,-4000,4000,0,0.1
+--track@y_offset:Y,-4000,4000,0,0.1
+--trackgroup@x_offset,y_offset:オフセット
+--track@rotation:回転,-360,360,0,0.1
+--track@zoom_ratio:拡大率,0,99,50,0.1
+--group
+
+--group:詳細設定,true
+--check@is_direct_draw:画面に直接描画,1
+--track@max_draw_count:最大描画数,1,1000,100,1
+--value@target_layer:座標参照レイヤー,nil
+--group
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+local has_target_layer = (type(target_layer) == "number" and target_layer >= 1 and math.floor(target_layer) == target_layer)
+if not has_target_layer then
+    obj.setanchor("x_offset,y_offset", 1, "arm")
+end
+
+local function get_target_layer_value(value_name)
+    return obj.getvalue("layer" .. tostring(target_layer) .. "." .. value_name)
+end
+
+local zoom = zoom_ratio / 100.0
+local angle = math.rad(rotation)
+local x, y = x_offset, y_offset
+
+if has_target_layer then
+    local tx = get_target_layer_value("x")
+    if tx ~= nil then
+        local tzoom = get_target_layer_value("zoom") or 100.0
+        local trz = get_target_layer_value("rz") or 0.0
+        local ty = get_target_layer_value("y") or 0.0
+        zoom = tzoom / 100.0
+        angle = math.rad(trz)
+        x = tx - obj.x - obj.ox
+        y = ty - obj.y - obj.oy
+    end
+end
+
+if zoom >= 1.0 then
+    return
+end
+
+local radius = math.sqrt(x * x + y * y)
+local initial_angle = math.atan2(y, x)
+local next_x, next_y, next_zoom = 0.0, 0.0, 1.0
+
+local aspect = obj.aspect or 0.0
+local base_min_size = math.min(
+    obj.w * math.min(1.0, 1.0 - aspect),
+    obj.h * math.min(1.0, 1.0 + aspect)
+) * obj.zoom
+
+if is_direct_draw == 1 then
+    obj.effect()
+    for i = 0, max_draw_count do
+        if i > 0 and (zoom <= 0.0 or base_min_size * next_zoom < math.max(zoom, 0.5)) then
+            break
+        end
+        obj.draw(next_x, next_y, 0, next_zoom, 1.0, 0, 0, math.deg(angle * i))
+        next_x = next_x + radius * next_zoom * math.cos(initial_angle + angle * i)
+        next_y = next_y + radius * next_zoom * math.sin(initial_angle + angle * i)
+        next_zoom = next_zoom * zoom
+    end
+else
+    obj.effect()
+    local width = math.max(1, math.floor(obj.w))
+    local height = math.max(1, math.floor(obj.h))
+
+    obj.setoption("drawtarget", "tempbuffer", width, height)
+    for i = 0, max_draw_count do
+        if i > 0 and (zoom <= 0.0 or base_min_size * next_zoom < 1.0) then
+            break
+        end
+        obj.draw(next_x, next_y, 0, next_zoom, 1.0, 0, 0, math.deg(angle * i))
+        next_x = next_x + radius * next_zoom * math.cos(initial_angle + angle * i)
+        next_y = next_y + radius * next_zoom * math.sin(initial_angle + angle * i)
+        next_zoom = next_zoom * zoom
+    end
+    obj.setoption("drawtarget", "framebuffer")
+    obj.copybuffer("object", "tempbuffer")
+end
