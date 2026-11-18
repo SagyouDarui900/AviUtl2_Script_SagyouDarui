@@ -1,5 +1,5 @@
 --label:アニメーション効果
---information:公転・自転アニメーション
+--information:公転・自転アニメーション v2.0
 
 --group:公転設定
 --select@speed_mode:速度指定=0,角度/秒=0,BPM同期=1
@@ -14,7 +14,7 @@
 --select@dir:回転方向=0,時計回り(右)=0,反時計回り(左)=1
 --select@shape:軌道形状=0,円=0,正方形=1
 --track@orbit_angle:軌道の傾き,-360.0,360.0,0.0,0.1
---group:
+--group
 
 --group:本体設定
 --track@spin:自転速度[deg/s],-3600.0,3600.0,0.0,1.0
@@ -22,17 +22,17 @@
 --select@obj_anchor:基準点=4,左上=0,上中=1,右上=2,中左=3,中央=4,中右=5,左下=6,下中=7,右下=8
 --check@sync_rot:公転に同期,0
 --value@center_pos:中心座標,{0, 0}
---group:
+--group
 
 --group:軌跡設定
 --select@orbit_mode:軌跡モード=0,なし=0,残像スタンプ=1,実線=2
 --color@orbit_color:線の色,0xffffff
---track@orbit_width:線の太さ,1.0,100.0,4.0,0.5
+--track@orbit_width:線の太さ,1.0,100.0,4.0,0.1
 --track@orbit_alpha:軌跡不透明度(%),0.0,100.0,50.0,0.1
---hide@orbit_color:orbit_mode==0
+--hide@orbit_color:orbit_mode~=2
 --hide@orbit_width:orbit_mode~=2
 --hide@orbit_alpha:orbit_mode==0
---group:
+--group
 
 if obj.w <= 0 or obj.h <= 0 then
     return
@@ -40,7 +40,7 @@ end
 
 -- 数学関数の局所化
 local rad, cos, sin = math.rad, math.cos, math.sin
-local abs, max, sqrt, atan2, floor = math.abs, math.max, math.sqrt, math.atan2, math.floor
+local abs, min, max, sqrt, atan2, floor = math.abs, math.min, math.max, math.sqrt, math.atan2, math.floor
 
 -- 軌道上のローカル座標算出ヘルパー関数
 local function calc_orbit_local(rad_angle, radius_circle, radius_sq, is_square)
@@ -53,38 +53,45 @@ local function calc_orbit_local(rad_angle, radius_circle, radius_sq, is_square)
     return radius_sq * (l_cos * inv_max_cs), radius_sq * (l_sin * inv_max_cs)
 end
 
--- 回転・平行移動後のワールド座標算出ヘルパー関数
+-- 回転・平行移動後の基準ワールド座標算出ヘルパー関数
 local function to_world_pos(lx, ly, cx, cy, o_cos, o_sin)
     return cx + (lx * o_cos - ly * o_sin), cy + (lx * o_sin + ly * o_cos)
 end
 
+-- 既存オブジェクト状態の退避
+local orig_ox, orig_oy, orig_oz = obj.ox, obj.oy, obj.oz
+local orig_cx, orig_cy, orig_cz = obj.cx, obj.cy, obj.cz
+local orig_rx, orig_ry, orig_rz = obj.rx, obj.ry, obj.rz
+local orig_zoom = obj.zoom
+local orig_sx, orig_sy, orig_sz = obj.sx, obj.sy, obj.sz
+local orig_aspect = obj.aspect
+local orig_alpha = obj.alpha
+
 -- 1. オブジェクトの基準点オフセット算出
-local hw, hh = obj.w * 0.5, obj.h * 0.5
-local cx_ofs = (obj_anchor % 3 - 1) * hw
-local cy_ofs = (floor(obj_anchor / 3) - 1) * hh
+local w_val, h_val = obj.w, obj.h
+local hw, hh = w_val * 0.5, h_val * 0.5
+local anchor_ofs_x = (obj_anchor % 3 - 1) * hw
+local anchor_ofs_y = (floor(obj_anchor / 3) - 1) * hh
 
-local scale_factor = obj_scale * 0.01
-local zoom_base = obj.zoom or 1.0
-local zx = zoom_base * (obj.sx or 1.0) * scale_factor
-local zy = zoom_base * (obj.sy or 1.0) * scale_factor
+local new_cx = orig_cx + anchor_ofs_x
+local new_cy = orig_cy + anchor_ofs_y
 
-if obj.aspect then
-    if obj.aspect > 0 then
-        zy = zy * (1.0 - obj.aspect)
-    elseif obj.aspect < 0 then
-        zx = zx * (1.0 + obj.aspect)
-    end
+local orig_zx = orig_zoom * orig_sx
+local orig_zy = orig_zoom * orig_sy
+if orig_aspect > 0 then
+    orig_zx = orig_zx * (1.0 - orig_aspect)
+elseif orig_aspect < 0 then
+    orig_zy = orig_zy * (1.0 + orig_aspect)
 end
 
-local ofs_x = cx_ofs * zx
-local ofs_y = cy_ofs * zy
+local ofs_x = anchor_ofs_x * orig_zx
+local ofs_y = anchor_ofs_y * orig_zy
 
-local original_rz = obj.rz or 0.0
-local r_rad = rad(original_rz)
+local r_rad = rad(orig_rz)
 local r_cos, r_sin = cos(r_rad), sin(r_rad)
 
-local base_x = (obj.ox or 0.0) + (ofs_x * r_cos - ofs_y * r_sin)
-local base_y = (obj.oy or 0.0) + (ofs_x * r_sin + ofs_y * r_cos)
+local base_x = orig_ox + (ofs_x * r_cos - ofs_y * r_sin)
+local base_y = orig_oy + (ofs_x * r_sin + ofs_y * r_cos)
 
 -- 2. 軌道半径と初期位置の計算
 obj.setanchor("center_pos", 1, "arm", "color", 0x00ffff)
@@ -107,11 +114,11 @@ local init_rad = atan2(local_dy, local_dx)
 local base_radius = sqrt(local_dx * local_dx + local_dy * local_dy)
 local base_sq_radius = max(abs(local_dx), abs(local_dy))
 
-local radius = max(0.0, base_radius + distance)
-local sq_radius = max(0.0, base_sq_radius + distance)
+local radius = base_radius + distance
+local sq_radius = base_sq_radius + distance
 local is_square = (shape == 1)
 
--- 3. 回転角度の計算
+-- 3. 回転角度・拡大率の計算
 local calc_speed = speed
 if speed_mode == 1 then
     local safe_bpm = max(0.1, bpm)
@@ -123,136 +130,150 @@ local cur_time = obj.time
 local rot_deg = (calc_speed * dir_mult) * cur_time + angle
 local rot_rad = rad(rot_deg)
 
-local original_alpha = obj.alpha or 1.0
+local spin_deg = spin * dir_mult * cur_time
+local scale_factor = obj_scale * 0.01
+local final_zx = orig_zx * scale_factor
+local final_zy = orig_zy * scale_factor
 
--- 4. 軌跡の描画処理
-if orbit_mode == 1 then
-    -- 残像スタンプ描画 (一括 drawpoly)
-    local stamp_count = 48
-    local stamp_alpha = original_alpha * (orbit_alpha * 0.01)
-    local draw_zoom = zoom_base * scale_factor
-    local w_val, h_val = obj.w, obj.h
-    local shw = (w_val * 0.5) * draw_zoom
-    local shh = (h_val * 0.5) * draw_zoom
+-- 4. 軌跡の描画処理（オブジェクト変換を一時的に恒等化してワールド基準空間へ描画）
+if orbit_mode ~= 0 then
+    obj.ox, obj.oy, obj.oz = 0.0, 0.0, 0.0
+    obj.cx, obj.cy, obj.cz = 0.0, 0.0, 0.0
+    obj.rx, obj.ry, obj.rz = 0.0, 0.0, 0.0
+    obj.zoom = 1.0
+    obj.sx, obj.sy, obj.sz = 1.0, 1.0, 1.0
+    obj.aspect = 0.0
+    obj.alpha = 1.0
 
-    local vertices = {}
+    if orbit_mode == 1 then
+        -- 残像スタンプ描画 (一括 drawpoly)
+        local stamp_count = 48
+        local stamp_alpha = orig_alpha * (orbit_alpha * 0.01)
 
-    for i = 0, stamp_count - 1 do
-        local stamp_deg = angle + (i * (360.0 / stamp_count))
-        local stamp_local_rad = init_rad + rad(stamp_deg)
-        local lx, ly = calc_orbit_local(stamp_local_rad, radius, sq_radius, is_square)
-        local target_x, target_y = to_world_pos(lx, ly, cx, cy, o_cos, o_sin)
+        -- 回転中心からのローカル4隅座標（スケール適用済み）
+        local lx0, ly0 = (-hw - new_cx) * final_zx, (-hh - new_cy) * final_zy
+        local lx1, ly1 = ( hw - new_cx) * final_zx, (-hh - new_cy) * final_zy
+        local lx2, ly2 = ( hw - new_cx) * final_zx, ( hh - new_cy) * final_zy
+        local lx3, ly3 = (-hw - new_cx) * final_zx, ( hh - new_cy) * final_zy
 
-        local stamp_rz = original_rz + orbit_angle
-        if sync_rot == 1 then
-            stamp_rz = stamp_rz + stamp_deg
-        end
+        local vertices = {}
+        local step_deg = 360.0 / stamp_count
 
-        local s_rad = rad(stamp_rz)
-        local sc_cos, sc_sin = cos(s_rad), sin(s_rad)
+        for i = 0, stamp_count - 1 do
+            local stamp_deg = rot_deg + (i * step_deg)
+            local stamp_local_rad = init_rad + rad(stamp_deg)
+            local lx, ly = calc_orbit_local(stamp_local_rad, radius, sq_radius, is_square)
+            local target_x, target_y = to_world_pos(lx, ly, cx, cy, o_cos, o_sin)
 
-        -- アンカーオフセットを考慮した中心座標
-        local center_tx = target_x - (cx_ofs * draw_zoom * sc_cos - cy_ofs * draw_zoom * sc_sin)
-        local center_ty = target_y - (cx_ofs * draw_zoom * sc_sin + cy_ofs * draw_zoom * sc_cos)
+            local stamp_rz = orig_rz + orbit_angle + spin_deg
+            if sync_rot == 1 then
+                stamp_rz = stamp_rz + stamp_deg
+            end
 
-        local x0 = center_tx + (-shw * sc_cos - -shh * sc_sin)
-        local y0 = center_ty + (-shw * sc_sin + -shh * sc_cos)
+            local s_rad = rad(stamp_rz)
+            local sc_cos, sc_sin = cos(s_rad), sin(s_rad)
 
-        local x1 = center_tx + ( shw * sc_cos - -shh * sc_sin)
-        local y1 = center_ty + ( shw * sc_sin + -shh * sc_cos)
+            local x0 = target_x + (lx0 * sc_cos - ly0 * sc_sin)
+            local y0 = target_y + (lx0 * sc_sin + ly0 * sc_cos)
 
-        local x2 = center_tx + ( shw * sc_cos -  shh * sc_sin)
-        local y2 = center_ty + ( shw * sc_sin +  shh * sc_cos)
+            local x1 = target_x + (lx1 * sc_cos - ly1 * sc_sin)
+            local y1 = target_y + (lx1 * sc_sin + ly1 * sc_cos)
 
-        local x3 = center_tx + (-shw * sc_cos -  shh * sc_sin)
-        local y3 = center_ty + (-shw * sc_sin +  shh * sc_cos)
+            local x2 = target_x + (lx2 * sc_cos - ly2 * sc_sin)
+            local y2 = target_y + (lx2 * sc_sin + ly2 * sc_cos)
 
-        vertices[i + 1] = {
-            x0, y0, 0,
-            x1, y1, 0,
-            x2, y2, 0,
-            x3, y3, 0,
-            0, 0, w_val, 0, w_val, h_val, 0, h_val,
-        }
-    end
-
-    obj.setoption("culling", 0)
-    obj.drawpoly(vertices, stamp_alpha)
-
-elseif orbit_mode == 2 then
-    -- 実線軌道描画
-    local line_alpha = original_alpha * (orbit_alpha * 0.01)
-    local lr, lg, lb = RGB(orbit_color)
-    local cr = (lr / 255.0) * line_alpha
-    local cg = (lg / 255.0) * line_alpha
-    local cb = (lb / 255.0) * line_alpha
-
-    local half_w = orbit_width * 0.5
-    local vertices = {}
-
-    if not is_square then
-        -- 円形軌道 (64分割リングポリゴン)
-        local segments = 64
-        local r_in = max(0.0, radius - half_w)
-        local r_out = radius + half_w
-        local two_pi = 6.283185307179586
-
-        for i = 0, segments - 1 do
-            local a0 = (i / segments) * two_pi
-            local a1 = ((i + 1) / segments) * two_pi
-
-            local cos0, sin0 = cos(a0), sin(a0)
-            local cos1, sin1 = cos(a1), sin(a1)
-
-            local p0_x, p0_y = to_world_pos(r_in * cos0, r_in * sin0, cx, cy, o_cos, o_sin)
-            local p1_x, p1_y = to_world_pos(r_out * cos0, r_out * sin0, cx, cy, o_cos, o_sin)
-            local p2_x, p2_y = to_world_pos(r_out * cos1, r_out * sin1, cx, cy, o_cos, o_sin)
-            local p3_x, p3_y = to_world_pos(r_in * cos1, r_in * sin1, cx, cy, o_cos, o_sin)
+            local x3 = target_x + (lx3 * sc_cos - ly3 * sc_sin)
+            local y3 = target_y + (lx3 * sc_sin + ly3 * sc_cos)
 
             vertices[i + 1] = {
-                p0_x, p0_y, 0,
-                p1_x, p1_y, 0,
-                p2_x, p2_y, 0,
-                p3_x, p3_y, 0,
-                cr, cg, cb, line_alpha,
-                cr, cg, cb, line_alpha,
-                cr, cg, cb, line_alpha,
-                cr, cg, cb, line_alpha,
+                x0, y0, 0,
+                x1, y1, 0,
+                x2, y2, 0,
+                x3, y3, 0,
+                0, 0, w_val, 0, w_val, h_val, 0, h_val,
             }
         end
-    else
-        -- 正方形軌道 (4辺のラインポリゴン)
-        local s_in = max(0.0, sq_radius - half_w)
-        local s_out = sq_radius + half_w
-        local corners_in = {
-            {-s_in, -s_in}, {s_in, -s_in}, {s_in, s_in}, {-s_in, s_in}
-        }
-        local corners_out = {
-            {-s_out, -s_out}, {s_out, -s_out}, {s_out, s_out}, {-s_out, s_out}
-        }
 
-        for i = 1, 4 do
-            local ni = (i % 4) + 1
-            local p0_x, p0_y = to_world_pos(corners_in[i][1], corners_in[i][2], cx, cy, o_cos, o_sin)
-            local p1_x, p1_y = to_world_pos(corners_out[i][1], corners_out[i][2], cx, cy, o_cos, o_sin)
-            local p2_x, p2_y = to_world_pos(corners_out[ni][1], corners_out[ni][2], cx, cy, o_cos, o_sin)
-            local p3_x, p3_y = to_world_pos(corners_in[ni][1], corners_in[ni][2], cx, cy, o_cos, o_sin)
+        obj.setoption("culling", 0)
+        obj.drawpoly(vertices, stamp_alpha)
 
-            vertices[i] = {
-                p0_x, p0_y, 0,
-                p1_x, p1_y, 0,
-                p2_x, p2_y, 0,
-                p3_x, p3_y, 0,
-                cr, cg, cb, line_alpha,
-                cr, cg, cb, line_alpha,
-                cr, cg, cb, line_alpha,
-                cr, cg, cb, line_alpha,
+    elseif orbit_mode == 2 then
+        -- 実線軌道描画
+        local line_alpha = orig_alpha * (orbit_alpha * 0.01)
+        local lr, lg, lb = RGB(orbit_color)
+        local cr = (lr / 255.0) * line_alpha
+        local cg = (lg / 255.0) * line_alpha
+        local cb = (lb / 255.0) * line_alpha
+
+        local half_w = orbit_width * 0.5
+        local vertices = {}
+
+        if not is_square then
+            -- 円形軌道 (半径に応じた動的分割リングポリゴン)
+            local abs_radius = abs(radius)
+            local segments = min(256, max(64, floor(abs_radius * 0.25)))
+            local r_in = max(0.0, abs_radius - half_w)
+            local r_out = abs_radius + half_w
+            local two_pi = 6.283185307179586
+
+            for i = 0, segments - 1 do
+                local a0 = (i / segments) * two_pi
+                local a1 = ((i + 1) / segments) * two_pi
+
+                local cos0, sin0 = cos(a0), sin(a0)
+                local cos1, sin1 = cos(a1), sin(a1)
+
+                local p0_x, p0_y = to_world_pos(r_in * cos0, r_in * sin0, cx, cy, o_cos, o_sin)
+                local p1_x, p1_y = to_world_pos(r_out * cos0, r_out * sin0, cx, cy, o_cos, o_sin)
+                local p2_x, p2_y = to_world_pos(r_out * cos1, r_out * sin1, cx, cy, o_cos, o_sin)
+                local p3_x, p3_y = to_world_pos(r_in * cos1, r_in * sin1, cx, cy, o_cos, o_sin)
+
+                vertices[i + 1] = {
+                    p0_x, p0_y, 0,
+                    p1_x, p1_y, 0,
+                    p2_x, p2_y, 0,
+                    p3_x, p3_y, 0,
+                    cr, cg, cb, line_alpha,
+                    cr, cg, cb, line_alpha,
+                    cr, cg, cb, line_alpha,
+                    cr, cg, cb, line_alpha,
+                }
+            end
+        else
+            -- 正方形軌道 (4辺のラインポリゴン)
+            local abs_sq_radius = abs(sq_radius)
+            local s_in = max(0.0, abs_sq_radius - half_w)
+            local s_out = abs_sq_radius + half_w
+            local corners_in = {
+                {-s_in, -s_in}, {s_in, -s_in}, {s_in, s_in}, {-s_in, s_in}
             }
+            local corners_out = {
+                {-s_out, -s_out}, {s_out, -s_out}, {s_out, s_out}, {-s_out, s_out}
+            }
+
+            for i = 1, 4 do
+                local ni = (i % 4) + 1
+                local p0_x, p0_y = to_world_pos(corners_in[i][1], corners_in[i][2], cx, cy, o_cos, o_sin)
+                local p1_x, p1_y = to_world_pos(corners_out[i][1], corners_out[i][2], cx, cy, o_cos, o_sin)
+                local p2_x, p2_y = to_world_pos(corners_out[ni][1], corners_out[ni][2], cx, cy, o_cos, o_sin)
+                local p3_x, p3_y = to_world_pos(corners_in[ni][1], corners_in[ni][2], cx, cy, o_cos, o_sin)
+
+                vertices[i] = {
+                    p0_x, p0_y, 0,
+                    p1_x, p1_y, 0,
+                    p2_x, p2_y, 0,
+                    p3_x, p3_y, 0,
+                    cr, cg, cb, line_alpha,
+                    cr, cg, cb, line_alpha,
+                    cr, cg, cb, line_alpha,
+                    cr, cg, cb, line_alpha,
+                }
+            end
         end
+
+        obj.setoption("culling", 0)
+        obj.drawpoly(vertices)
     end
-
-    obj.setoption("culling", 0)
-    obj.drawpoly(vertices, line_alpha)
 end
 
 -- 5. 本体の座標・回転・拡大率の更新
@@ -260,15 +281,29 @@ local local_rad = init_rad + rot_rad
 local lx, ly = calc_orbit_local(local_rad, radius, sq_radius, is_square)
 local target_x, target_y = to_world_pos(lx, ly, cx, cy, o_cos, o_sin)
 
-local final_rz = original_rz + orbit_angle
+local final_rz = orig_rz + orbit_angle + spin_deg
 if sync_rot == 1 then
     final_rz = final_rz + rot_deg
 end
-final_rz = final_rz + (spin * dir_mult * cur_time)
 
 obj.ox = target_x
 obj.oy = target_y
+obj.oz = orig_oz
+obj.cx = new_cx
+obj.cy = new_cy
+obj.cz = orig_cz
+obj.rx = orig_rx
+obj.ry = orig_ry
 obj.rz = final_rz
-obj.cx = (obj.cx or 0.0) + cx_ofs
-obj.cy = (obj.cy or 0.0) + cy_ofs
-obj.zoom = zoom_base * scale_factor
+obj.zoom = orig_zoom * scale_factor
+obj.sx = orig_sx
+obj.sy = orig_sy
+obj.sz = orig_sz
+obj.aspect = orig_aspect
+obj.alpha = orig_alpha
+
+-- 軌跡を描画した場合は自動描画がスキップされるため、後続フィルタと本体を明示描画
+if orbit_mode ~= 0 then
+    obj.effect()
+    obj.draw()
+end
