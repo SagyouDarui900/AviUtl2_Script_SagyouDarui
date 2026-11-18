@@ -1,12 +1,12 @@
 --label:光効果
 --filter
---information:Godray
+--information:Godray (AviUtl2 Optimized)
 
 --group:光源・配置,true
 --track@light_x:光源X,-2000,2000,0,1
 --track@light_y:光源Y,-2000,2000,0,1
 --trackgroup@light_x,light_y:光源
---group:
+--group
 
 --group:光線設定,true
 --track@intensity:明るさ,0,10,1,0.01
@@ -15,14 +15,15 @@
 --track@weight:ウェイト,0,1,0.2,0.01
 --track@samples:サンプル数,1,256,64,1
 --track@threshold:しきい値,0,1,0.5,0.01
---group:
+--group
 
 --group:カラー・合成,true
 --color@light_color:光線カラー,0xfff0b4
 --track@original_blend:元画像の強さ,0,1,1,0.01
 --check@only_light:光のみ出力,false
---group:
+--group
 
+-- 発光なし・無効サイズ時の早期リターン（光のみ出力時はシェーダー出力と同様に透明化）
 if intensity <= 0 or samples <= 0 or obj.w <= 0 or obj.h <= 0 then
     if only_light then obj.alpha = 0 end
     return
@@ -36,15 +37,15 @@ end
         float2 light_uv;
         float  intensity;
         float  decay;
-        
+
         float  density;
         float  weight;
         float  samples;
         float  threshold;
-        
+
         float3 tint_color;
         float  original_blend;
-        
+
         float  only_light;
         float3 padding;
     };
@@ -67,27 +68,28 @@ end
 
             float2 current_uv = uv - step_uv * (float(i) + jitter);
             float4 s = tex.SampleLevel(smp, current_uv, 0);
-            
+
             float safe_a = max(s.a, 0.00001);
             float3 straight_rgb = s.rgb / safe_a;
             float lum = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722)) * step(0.0001, s.a);
-            
+
             float extract_val = smoothstep(threshold, threshold + 0.2, lum) * max(0.0, lum - threshold);
-            
+
             accumulated_light += extract_val * illumination_decay * weight;
             illumination_decay *= decay;
         }
 
         float4 original = tex.SampleLevel(smp, uv, 0);
-        
+
         float total_light = accumulated_light * intensity;
         float rays_a = saturate(total_light);
         float3 rays_rgb = tint_color * rays_a;
 
         float4 base_col = original * original_blend;
-        
+
+        // Premultiplied Alpha 空間での加算合成（rgb <= a を維持）
         float out_a = (only_light > 0.5) ? rays_a : saturate(base_col.a + rays_a);
-        float3 out_rgb = (only_light > 0.5) ? rays_rgb : saturate(base_col.rgb + rays_rgb);
+        float3 out_rgb = (only_light > 0.5) ? rays_rgb : min(base_col.rgb + rays_rgb, out_a);
 
         return float4(out_rgb, out_a);
     }
@@ -100,17 +102,18 @@ local inv_h = 1.0 / obj.h
 local light_uv_x = 0.5 + light_x * inv_w
 local light_uv_y = 0.5 + light_y * inv_h
 
+-- 元画像(sRGB)と色空間を合わせるため、ガンマ変換せずそのまま渡す
 local r, g, b = RGB(light_color)
-local lin_r = (r / 255.0) ^ 2.2
-local lin_g = (g / 255.0) ^ 2.2
-local lin_b = (b / 255.0) ^ 2.2
+local col_r = r / 255.0
+local col_g = g / 255.0
+local col_b = b / 255.0
 
 local is_only_val = only_light and 1.0 or 0.0
 
 local constants = {
     light_uv_x, light_uv_y, intensity, decay,
     density, weight, samples, threshold,
-    lin_r, lin_g, lin_b, original_blend,
+    col_r, col_g, col_b, original_blend,
     is_only_val, 0.0, 0.0, 0.0
 }
 
