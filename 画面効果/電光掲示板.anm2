@@ -1,0 +1,318 @@
+--label:画面効果
+--information:電光掲示板
+--filter
+
+--group:基本設定,true
+--select@color_mode:表示モード=2,単色(輝度)=0,2色分解=1,3色(RGB等)=2
+--track@cell_size:セルサイズ(px),1.0,200.0,8.0,0.1
+--track@ratio:ドット比率(%),10.0,100.0,75.0,1.0
+--track@thresh:点灯閾値(%),0.0,100.0,30.0,1.0
+--select@shape:LED形状=0,円形=0,四角形=1,角丸四角形=2
+--group
+
+--group:LEDカラー設定,true
+--color@col1:LEDチップ1(主),0xff3300
+--color@col2:LEDチップ2(副),0x00ff00
+--color@col3:LEDチップ3(青),0x0000ff
+--hide@col2:color_mode==0
+--hide@col3:color_mode~=2
+--track@glow:発光にじみ,0.0,100.0,30.0,1.0
+--group
+
+--group:基板・背景,true
+--color@col_off:消灯色,0x202020
+--color@col_bg:基板色,0x050505
+--check@draw_bg:基板を描画,true
+--group
+
+--group:配置・演出,false
+--track@scroll_x:スクロールX,-4096.0,4096.0,0.0,1.0
+--track@scroll_y:スクロールY,-4096.0,4096.0,0.0,1.0
+--trackgroup@scroll_x,scroll_y:スクロール
+--track@pad_x:基板拡張X(px),0.0,4000.0,0.0,1.0
+--track@pad_y:基板拡張Y(px),0.0,4000.0,0.0,1.0
+--trackgroup@pad_x,pad_y:基板拡張
+--check@loop_tex:中身をループ,false
+--track@loop_gap:ループ間隔(px),0.0,4000.0,100.0,1.0
+--hide@loop_gap:not loop_tex
+--group
+
+if obj.w <= 0 or obj.h <= 0 or cell_size <= 0.0 then
+    return
+end
+
+--[[pixelshader@ps_led_board:
+cbuffer Params : register(b0) {
+    float4 grid_param;    // x: inv_cell_size, y: ratio, z: thresh, w: glow_amt
+    float4 content_param; // x: inv_base_w, y: inv_base_h, z: stride, w: inv_stride
+    float4 scroll_param;  // x: scroll_x, y: scroll_y, z: half_base_w, w: loop_tex
+    float4 led_param;     // x: shape, y: color_mode, z: draw_bg, w: pad0
+    float4 color1;        // rgb: c1, a: pad1
+    float4 color2;        // rgb: c2, a: pad2
+    float4 color3;        // rgb: c3, a: pad3
+    float4 color_off;     // rgb: col_off, a: pad4
+    float4 color_bg;      // rgb: col_bg, a: pad5
+    float4 board_param;   // x: board_w, y: board_h, zw: pad6, pad7
+    float4 inv0;          // rgb: inv_mat[0], a: pad8
+    float4 inv1;          // rgb: inv_mat[1], a: pad9
+    float4 inv2;          // rgb: inv_mat[2], a: pad10
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+void eval_cell_led(float2 cell_id, out float3 out_light_col, out float out_intensity) {
+    float cell_size = 1.0 / grid_param.x;
+    float2 center_local_px = (cell_id + 0.5) * cell_size;
+    float2 sample_px = center_local_px - scroll_param.xy;
+
+    // 水平ループ処理
+    if (scroll_param.w > 0.5) {
+        float stride = content_param.z;
+        float inv_stride = content_param.w;
+        float offset = scroll_param.z;
+        float normalized_x = (sample_px.x + offset) * inv_stride;
+        sample_px.x = frac(normalized_x) * stride - offset;
+    }
+
+    // 元画像サンプリング (clipサンプラーにより範囲外は透明色)
+    float2 sample_uv = sample_px * content_param.xy + 0.5;
+    float4 src_col = tex.SampleLevel(samp, sample_uv, 0);
+    float3 pm_rgb = src_col.rgb;
+
+    float thresh = grid_param.z;
+    int c_mode = (int)round(led_param.y);
+
+    if (c_mode == 0) {
+        // 単色(輝度)モード
+        float brightness = max(pm_rgb.r, max(pm_rgb.g, pm_rgb.b));
+        float intensity = smoothstep(thresh - 0.1, thresh + 0.1, brightness);
+        out_light_col = color1.rgb * intensity;
+        out_intensity = intensity;
+    } else if (c_mode == 1) {
+        // 2色分解モード
+        float s = max(0.0, dot(inv0.xyz, pm_rgb));
+        float t = max(0.0, dot(inv1.xyz, pm_rgb));
+        float s_on = smoothstep(thresh - 0.1, thresh + 0.1, s);
+        float t_on = smoothstep(thresh - 0.1, thresh + 0.1, t);
+        out_light_col = color1.rgb * s_on + color2.rgb * t_on;
+        out_intensity = max(s_on, t_on);
+    } else {
+        // 3色分解モード
+        float s = max(0.0, dot(inv0.xyz, pm_rgb));
+        float t = max(0.0, dot(inv1.xyz, pm_rgb));
+        float u = max(0.0, dot(inv2.xyz, pm_rgb));
+        float s_on = smoothstep(thresh - 0.1, thresh + 0.1, s);
+        float t_on = smoothstep(thresh - 0.1, thresh + 0.1, t);
+        float u_on = smoothstep(thresh - 0.1, thresh + 0.1, u);
+        out_light_col = color1.rgb * s_on + color2.rgb * t_on + color3.rgb * u_on;
+        out_intensity = max(max(s_on, t_on), u_on);
+    }
+}
+
+float4 ps_led_board(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 board_size = board_param.xy;
+    float2 local_px = (uv - 0.5) * board_size;
+
+    // グリッド座標計算
+    float inv_cell = grid_param.x;
+    float2 grid_pos = local_px * inv_cell;
+    float2 cell_id = floor(grid_pos);
+    float2 cell_uv = frac(grid_pos);
+
+    float3 led_light_col;
+    float intensity;
+    eval_cell_led(cell_id, led_light_col, intensity);
+
+    // LED形状の距離計算
+    float2 center_uv = (cell_uv - 0.5) * 2.0;
+    float dist = 0.0;
+    int shape_type = (int)round(led_param.x);
+
+    if (shape_type == 0) {
+        dist = length(center_uv);
+    } else if (shape_type == 1) {
+        dist = max(abs(center_uv.x), abs(center_uv.y));
+    } else {
+        float2 u2 = center_uv * center_uv;
+        float2 u4 = u2 * u2;
+        dist = sqrt(sqrt(max(u4.x + u4.y, 0.0)));
+    }
+
+    float led_radius = grid_param.y;
+    float aa_w = max(fwidth(dist), 0.002);
+    float mask = 1.0 - smoothstep(led_radius - aa_w, led_radius + aa_w, dist);
+
+    // レンズ・基板の質感ディテール
+    float hole_shadow = smoothstep(led_radius + 0.05, led_radius + 0.3, dist);
+    float3 bg_look = color_bg.rgb * lerp(0.5, 1.0, hole_shadow);
+
+    float lens = sqrt(max(1.0 - dist * dist, 0.0));
+    float3 off_look = color_off.rgb * lerp(0.5, 1.4, lens);
+    float3 on_look = led_light_col * lerp(1.0, 1.8, lens * lens);
+    float3 dot_look = lerp(off_look, on_look, intensity);
+
+    // 3x3近傍セルからの光学グロー累積
+    float glow_amt = grid_param.w;
+    float3 glow_accum = float3(0.0, 0.0, 0.0);
+
+    if (glow_amt > 0.0) {
+        float falloff = 2.6 - glow_amt * 1.4;
+        [unroll]
+        for (int dy = -1; dy <= 1; dy++) {
+            [unroll]
+            for (int dx = -1; dx <= 1; dx++) {
+                float3 n_col;
+                float n_int;
+                if (dx == 0 && dy == 0) {
+                    n_col = led_light_col;
+                    n_int = intensity;
+                } else {
+                    eval_cell_led(cell_id + float2((float)dx, (float)dy), n_col, n_int);
+                }
+                if (n_int > 0.0) {
+                    float2 d_grid = (cell_uv - 0.5) - float2((float)dx, (float)dy);
+                    float d2 = dot(d_grid, d_grid) * 4.0;
+                    float w_glow = exp(-d2 * falloff) * glow_amt;
+                    glow_accum += n_col * w_glow;
+                }
+            }
+        }
+    }
+
+    bool draw_bg = (led_param.z > 0.5);
+    if (draw_bg) {
+        float3 final_rgb = lerp(bg_look, dot_look, mask) + glow_accum;
+        return float4(max(final_rgb, 0.0), 1.0);
+    } else {
+        float glow_alpha = saturate(max(glow_accum.r, max(glow_accum.g, glow_accum.b)));
+        float out_alpha = saturate(mask + glow_alpha * (1.0 - mask));
+        float3 out_pm_rgb = dot_look * mask + glow_accum * (1.0 - mask);
+        return float4(max(out_pm_rgb, 0.0), out_alpha);
+    }
+}
+]]
+
+local base_w = obj.w
+local base_h = obj.h
+local in_resource = "object"
+
+local max_w, max_h = obj.getinfo("image_max")
+max_w = max_w or 8192
+max_h = max_h or 8192
+
+local safe_pad_x = math.max(0, math.min(math.floor(pad_x + 0.5), math.floor((max_w - base_w) * 0.5)))
+local safe_pad_y = math.max(0, math.min(math.floor(pad_y + 0.5), math.floor((max_h - base_h) * 0.5)))
+
+if safe_pad_x > 0 or safe_pad_y > 0 then
+    local cache_name = string.format("cache:led_board_%s_%s", tostring(obj.id), tostring(obj.effect_id))
+    obj.copybuffer(cache_name, "object")
+    obj.effect("領域拡張", "左", safe_pad_x, "右", safe_pad_x, "上", safe_pad_y, "下", safe_pad_y)
+    in_resource = cache_name
+end
+
+local board_w = obj.w
+local board_h = obj.h
+
+local function norm_rgb(col)
+    if col == nil then
+        return 0.0, 0.0, 0.0
+    end
+    local r, g, b = RGB(col)
+    return r / 255.0, g / 255.0, b / 255.0
+end
+
+local r1, g1, b1 = norm_rgb(col1)
+local r2, g2, b2 = norm_rgb(col2)
+local r3, g3, b3 = norm_rgb(col3)
+local ro, go, bo = norm_rgb(col_off)
+local rb, gb, bb = norm_rgb(col_bg)
+
+local function normalize_vec(x, y, z, fx, fy, fz)
+    local len = math.sqrt(x * x + y * y + z * z)
+    if len > 0.0001 then
+        return x / len, y / len, z / len
+    end
+    return fx, fy, fz
+end
+
+local v1x, v1y, v1z = normalize_vec(r1, g1, b1, 1.0, 0.0, 0.0)
+local v2x, v2y, v2z = normalize_vec(r2, g2, b2, 0.0, 1.0, 0.0)
+local v3x, v3y, v3z = normalize_vec(r3, g3, b3, 0.0, 0.0, 1.0)
+
+local inv11, inv12, inv13 = v1x, v1y, v1z
+local inv21, inv22, inv23 = v2x, v2y, v2z
+local inv31, inv32, inv33 = v3x, v3y, v3z
+
+local mode_int = math.min(2, math.max(0, math.floor(color_mode + 0.5)))
+
+if mode_int == 1 then
+    -- 2色モード：グラム行列の逆行列による最小二乗分解
+    local d = v1x * v2x + v1y * v2y + v1z * v2z
+    local denom = 1.0 - d * d
+    if denom > 0.01 then
+        local inv_denom = 1.0 / denom
+        inv11 = (v1x - d * v2x) * inv_denom
+        inv12 = (v1y - d * v2y) * inv_denom
+        inv13 = (v1z - d * v2z) * inv_denom
+
+        inv21 = (v2x - d * v1x) * inv_denom
+        inv22 = (v2y - d * v1y) * inv_denom
+        inv23 = (v2z - d * v1z) * inv_denom
+    else
+        inv11, inv12, inv13 = v1x * 0.5, v1y * 0.5, v1z * 0.5
+        inv21, inv22, inv23 = v2x * 0.5, v2y * 0.5, v2z * 0.5
+    end
+elseif mode_int == 2 then
+    -- 3色モード：3x3逆行列（特異行列時は正射影へフォールバック）
+    local det = v1x * (v2y * v3z - v2z * v3y)
+              - v1y * (v2x * v3z - v2z * v3x)
+              + v1z * (v2x * v3y - v2y * v3x)
+
+    if math.abs(det) > 0.01 then
+        local inv_det = 1.0 / det
+        inv11 = (v2y * v3z - v2z * v3y) * inv_det
+        inv12 = (v1z * v3y - v1y * v3z) * inv_det
+        inv13 = (v1y * v2z - v1z * v2y) * inv_det
+
+        inv21 = (v2z * v3x - v2x * v3z) * inv_det
+        inv22 = (v1x * v3z - v1z * v3x) * inv_det
+        inv23 = (v1z * v2x - v1x * v2z) * inv_det
+
+        inv31 = (v2x * v3y - v2y * v3x) * inv_det
+        inv32 = (v1y * v3x - v1x * v3y) * inv_det
+        inv33 = (v1x * v2y - v1y * v2x) * inv_det
+    end
+end
+
+local inv_cell_size = 1.0 / cell_size
+local ratio_val = ratio * 0.01
+local thresh_val = thresh * 0.01
+local glow_val = glow * 0.01
+
+local inv_base_w = 1.0 / base_w
+local inv_base_h = 1.0 / base_h
+local stride = base_w + loop_gap
+local inv_stride = (stride > 0.0) and (1.0 / stride) or 0.0
+local half_base_w = base_w * 0.5
+
+local loop_flag = loop_tex and 1.0 or 0.0
+local draw_bg_flag = draw_bg and 1.0 or 0.0
+
+local constants = {
+    inv_cell_size, ratio_val, thresh_val, glow_val,
+    inv_base_w, inv_base_h, stride, inv_stride,
+    scroll_x, scroll_y, half_base_w, loop_flag,
+    shape, mode_int, draw_bg_flag, 0.0,
+    r1, g1, b1, 0.0,
+    r2, g2, b2, 0.0,
+    r3, g3, b3, 0.0,
+    ro, go, bo, 0.0,
+    rb, gb, bb, 0.0,
+    board_w, board_h, 0.0, 0.0,
+    inv11, inv12, inv13, 0.0,
+    inv21, inv22, inv23, 0.0,
+    inv31, inv32, inv33, 0.0
+}
+
+obj.pixelshader("ps_led_board", "object", { in_resource }, constants, "copy", "clip")
