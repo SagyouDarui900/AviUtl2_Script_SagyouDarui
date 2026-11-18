@@ -1,0 +1,165 @@
+--label:配置
+--information:文字アンカー配置
+
+--check@cancel_layout:元の文字配置をリセット,false
+--select@rot_mode:角度=0,そのまま=0,個別アンカー=1,パス(軌跡)に沿う=2,放射状(外側)=3
+--value@pos:位置座標,{}
+--value@rot:方向座標,{}
+--hide@rot:rot_mode~=1
+
+local obj_num = math.max(1, obj.num or 1)
+local obj_idx = obj.index or 0
+local cache_key = tostring(obj.id or 0) .. "_" .. tostring(obj.effect_id or 0)
+
+-- エフェクト単位で元の文字レイアウト座標と前フレームのアンカー座標を保持
+S_text_anchor_cache = S_text_anchor_cache or {}
+local state = S_text_anchor_cache[cache_key]
+if not state or state.num ~= obj_num then
+    state = {
+        num = obj_num,
+        orig_x = {},
+        orig_y = {},
+        orig_z = {},
+        prev_pos = nil,
+        base_ox = 0,
+        base_oy = 0,
+        base_oz = 0
+    }
+    S_text_anchor_cache[cache_key] = state
+end
+
+-- 各文字の元のレイアウト座標を記録
+state.orig_x[obj_idx + 1] = obj.ox
+state.orig_y[obj_idx + 1] = obj.oy
+state.orig_z[obj_idx + 1] = obj.oz
+if obj_idx == 0 then
+    state.base_ox = obj.ox
+    state.base_oy = obj.oy
+    state.base_oz = obj.oz
+end
+
+-- 座標配列から (x, y, z) を取得する補助関数
+local function get_point(array, index, def_x, def_y, def_z)
+    local offset = index * 3
+    local x = array[offset + 1]
+    local y = array[offset + 2]
+    local z = array[offset + 3]
+    if x == nil then x = def_x or 0 end
+    if y == nil then y = def_y or 0 end
+    if z == nil then z = def_z or 0 end
+    return x, y, z
+end
+
+-- 2Dベクトル (dx, dy) から Z軸回転角を計算し obj.rz に加算する補助関数
+local function add_rotation_from_vec(dx, dy)
+    if dx ~= 0 or dy ~= 0 then
+        obj.rz = obj.rz + math.deg(math.atan2(dy, dx))
+    end
+end
+
+-- アンカー登録および座標追従（先頭文字の実行時のみ処理）
+if obj_idx == 0 then
+    local off_x, off_y, off_z = 0, 0, 0
+    if cancel_layout then
+        off_x = -state.base_ox
+        off_y = -state.base_oy
+        off_z = -state.base_oz
+    end
+
+    if rot_mode == 2 then
+        obj.setanchor("pos", obj_num, "xyz", "line", "color", 0x00AAFF, "offset.xyz", off_x, off_y, off_z)
+    else
+        obj.setanchor("pos", obj_num, "xyz", "color", 0x00AAFF, "offset.xyz", off_x, off_y, off_z)
+    end
+
+    -- 位置アンカーが移動した場合、方向アンカーにも同じ移動量を追従させる
+    if #pos >= obj_num * 3 and #rot >= obj_num * 3 then
+        local prev = state.prev_pos
+        for i = 0, obj_num - 1 do
+            local idx1 = i * 3 + 1
+            local idx2 = i * 3 + 2
+            local idx3 = i * 3 + 3
+            local prev_x = prev and prev[idx1] or 0
+            local prev_y = prev and prev[idx2] or 0
+            local prev_z = prev and prev[idx3] or 0
+            rot[idx1] = rot[idx1] + (pos[idx1] - prev_x)
+            rot[idx2] = rot[idx2] + (pos[idx2] - prev_y)
+            rot[idx3] = rot[idx3] + (pos[idx3] - prev_z)
+        end
+    end
+
+    if rot_mode == 1 then
+        local init_rot = {}
+        for i = 0, obj_num - 1 do
+            local px_i, py_i, pz_i = get_point(pos, i)
+            init_rot[i * 3 + 1] = px_i + 80
+            init_rot[i * 3 + 2] = py_i
+            init_rot[i * 3 + 3] = pz_i
+        end
+        obj.setanchor("rot", obj_num, "xyz", "color", 0xFF00AA, "offset.xyz", off_x, off_y, off_z, init_rot)
+    end
+
+    -- 次フレームの差分検出用に現在の位置アンカー座標を保存
+    if #pos >= obj_num * 3 then
+        local snapshot = {}
+        for i = 1, obj_num * 3 do
+            snapshot[i] = pos[i]
+        end
+        state.prev_pos = snapshot
+    else
+        state.prev_pos = nil
+    end
+end
+
+-- 指定インデックスの文字の最終配置座標（オブジェクト基準オフセット）を算出
+local function get_final_pos(index)
+    local px, py, pz = get_point(pos, index)
+    if cancel_layout then
+        return px, py, pz
+    end
+    local ox = (state.orig_x[index + 1] or state.base_ox) + px
+    local oy = (state.orig_y[index + 1] or state.base_oy) + py
+    local oz = (state.orig_z[index + 1] or state.base_oz) + pz
+    return ox, oy, oz
+end
+
+-- 位置の適用
+local fx, fy, fz = get_final_pos(obj_idx)
+obj.ox = fx
+obj.oy = fy
+obj.oz = fz
+
+-- 角度の適用（XY平面上のZ軸回転）
+if rot_mode == 1 then
+    -- 個別アンカー: 位置アンカーから方向アンカーへのベクトル方向を向く
+    local px, py = get_point(pos, obj_idx)
+    local rx, ry = get_point(rot, obj_idx, px + 80, py)
+    add_rotation_from_vec(rx - px, ry - py)
+
+elseif rot_mode == 2 then
+    -- パス(軌跡)に沿う: 前方または後方のもっとも近い非ゼロベクトル方向を向く
+    local dir_x, dir_y = 0, 0
+    for i = obj_idx + 1, obj_num - 1 do
+        local nx, ny = get_final_pos(i)
+        local dx, dy = nx - fx, ny - fy
+        if dx ~= 0 or dy ~= 0 then
+            dir_x, dir_y = dx, dy
+            break
+        end
+    end
+    if dir_x == 0 and dir_y == 0 then
+        for i = obj_idx - 1, 0, -1 do
+            local bx, by = get_final_pos(i)
+            local dx, dy = fx - bx, fy - by
+            if dx ~= 0 or dy ~= 0 then
+                dir_x, dir_y = dx, dy
+                break
+            end
+        end
+    end
+    add_rotation_from_vec(dir_x, dir_y)
+
+elseif rot_mode == 3 then
+    -- 放射状(外側): オブジェクト基準点(0, 0)から現在位置への方向を向く
+    add_rotation_from_vec(fx, fy)
+end
