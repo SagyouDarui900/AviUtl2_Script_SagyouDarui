@@ -3,11 +3,13 @@
 --select@model:モデル=0,3DS TN液晶(標準)=0,3DS IPS液晶(当り)=1,2DS(スリット無)=2
 --select@screen:画面=0,上画面(3D)=0,下画面(タッチ)=1
 --check@pixelate:実機解像度に合わせる,1
+--check@keep_aspect:ドット比率を正方形に保つ,1
+--hide@keep_aspect:pixelate==0
 --track@scale:ドットサイズ,1,50,4,0.1
 --hide@scale:pixelate==1
 --track@brightness:明るさ,0,200,100,1
 --track@subpixel_str:サブピクセル強度,0,100,30,1
---track@barrier_a:3Dバリア濃度,0,100,40,1
+--track@barrier_a:3Dバリア濃度,0,100,0,1
 --hide@barrier_a:screen==1
 --hide@barrier_a:model==2
 --track@angle:視差アングル(3Dシフト),-100,100,0,1
@@ -65,8 +67,8 @@
         if (is_lower) {
             rgb *= float3(0.96, 0.97, 0.93);
             rgb = lerp(rgb, float3(0.5, 0.5, 0.5), 0.03);
-            float noise = frac(sin(dot(uv.xy, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
-            rgb += noise * 0.02;
+            float noise = frac(sin(dot(pixel_uv, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
+            rgb += noise * 0.015;
         }
 
         rgb = saturate(rgb * brightness);
@@ -91,7 +93,7 @@
         float current_barrier = (is_lower || is_2ds) ? 0.0 : (barrier_a / 100.0);
         if (current_barrier > 0.0) {
             float shift = angle * 0.01;
-            float barrier_phase = frac(uv.x * grid_num.x + shift);
+            float barrier_phase = frac(uv.x * grid_num.x * 0.5 + shift);
             float barrier_slit = smoothstep(0.0, 0.15, barrier_phase) *
                 (1.0 - smoothstep(0.85, 1.0, barrier_phase));
             rgb = lerp(rgb, rgb * 0.25, (1.0 - barrier_slit) * current_barrier);
@@ -120,8 +122,19 @@ if obj.w <= 0 or obj.h <= 0 then return end
 
 local gx, gy
 if pixelate == 1 then
-    gy = 240
-    gx = (screen == 1) and 320 or 400
+    local base_w = (screen == 1) and 320 or 400
+    local base_h = 240
+    if keep_aspect == 1 then
+        if (obj.w / obj.h) > (base_w / base_h) then
+            gy = base_h
+            gx = math.max(1, math.floor(base_h * (obj.w / obj.h) + 0.5))
+        else
+            gx = base_w
+            gy = math.max(1, math.floor(base_w * (obj.h / obj.w) + 0.5))
+        end
+    else
+        gx, gy = base_w, base_h
+    end
 else
     local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
