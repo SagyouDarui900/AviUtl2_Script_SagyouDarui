@@ -1,0 +1,151 @@
+--label:色調整
+--information:RGBチャンネル操作
+--filter
+
+--group:基本設定,true
+--select@swap_mode:RGB順序=0,R G B=0,R B G=1,G R B=2,G B R=3,B R G=4,B G R=5
+--select@gray_mode:グレスケ表示=0,なし(カラー)=0,輝度(Rec.601)=1,赤(Red)=2,緑(Green)=3,青(Blue)=4,アルファ(Alpha)=5,彩度(Saturation)=6,明度(Value)=7
+--check@invert:反転,0
+--group
+
+--group:オフセット,true
+--track@offset_all:全体オフセット,-100,100,0,1
+--track@offset_r:R オフセット,-100,100,0,1
+--track@offset_g:G オフセット,-100,100,0,1
+--track@offset_b:B オフセット,-100,100,0,1
+--trackgroup@offset_r,offset_g,offset_b:RGB個別オフセット
+--group
+
+--[[pixelshader@ps_rgb_channel_tool:
+Texture2D tex : register(t0);
+SamplerState smp : register(s0);
+
+cbuffer Params : register(b0) {
+    float4 param0; // x: swap_mode, y: gray_mode, z: invert, w: offset_all
+    float4 param1; // x: offset_r, y: offset_g, z: offset_b, w: pad
+};
+
+float4 unpremul(float4 c) {
+    if (c.a <= 1e-5) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    return float4(saturate(c.rgb / c.a), saturate(c.a));
+}
+
+float4 premul(float4 c) {
+    float a = saturate(c.a);
+    return float4(saturate(c.rgb) * a, a);
+}
+
+float3 rgb_to_hsv(float3 c) {
+    float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = lerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+float4 ps_rgb_channel_tool(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float4 col = tex.Sample(smp, uv);
+    float4 straight = unpremul(col);
+
+    int swap_mode = (int)round(param0.x);
+    int gray_mode = (int)round(param0.y);
+    bool is_invert = (param0.z > 0.5);
+    float offset_all = param0.w;
+
+    // 1. RGBチャンネル順序の入れ替え
+    float3 rgb = straight.rgb;
+    if (swap_mode == 1) {
+        rgb = straight.rbg;
+    } else if (swap_mode == 2) {
+        rgb = straight.grb;
+    } else if (swap_mode == 3) {
+        rgb = straight.gbr;
+    } else if (swap_mode == 4) {
+        rgb = straight.brg;
+    } else if (swap_mode == 5) {
+        rgb = straight.bgr;
+    }
+
+    // 2. RGB個別オフセットの加算
+    rgb = saturate(rgb + param1.xyz);
+
+    // 3. グレースケール抽出またはカラー出力
+    float3 out_rgb;
+    if (gray_mode > 0) {
+        float gray_val = 0.0;
+        if (gray_mode == 1) {
+            gray_val = dot(rgb, float3(0.299, 0.587, 0.114));
+        } else if (gray_mode == 2) {
+            gray_val = rgb.r;
+        } else if (gray_mode == 3) {
+            gray_val = rgb.g;
+        } else if (gray_mode == 4) {
+            gray_val = rgb.b;
+        } else if (gray_mode == 5) {
+            gray_val = straight.a;
+        } else if (gray_mode == 6) {
+            gray_val = rgb_to_hsv(rgb).y;
+        } else {
+            gray_val = rgb_to_hsv(rgb).z;
+        }
+
+        gray_val = saturate(gray_val + offset_all);
+        if (is_invert) {
+            gray_val = 1.0 - gray_val;
+        }
+        out_rgb = float3(gray_val, gray_val, gray_val);
+    } else {
+        out_rgb = saturate(rgb + offset_all);
+        if (is_invert) {
+            out_rgb = 1.0 - out_rgb;
+        }
+    }
+
+    // 4. 元のアルファ値でプリマルチ再適用して出力
+    return premul(float4(out_rgb, straight.a));
+}
+]]
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+local is_no_op = (
+    swap_mode == 0 and
+    gray_mode == 0 and
+    invert == 0 and
+    offset_all == 0 and
+    offset_r == 0 and
+    offset_g == 0 and
+    offset_b == 0
+)
+if is_no_op then
+    return
+end
+
+local invert_flag = (invert == 1) and 1.0 or 0.0
+local norm_all = offset_all / 100.0
+local norm_r = offset_r / 100.0
+local norm_g = offset_g / 100.0
+local norm_b = offset_b / 100.0
+
+obj.pixelshader(
+    "ps_rgb_channel_tool",
+    "object",
+    { "object" },
+    {
+        swap_mode,
+        gray_mode,
+        invert_flag,
+        norm_all,
+        norm_r,
+        norm_g,
+        norm_b,
+        0.0
+    },
+    "copy",
+    "clamp"
+)
