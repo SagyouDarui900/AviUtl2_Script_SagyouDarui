@@ -9,17 +9,17 @@
 --track@threshold:輝度しきい値,0,100,10,1
 --color@glow_col:色,0xffffff
 --check@only_light:光のみ表示,false
---group:
+--group
 
 --group:アニメーション設定,true
 --track@speed:速度,0,20,5,0.1
 --track@fps:コマ打ち(FPS),0,60,12,1
 --track@seed:シード値,0,100,0,1
 --check@rand_angle:ランダム角度,true
---group:
+--group
 
 local w, h = obj.w, obj.h
-if w <= 0 or h <= 0 or density <= 0 then
+if w <= 0 or h <= 0 then
     return
 end
 
@@ -28,7 +28,7 @@ end
         float4 p_grid;   // x: density, y: size, z: threshold, w: is_soft
         float4 p_anim;   // x: time, y: speed, z: angle_rand, w: seed
         float4 p_shape;  // x: cross_scale, y: pow_exp, z: aspect, w: only_light
-        float4 p_color;  // xyz: color (RGB), w: padding
+        float4 p_color;  // xyz: color (sRGB), w: padding
     };
 
     Texture2D tex : register(t0);
@@ -57,80 +57,94 @@ end
         float size         = p_grid.y;
         float threshold    = p_grid.z;
         float is_soft      = p_grid.w;
-        
+
         float time       = p_anim.x;
         float speed      = p_anim.y;
         float angle_rand = p_anim.z;
         float seed_val   = p_anim.w;
-        
+
         float cross_scale = p_shape.x;
         float pow_exp     = p_shape.y;
         float aspect      = p_shape.z;
         float only_light  = p_shape.w;
-        
+
         float3 color      = p_color.rgb;
 
-        // 中心基準のグリッド座標系
-        float2 centered_uv = uv - 0.5;
-        float2 id = floor(centered_uv * grid_density);
-        float2 f  = frac(centered_uv * grid_density);
+        // アスペクト比を反映した正方形セルのグリッド座標系
+        float2 grid_scale  = float2(grid_density * aspect, grid_density);
+        float2 centered_uv = (uv - 0.5) * grid_scale;
+        float2 id = floor(centered_uv);
+        float2 f  = frac(centered_uv);
 
+        float2 seed_offset = float2(seed_val * 17.31, seed_val * 41.73);
         float glitter_val = 0.0;
 
+        // 最大半径 2.0 セル内の全近傍セルを走査
         [unroll]
-        for (int y = -1; y <= 1; y++) {
+        for (int y = -2; y <= 2; y++) {
             [unroll]
-            for (int x = -1; x <= 1; x++) {
+            for (int x = -2; x <= 2; x++) {
                 float2 offset = float2((float)x, (float)y);
                 float2 cell_id = id + offset;
-                
-                float2 star_pos = hash2(cell_id + seed_val);
-                float2 sample_uv = (cell_id + star_pos) / grid_density + 0.5;
+                float2 h_coord = cell_id + seed_offset;
+
+                float2 star_pos = hash2(h_coord);
+                float2 sample_uv = (cell_id + star_pos) / grid_scale + 0.5;
+
+                // 画面外の仮想セルはサンプリング対象から除外
+                if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+                    continue;
+                }
+
                 float4 sample_col = tex.SampleLevel(samp, sample_uv, 0);
-                
+                if (sample_col.a <= 0.05) {
+                    continue;
+                }
+
                 // Premultiplied Alpha からストレートRGBへ復元して輝度判定
-                float safe_a = max(sample_col.a, 0.00001);
-                float3 straight_rgb = sample_col.rgb / safe_a;
-                float brightness = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722)) * step(0.0001, sample_col.a);
-                
+                float3 straight_rgb = sample_col.rgb / sample_col.a;
+                float brightness = dot(straight_rgb, float3(0.2126, 0.7152, 0.0722));
+
                 float mask = 0.0;
                 if (is_soft < 0.5) {
-                    mask = (brightness > threshold && sample_col.a > 0.01) ? 1.0 : 0.0;
+                    mask = (brightness > threshold) ? 1.0 : 0.0;
                 } else {
                     mask = smoothstep(threshold, threshold + 0.2, brightness) * smoothstep(0.05, 0.15, sample_col.a);
                 }
-                
+
                 if (mask > 0.0) {
-                    float h1 = hash1(cell_id + seed_val + 10.0);
+                    float h1 = hash1(h_coord + 10.0);
                     float blink = max(0.0, sin(time * speed + h1 * 6.2831853));
                     blink = pow(blink, 3.0);
-                    
+
                     if (blink > 0.0) {
-                        float s = size * (0.5 + 0.5 * hash1(cell_id + seed_val + 13.5));
+                        // 最大サイズ(size=2.0)でも 2.0 セル以内で減衰するよう正規化
+                        float s = size * (0.5 + 0.5 * hash1(h_coord + 13.5));
                         float2 d = f - offset - star_pos;
-                        d.x *= aspect;
                         d = rotate(d, (h1 - 0.5) * angle_rand);
                         d /= max(s, 0.0001);
-                        
-                        float2 abs_d = abs(d);
-                        // cross_shape 形状の端部減衰係数として 0.1 を適用
-                        float cross_shape = max(0.0, 1.0 - (abs_d.x * abs_d.y * cross_scale) - length(abs_d) * 0.1);
-                        glitter_val += pow(cross_shape, pow_exp) * blink * mask;
+
+                        float r_len = length(d);
+                        if (r_len < 1.0) {
+                            float2 abs_d = abs(d);
+                            float cross_shape = max(0.0, (1.0 - abs_d.x * abs_d.y * cross_scale) * (1.0 - r_len));
+                            glitter_val += pow(cross_shape, pow_exp) * blink * mask;
+                        }
                     }
                 }
             }
         }
-        
+
         float4 original_col = tex.SampleLevel(samp, uv, 0);
-        
+
         // プリマルチプライドアルファ空間での合成処理
         float gv = saturate(glitter_val);
         float3 glitter_rgb = color * gv;
-        
+
         float4 base_col = original_col * (1.0 - only_light);
         float out_a = (only_light > 0.5) ? gv : saturate(base_col.a + gv);
-        float3 out_rgb = (only_light > 0.5) ? glitter_rgb : saturate(base_col.rgb + glitter_rgb);
-        
+        float3 out_rgb = (only_light > 0.5) ? glitter_rgb : min(base_col.rgb + glitter_rgb, out_a);
+
         return float4(out_rgb, out_a);
     }
 ]]
@@ -144,20 +158,15 @@ end
 local aspect = w / h
 local col_r, col_g, col_b = RGB(glow_col)
 
--- sRGB (0-255) から線形RGB (0.0-1.0) への変換 (ガンマ 2.2 近似)
-local lin_r = (col_r / 255.0) ^ 2.2
-local lin_g = (col_g / 255.0) ^ 2.2
-local lin_b = (col_b / 255.0) ^ 2.2
-
-local is_soft = (g_type == 1)
-local cross_scale = is_soft and 70.0 or 100.0
+local is_soft = (math.floor(g_type + 0.5) == 1)
+local cross_scale = is_soft and 14.0 or 28.0
 local pow_exp = is_soft and 1.5 or 2.0
 local angle_rand_val = rand_angle and math.pi or 0.0
 local only_light_val = only_light and 1.0 or 0.0
 
 local constants = {
     density,
-    size * 0.01,
+    size * 0.02,
     threshold * 0.01,
     is_soft and 1.0 or 0.0,
 
@@ -171,9 +180,9 @@ local constants = {
     aspect,
     only_light_val,
 
-    lin_r,
-    lin_g,
-    lin_b,
+    col_r / 255.0,
+    col_g / 255.0,
+    col_b / 255.0,
     0.0
 }
 
