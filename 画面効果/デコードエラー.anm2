@@ -1,0 +1,207 @@
+--label:画面効果
+--track@seed:シード,0,10000,1,1
+
+--group:スライス設定,true
+--track@min_width:最小幅,1,500,1,1
+--track@max_width:最大幅,1,500,30,1
+--trackgroup@min_width,max_width:帯幅範囲
+--track@thin_rate:細線化率,0,100,20,1
+--group:
+
+--group:変形・配置,true
+--track@shift_amp:ズレ幅,0,500,25,1
+--select@direction:向き=0,横向き=0,縦向き=1
+--group:
+
+--group:カラー・エフェクト,true
+--track@color_intensity:色強度,0,500,100,1
+--check@glitch_enhanced:グリッチ強化,false
+--check@rotate_hue:色相回転,true
+--check@invert_lum:輝度反転,false
+--group:
+
+--[[pixelshader@ps_decode_error:
+cbuffer Params : register(b0) {
+    float seed;
+    float is_vert;
+    float enable_hue;
+    float enable_inv;
+
+    float enable_glitch;
+    float min_w;
+    float max_w;
+    float thin_rate;
+
+    float img_w;
+    float img_h;
+    float shift_amp;
+    float color_intensity;
+};
+
+Texture2D tex : register(t0);
+SamplerState smp : register(s0);
+
+// 高分散なハッシュ関数
+float hash11(float p) {
+    return frac(sin(p * 12.9898 + 78.233) * 43758.5453123);
+}
+
+// 帯幅の最小・最大範囲を反映してスライスIDを取得
+float get_slice_id(float coord, float min_w, float max_w, float s) {
+    float step_w = (min_w + max_w) * 0.5;
+    if (abs(max_w - min_w) > 0.01) {
+        float cell_idx = floor(coord / max(1.0, min_w));
+        step_w = lerp(min_w, max_w, hash11(cell_idx + s * 1.37));
+    }
+    float x = coord / max(1.0, step_w);
+    float i = floor(x);
+    float f = frac(x);
+    
+    float min_dist = 10.0;
+    float closest_id = 0.0;
+    
+    for (int j = -1; j <= 1; j++) {
+        float cell = float(j);
+        float h = hash11(i + cell + s * 1.37);
+        float pt = cell + h;
+        float dist = abs(pt - f);
+        if (dist < min_dist) {
+            min_dist = dist;
+            closest_id = i + cell;
+        }
+    }
+    return closest_id;
+}
+
+float3 rgb_to_hsv(float3 c) {
+    float4 k = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = lerp(float4(c.bg, k.wz), float4(c.gb, k.xy), step(c.b, c.g));
+    float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+float3 hsv_to_rgb(float3 c) {
+    float4 k = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(frac(c.xxx + k.xyz) * 6.0 - k.www);
+    return c.z * lerp(k.xxx, saturate(p - k.xxx), c.y);
+}
+
+float3 get_primary_rgb(float hash) {
+    float r = frac(hash * 123.456);
+    if (r < 0.33333) return float3(1.0, 0.0, 0.0);
+    if (r < 0.66666) return float3(0.0, 1.0, 0.0);
+    return float3(0.0, 0.0, 1.0);
+}
+
+float3 apply_colorama(float3 col, float wheel_offset, float intensity) {
+    float lum = dot(col, float3(0.299, 0.587, 0.114));
+    uint idx = (uint)clamp(lum * 6.0, 0.0, 5.0);
+    idx = (idx + (uint)wheel_offset) % 6u;
+
+    float3 palette[6] = {
+        float3(1.0, 0.0, 1.0),
+        float3(1.0, 1.0, 0.0),
+        float3(0.0, 1.0, 0.0),
+        float3(0.0, 1.0, 1.0),
+        float3(0.0, 0.0, 1.0),
+        float3(1.0, 0.0, 0.0)
+    };
+
+    return palette[idx] * lum * intensity;
+}
+
+float4 ps_decode_error(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float coord = (is_vert > 0.5) ? (uv.x * img_w) : (uv.y * img_h);
+    float resolution = (is_vert > 0.5) ? img_w : img_h;
+    float intensity = color_intensity * 0.01;
+
+    float slice_id = get_slice_id(coord, min_w, max_w, seed);
+    float hash = hash11(slice_id + seed * 2.13);
+
+    if (frac(hash * 987.65) < (thin_rate * 0.01)) {
+        slice_id = floor(coord);
+        hash = hash11(slice_id + seed * 3.45);
+    }
+
+    float shift = (frac(hash * 345.67) - 0.5) * (shift_amp / resolution) * 2.0;
+    float3 shift_color = get_primary_rgb(hash);
+    float hue_shift = frac(hash * 789.12);
+    float wheel_offset = floor(frac(hash * 654.32) * 6.0);
+
+    float4 col1 = tex.Sample(smp, uv);
+    if (col1.a > 0.0) {
+        col1.rgb /= col1.a;
+        if (enable_inv > 0.5) col1.rgb = 1.0 - col1.rgb;
+        if (enable_glitch > 0.5) col1.rgb = apply_colorama(col1.rgb, wheel_offset, 1.5 * intensity);
+        if (enable_hue > 0.5) {
+            float3 hsv = rgb_to_hsv(col1.rgb);
+            hsv.x = frac(hsv.x + hue_shift);
+            col1.rgb = hsv_to_rgb(hsv);
+        }
+        col1.rgb *= col1.a;
+    }
+
+    // 意図的設計: frac による画面端のループ折り返し描画処理
+    float2 uv_shifted = uv;
+    if (is_vert > 0.5) {
+        uv_shifted.y = frac(uv.y + shift);
+    } else {
+        uv_shifted.x = frac(uv.x + shift);
+    }
+
+    float4 col2 = tex.Sample(smp, uv_shifted);
+    if (col2.a > 0.0) {
+        col2.rgb /= col2.a;
+        if (enable_inv > 0.5) col2.rgb = 1.0 - col2.rgb;
+        if (enable_hue > 0.5) {
+            float3 hsv2 = rgb_to_hsv(col2.rgb);
+            hsv2.x = frac(hsv2.x + hue_shift);
+            col2.rgb = hsv_to_rgb(hsv2);
+        }
+        if (enable_glitch > 0.5) col2.rgb = apply_colorama(col2.rgb, wheel_offset, 1.5 * intensity);
+        col2.rgb *= shift_color * intensity;
+        col2.rgb *= col2.a;
+    }
+
+    float4 out_col;
+    out_col.rgb = col1.rgb + col2.rgb;
+    // Over合成による適切なアルファ算出
+    out_col.a = col1.a + col2.a - (col1.a * col2.a);
+
+    return out_col;
+}
+]]
+
+local param_min = min_width
+local param_max = max_width
+if param_min > param_max then
+    local temp_width = param_min
+    param_min = param_max
+    param_max = temp_width
+end
+
+local is_vert_num = (direction == 1) and 1.0 or 0.0
+local is_hue_num = rotate_hue and 1.0 or 0.0
+local is_inv_num = invert_lum and 1.0 or 0.0
+local is_glitch_num = glitch_enhanced and 1.0 or 0.0
+
+local constants = {
+    seed,
+    is_vert_num,
+    is_hue_num,
+    is_inv_num,
+
+    is_glitch_num,
+    param_min,
+    param_max,
+    thin_rate,
+
+    obj.w,
+    obj.h,
+    shift_amp,
+    color_intensity
+}
+
+obj.pixelshader("ps_decode_error", "object", {"object"}, constants, "copy", "loop")
