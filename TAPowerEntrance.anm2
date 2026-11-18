@@ -1,0 +1,325 @@
+--label:アニメーション効果
+--information:テキスト登場アニメーション (TAPowerEntrance)
+--filter
+
+--group:時間・ズレ設定,true
+--track@anim_time:完了時間,-10.0,10.0,0.5,0.01
+--select@delay_mode:ズレ基準=0,完了時間基準(%)=0,BPMベース=1
+--track@delay_pct:時間基準ズレ(%),0.0,500.0,100.0,1.0
+--track@base_bpm:BPM,1.0,999.0,202.0,1.0
+--track@delay_beat:BPMズレ(拍),0.0,16.0,0.25,0.01
+--hide@delay_pct:delay_mode~=0
+--hide@base_bpm:delay_mode~=1
+--hide@delay_beat:delay_mode~=1
+--group
+
+--group:動作設定,true
+--track@power:指数(p),1.0,50.0,5.0,0.1
+--select@ease_type:動きの質=1,滑らか(p乗)=0,キビキビ(OutBack)=1
+--select@order:順序=0,通常=0,逆順=1,ランダム=2,中央から=3,両端から=4
+--track@seed:シード,0,10000,0,1
+--hide@seed:order~=2
+--check@reverse_move:始点終点反転,false
+--check@hide_before:開始前非表示,true
+--group
+
+--group:位置設定,false
+--select@pos_preset:出現元=4,カスタム(アンカー)=0,左外から=1,右外から=2,上外から=3,下外から=4,左上から=5,右上から=6,左下から=7,右下から=8,画面中央から=9
+--value@start_pos:カスタム用アンカー,{0,-100}
+--hide@start_pos:pos_preset~=0
+--group
+
+--group:エフェクト設定,false
+--select@effect_type:エフェクト=2,なし=0,モーションブラー=1,残像(エコー)=2
+--track@blur_str:ブラー強度(%),0.0,300.0,100.0,1.0
+--track@blur_samples:ブラー品質,1,64,24,1
+--hide@blur_str:effect_type~=1
+--hide@blur_samples:effect_type~=1
+--track@echo_count:残像数,1,30,5,1
+--track@echo_dist:残像間隔(%),0.0,500.0,100.0,1.0
+--hide@echo_count:effect_type~=2
+--hide@echo_dist:effect_type~=2
+--group
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@motion_blur_ps:
+cbuffer Params : register(b0) {
+    float4 param_rect; // xy: u_min, v_min, zw: u_scale, v_scale
+    float4 param_blur; // xy: blur_uv, z: samples, w: unused
+};
+
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
+float4 sample_src(Texture2D t, SamplerState s, float2 uv, float4 rect) {
+    float2 src_uv = (uv - rect.xy) / rect.zw;
+    if (src_uv.x < 0.0 || src_uv.x > 1.0 || src_uv.y < 0.0 || src_uv.y > 1.0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    return t.SampleLevel(s, src_uv, 0);
+}
+
+float4 motion_blur_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float2 dir = param_blur.xy;
+    int s = max(1, (int)round(param_blur.z));
+
+    if (s <= 1 || dot(dir, dir) <= 0.0) {
+        return sample_src(tex, samp, uv, param_rect);
+    }
+
+    float4 color = float4(0.0, 0.0, 0.0, 0.0);
+    float step_inv = 1.0 / (float)(s - 1);
+
+    [loop]
+    for (int i = 0; i < s; i++) {
+        float2 offset = dir * ((float)i * step_inv - 0.5);
+        color += sample_src(tex, samp, uv + offset, param_rect);
+    }
+
+    return color / (float)s;
+}
+]]
+
+local abs = math.abs
+local ceil = math.ceil
+local floor = math.floor
+local max = math.max
+local min = math.min
+
+local p_e_x = obj.ox
+local p_e_y = obj.oy
+local p_s_x = 0.0
+local p_s_y = -100.0
+
+-- 1. 出現座標の算出
+if pos_preset == 0 then
+    if obj.index == 0 then
+        obj.setanchor("start_pos", 1, "line")
+    end
+    p_s_x = (type(start_pos) == "table" and start_pos[1]) or 0.0
+    p_s_y = (type(start_pos) == "table" and start_pos[2]) or -100.0
+else
+    local margin = 300.0
+    local sw = max(obj.screen_w, 0) * 0.5 + margin
+    local sh = max(obj.screen_h, 0) * 0.5 + margin
+
+    if pos_preset == 1 then     p_s_x, p_s_y = p_e_x - sw, p_e_y
+    elseif pos_preset == 2 then p_s_x, p_s_y = p_e_x + sw, p_e_y
+    elseif pos_preset == 3 then p_s_x, p_s_y = p_e_x, p_e_y - sh
+    elseif pos_preset == 4 then p_s_x, p_s_y = p_e_x, p_e_y + sh
+    elseif pos_preset == 5 then p_s_x, p_s_y = p_e_x - sw, p_e_y - sh
+    elseif pos_preset == 6 then p_s_x, p_s_y = p_e_x + sw, p_e_y - sh
+    elseif pos_preset == 7 then p_s_x, p_s_y = p_e_x - sw, p_e_y + sh
+    elseif pos_preset == 8 then p_s_x, p_s_y = p_e_x + sw, p_e_y + sh
+    elseif pos_preset == 9 then p_s_x, p_s_y = -obj.x, -obj.y
+    end
+end
+
+if reverse_move then
+    p_s_x, p_e_x = p_e_x, p_s_x
+    p_s_y, p_e_y = p_e_y, p_s_y
+end
+
+-- 2. ディレイインデックスとディレイ時間の算出
+local cur_time = obj.time
+local index = obj.index
+local num = max(obj.num, 1)
+
+local delay_idx = index
+if order == 1 then
+    delay_idx = (num - 1) - index
+elseif order == 2 then
+    local seed_int = floor(seed)
+    local random_value = obj.rand1(-(seed_int * 4096 + index), 0)
+    delay_idx = min(max(random_value, 0.0), 1.0) * (num - 1)
+elseif order == 3 then
+    delay_idx = abs(index - (num - 1) * 0.5)
+elseif order == 4 then
+    delay_idx = ((num - 1) * 0.5) - abs(index - (num - 1) * 0.5)
+end
+
+local duration = abs(anim_time)
+local delay_time = 0.0
+
+if delay_mode == 0 then
+    delay_time = duration * delay_pct * 0.01 * delay_idx
+else
+    local bpm = max(1.0, base_bpm)
+    delay_time = (60.0 / bpm) * delay_beat * delay_idx
+end
+
+-- 3. アニメーション進捗の算出および開始前判定
+local relative_time = cur_time - delay_time
+local is_before = false
+
+if duration > 0.0 then
+    if anim_time > 0.0 then
+        if relative_time < 0.0 then
+            is_before = true
+        end
+    else
+        if relative_time > duration then
+            is_before = true
+        end
+    end
+end
+
+if hide_before and is_before then
+    obj.alpha = 0
+    return
+end
+
+local progress = 1.0
+if duration > 0.0 then
+    if anim_time > 0.0 then
+        progress = relative_time / duration
+    else
+        progress = 1.0 - (relative_time / duration)
+    end
+end
+progress = max(0.0, min(1.0, progress))
+
+-- 4. イージングおよび位置の適用
+local ease_val = 0.0
+if ease_type == 1 then
+    local s = 1.70158
+    local p_sub = progress - 1.0
+    ease_val = p_sub * p_sub * ((s + 1.0) * p_sub + s) + 1.0
+else
+    local safe_pow = max(0.0, 1.0 - progress)
+    ease_val = 1.0 - (safe_pow ^ max(0.0, power))
+end
+
+obj.ox = p_s_x + (p_e_x - p_s_x) * ease_val
+obj.oy = p_s_y + (p_e_y - p_s_y) * ease_val
+
+-- 5. エフェクト処理 (モーションブラー / 残像)
+if effect_type > 0 and duration > 0.0 and progress > 0.0 and progress < 1.0 and obj.alpha > 0.0 then
+    local deriv = 0.0
+    if ease_type == 1 then
+        local s = 1.70158
+        local p_sub = progress - 1.0
+        deriv = (3.0 * (s + 1.0) * p_sub * p_sub + 2.0 * s * p_sub) / duration
+    else
+        local safe_power = max(0.0, power - 1.0)
+        deriv = (power * ((1.0 - progress) ^ safe_power)) / duration
+    end
+
+    if anim_time < 0.0 then
+        deriv = -deriv
+    end
+
+    local vel_x = (p_e_x - p_s_x) * deriv
+    local vel_y = (p_e_y - p_s_y) * deriv
+
+    if vel_x ~= 0.0 or vel_y ~= 0.0 then
+        local safe_w = max(1, obj.w)
+        local safe_h = max(1, obj.h)
+        local max_w, max_h = obj.getinfo("image_max")
+        max_w = max_w or 8192
+        max_h = max_h or 8192
+
+        local cache_name = string.format("cache:ta_pow_ent_%s_%s", tostring(obj.id), tostring(obj.effect_id))
+
+        if effect_type == 1 and blur_str > 0.0 then
+            local blur_amount = blur_str * 0.01
+            local samples = min(max(floor(blur_samples + 0.5), 1), 64)
+
+            local max_pad_x = max(0, floor((max_w - safe_w) * 0.5))
+            local max_pad_y = max(0, floor((max_h - safe_h) * 0.5))
+
+            local blur_px_x = max(-max_pad_x * 2, min(max_pad_x * 2, vel_x * blur_amount * 0.01))
+            local blur_px_y = max(-max_pad_y * 2, min(max_pad_y * 2, vel_y * blur_amount * 0.01))
+
+            local pad_x = min(ceil(abs(blur_px_x) * 0.5), max_pad_x)
+            local pad_y = min(ceil(abs(blur_px_y) * 0.5), max_pad_y)
+
+            local new_w = safe_w + pad_x * 2
+            local new_h = safe_h + pad_y * 2
+
+            obj.copybuffer(cache_name, "object")
+            obj.clearbuffer("object", new_w, new_h)
+
+            local rect_u = pad_x / new_w
+            local rect_v = pad_y / new_h
+            local rect_w = safe_w / new_w
+            local rect_h = safe_h / new_h
+
+            local blur_uv_x = blur_px_x / new_w
+            local blur_uv_y = blur_px_y / new_h
+
+            obj.pixelshader(
+                "motion_blur_ps",
+                "object",
+                { cache_name },
+                { rect_u, rect_v, rect_w, rect_h, blur_uv_x, blur_uv_y, samples, 0.0 },
+                "copy",
+                "clip"
+            )
+        elseif effect_type == 2 and echo_count > 0 and echo_dist > 0.0 then
+            local echo_num = min(max(floor(echo_count + 0.5), 1), 30)
+            local fps = (obj.framerate and obj.framerate > 0) and obj.framerate or 60
+            local px_per_frame_x = vel_x / fps
+            local px_per_frame_y = vel_y / fps
+
+            local echo_amount = echo_dist * 0.01
+            local step_px_x = px_per_frame_x * echo_amount
+            local step_px_y = px_per_frame_y * echo_amount
+
+            local total_shift_x = -step_px_x * echo_num
+            local total_shift_y = -step_px_y * echo_num
+
+            -- テクスチャ上限内に収まるようステップ量をスケーリング
+            local max_shift_x = max(0, max_w - safe_w)
+            local max_shift_y = max(0, max_h - safe_h)
+            if abs(total_shift_x) > max_shift_x and abs(total_shift_x) > 0.0 then
+                local ratio_x = max_shift_x / abs(total_shift_x)
+                step_px_x = step_px_x * ratio_x
+                total_shift_x = -step_px_x * echo_num
+            end
+            if abs(total_shift_y) > max_shift_y and abs(total_shift_y) > 0.0 then
+                local ratio_y = max_shift_y / abs(total_shift_y)
+                step_px_y = step_px_y * ratio_y
+                total_shift_y = -step_px_y * echo_num
+            end
+
+            local pad_l = (total_shift_x < 0) and ceil(abs(total_shift_x)) or 0
+            local pad_r = (total_shift_x > 0) and ceil(total_shift_x) or 0
+            local pad_t = (total_shift_y < 0) and ceil(abs(total_shift_y)) or 0
+            local pad_b = (total_shift_y > 0) and ceil(total_shift_y) or 0
+
+            local new_w = min(max_w, safe_w + pad_l + pad_r)
+            local new_h = min(max_h, safe_h + pad_t + pad_b)
+
+            local shift_center_x = (pad_l - pad_r) * 0.5
+            local shift_center_y = (pad_t - pad_b) * 0.5
+            obj.ox = obj.ox - shift_center_x
+            obj.oy = obj.oy - shift_center_y
+
+            local orig_alpha = obj.alpha
+            obj.alpha = 1.0
+
+            obj.copybuffer(cache_name, "object")
+            obj.setoption("drawtarget", "tempbuffer", new_w, new_h)
+            obj.clearbuffer("tempbuffer")
+            obj.copybuffer("object", cache_name)
+
+            local inv_denom = 1.0 / (echo_num + 1)
+            for i = echo_num, 1, -1 do
+                local alpha_scale = 0.7 * (1.0 - (i * inv_denom))
+                local draw_x = shift_center_x - step_px_x * i
+                local draw_y = shift_center_y - step_px_y * i
+                obj.draw(draw_x, draw_y, 0, 1.0, alpha_scale)
+            end
+
+            obj.draw(shift_center_x, shift_center_y, 0, 1.0, 1.0)
+
+            obj.copybuffer("object", "tempbuffer")
+            obj.setoption("drawtarget", "framebuffer")
+            obj.alpha = orig_alpha
+        end
+    end
+end
