@@ -2,40 +2,43 @@
 --information:色ズレ(色収差)
 --filter
 
---group:基本設定
+--group:基本設定,true
 --track@amount:ズレ量/強さ,-2000.0,2000.0,10.0,0.1
 --track@angle:角度(平行用),-360.0,360.0,0.0,0.1
 --track@center_x:中心X,-4000.0,4000.0,0.0,1.0
 --track@center_y:中心Y,-4000.0,4000.0,0.0,1.0
 --trackgroup@center_x,center_y:中心座標
 --select@mode:モード=0,平行ズレ=0,放射ズレ(倍率)=1,回転ズレ=2
---group:
+--hide@angle:mode~=0
+--group
 
---group:ラジアル設定
+--group:ラジアル設定,true
 --track@radial:回転ラジアル,-3.14,3.14,0.0,0.01
 --track@scale:倍率ズレ,-1.0,1.0,0.0,0.01
 --select@scale_mode:倍率方式=0,線形=0,指数=1
 --track@radius:影響範囲,0.01,10.0,1.0,0.01
 --track@falloff:減衰強度,0.0,10.0,0.0,0.1
 --select@falloff_mode:減衰方式=0,標準累乗=0,急峻1=1,急峻2=2,急峻3=3,指数減衰=4
---group:
+--hide@scale_mode:scale==0
+--hide@falloff_mode:falloff==0
+--group
 
---group:詳細設定
---track@quality:品質(サンプル数),2,64,8,1
+--group:詳細設定,true
+--track@quality:品質(サンプル数),3,64,8,1
 --select@color_order:配色=0,赤(+)・青(-)=0,緑(+)・赤(-)=1,青(+)・緑(-)=2,赤(+)・緑(-)=3,緑(+)・青(-)=4,青(+)・赤(-)=5
 --select@color_space:色空間=0,RGB=0,RSS-1=1,FSS-1=2,CSL-1=3,HCS-1=4,PHS-1=5,CSM-1=6,KSM-1=7,CFE-1=8,ANO-1=9,CAT-2=10,BRD-2=11,TOR-2=12,STD-2=13,QRO-2=14,HBP-2=15,CMY-1=16
---check@hide_orig:元画像を表示しない,0
+--check@hide_orig:元画像を表示しない,false
 --track@mix_rate:元画像ブレンド(%),0.0,100.0,0.0,0.1
---group:
+--group
 
 --[[pixelshader@omni_chromatic_aberration:
 cbuffer Params : register(b0) {
     float4 param_geom;   // x: amount, y: cos_a, z: sin_a, w: quality
     float4 param_mode;   // x: mode, y: color_order, z: hide_orig, w: mix_rate
-    float4 param_center; // xy: center_px, z: obj_alpha, w: falloff
+    float4 param_center; // xy: center_px, z: pad0, w: falloff
     float4 param_res;    // xy: resolution, zw: inverse resolution
     float4 param_extra;  // x: radius, y: radial, z: scale, w: scale_mode
-    float4 param_shape;  // x: falloff_mode, y: color_space, z: reserved, w: reserved
+    float4 param_shape;  // x: falloff_mode, y: color_space, zw: orig_res
 };
 
 Texture2D tex : register(t0);
@@ -43,6 +46,22 @@ SamplerState smp : register(s0);
 
 static const float PI = 3.14159265358979323846;
 static const float TWO_PI = 6.28318530717958647692;
+
+float3 srgb_to_linear(float3 c)
+{
+    float3 safe_c = max(c, 0.0);
+    float3 lo = safe_c / 12.92;
+    float3 hi = pow(max((safe_c + 0.055) / 1.055, 0.0), 2.4);
+    return lerp(lo, hi, step(0.04045, safe_c));
+}
+
+float3 linear_to_srgb(float3 c)
+{
+    float3 safe_c = max(c, 0.0);
+    float3 lo = safe_c * 12.92;
+    float3 hi = 1.055 * pow(safe_c, 1.0 / 2.4) - 0.055;
+    return lerp(lo, hi, step(0.0031308, safe_c));
+}
 
 float wrap01(float value)
 {
@@ -59,26 +78,25 @@ float cube(float value)
     return value * value * value;
 }
 
-float safeAsinh(float value)
+float safe_asinh(float value)
 {
     float magnitude = abs(value);
     return sign(value) * log(magnitude + sqrt(magnitude * magnitude + 1.0));
 }
 
-float safeSinh(float value)
+float safe_sinh(float value)
 {
     value = clamp(value, -12.0, 12.0);
     return 0.5 * (exp(value) - exp(-value));
 }
 
-// sign(0) = 0 により value = 0 で正しく 0 を返す
-float safeTanh(float value)
+float safe_tanh(float value)
 {
     float e = exp(-2.0 * min(abs(value), 20.0));
     return sign(value) * (1.0 - e) / (1.0 + e);
 }
 
-float3 rgbToOpponent(float3 color)
+float3 rgb_to_opponent(float3 color)
 {
     float l = (color.r + color.g + color.b) / 3.0;
     float a = color.r - color.g;
@@ -86,7 +104,7 @@ float3 rgbToOpponent(float3 color)
     return float3(l, a, b);
 }
 
-float3 opponentToRgb(float l, float a, float b)
+float3 opponent_to_rgb(float l, float a, float b)
 {
     return float3(
         l + b / 3.0 + a * 0.5,
@@ -95,25 +113,25 @@ float3 opponentToRgb(float l, float a, float b)
 }
 
 // RSS-1 — Reversible Sine Shear
-float3 rssForward(float3 color)
+float3 rss_forward(float3 color)
 {
-    float3 lab = rgbToOpponent(color);
+    float3 lab = rgb_to_opponent(color);
     float x = lab.y + 0.35 * sin(TWO_PI * lab.x);
     float y = lab.z + 0.45 * sin(PI * x);
     float z = lab.x + 0.18 * sin(TWO_PI * y);
     return float3(x, y, z);
 }
 
-float3 rssInverse(float3 value)
+float3 rss_inverse(float3 value)
 {
     float l = value.z - 0.18 * sin(TWO_PI * value.y);
     float b = value.y - 0.45 * sin(PI * value.x);
     float a = value.x - 0.35 * sin(TWO_PI * l);
-    return opponentToRgb(l, a, b);
+    return opponent_to_rgb(l, a, b);
 }
 
 // FSS-1 — Golden Shear
-float3 fssForward(float3 color)
+float3 fss_forward(float3 color)
 {
     const float golden = 1.618033988749895;
     const float golden2 = 2.618033988749895;
@@ -124,7 +142,7 @@ float3 fssForward(float3 color)
     return float3(x, y, z);
 }
 
-float3 fssInverse(float3 value)
+float3 fss_inverse(float3 value)
 {
     const float golden = 1.618033988749895;
     const float golden2 = 2.618033988749895;
@@ -135,32 +153,30 @@ float3 fssInverse(float3 value)
 }
 
 // CSL-1 — Complex Spiral
-float3 cslForward(float3 color)
+float3 csl_forward(float3 color)
 {
-    float3 lab = rgbToOpponent(color);
+    float3 lab = rgb_to_opponent(color);
     float rho = length(lab.yz);
     float phase = atan2(lab.z, lab.y);
-    float radius = safeAsinh(2.8 * rho) / 2.8;
-    float z = safeAsinh(2.2 * (lab.x - 0.5)) / 2.2;
+    float radius = safe_asinh(2.8 * rho) / 2.8;
+    float z = safe_asinh(2.2 * (lab.x - 0.5)) / 2.2;
     float theta = phase + 3.4 * log(1.0 + 5.0 * rho * rho) + 1.7 * sin(TWO_PI * lab.x);
     return float3(radius * cos(theta), radius * sin(theta), z);
 }
 
-float3 cslInverse(float3 value)
+float3 csl_inverse(float3 value)
 {
     float radius = length(value.xy);
-    float rho = safeSinh(2.8 * radius) / 2.8;
-    float l = 0.5 + safeSinh(2.2 * value.z) / 2.2;
+    float rho = safe_sinh(2.8 * radius) / 2.8;
+    float l = 0.5 + safe_sinh(2.2 * value.z) / 2.2;
     float phase = atan2(value.y, value.x)
         - 3.4 * log(1.0 + 5.0 * rho * rho)
         - 1.7 * sin(TWO_PI * l);
-    return opponentToRgb(l, rho * cos(phase), rho * sin(phase));
+    return opponent_to_rgb(l, rho * cos(phase), rho * sin(phase));
 }
 
 // HCS-1 — Hyperbolic Cross
-// Forward行列 M = { {1.15, -0.65, 0.20}, {-0.20, 1.30, -0.70}, {0.75, 0.15, -0.55} }
-// det(M) = -0.48975
-float3 hcsForward(float3 color)
+float3 hcs_forward(float3 color)
 {
     float3 q = color - 0.5;
     float3 y = float3(
@@ -168,18 +184,17 @@ float3 hcsForward(float3 color)
         -0.20 * q.x + 1.30 * q.y - 0.70 * q.z,
         0.75 * q.x + 0.15 * q.y - 0.55 * q.z);
     return float3(
-        safeAsinh(2.6 * y.x) / 2.6,
-        safeAsinh(2.6 * y.y) / 2.6,
-        safeAsinh(2.6 * y.z) / 2.6);
+        safe_asinh(2.6 * y.x) / 2.6,
+        safe_asinh(2.6 * y.y) / 2.6,
+        safe_asinh(2.6 * y.z) / 2.6);
 }
 
-// Inverse係数は M^-1 = (1/det) * adj(M) の厳密解
-float3 hcsInverse(float3 value)
+float3 hcs_inverse(float3 value)
 {
     float3 y = float3(
-        safeSinh(2.6 * value.x) / 2.6,
-        safeSinh(2.6 * value.y) / 2.6,
-        safeSinh(2.6 * value.z) / 2.6);
+        safe_sinh(2.6 * value.x) / 2.6,
+        safe_sinh(2.6 * value.y) / 2.6,
+        safe_sinh(2.6 * value.z) / 2.6);
     float3 q = float3(
         1.2455334354 * y.x + 0.6687085248 * y.y - 0.3981623277 * y.z,
         1.2965798877 * y.x + 1.5977539561 * y.y - 1.5620214395 * y.z,
@@ -188,9 +203,9 @@ float3 hcsInverse(float3 value)
 }
 
 // PHS-1 — Prime Harmonic
-float3 phsForward(float3 color)
+float3 phs_forward(float3 color)
 {
-    float3 lab = rgbToOpponent(color);
+    float3 lab = rgb_to_opponent(color);
     float w = lab.x - 0.5;
     float x = lab.y + 0.30 * sin(4.0 * PI * lab.z) + 0.15 * sin(10.0 * PI * w);
     float y = lab.z + 0.36 * sin(6.0 * PI * x);
@@ -198,27 +213,28 @@ float3 phsForward(float3 color)
     return float3(x, y, z);
 }
 
-float3 phsInverse(float3 value)
+float3 phs_inverse(float3 value)
 {
     float w = value.z - 0.24 * sin(10.0 * PI * value.y);
     float b = value.y - 0.36 * sin(6.0 * PI * value.x);
     float a = value.x - 0.30 * sin(4.0 * PI * b) - 0.15 * sin(10.0 * PI * w);
-    return opponentToRgb(w + 0.5, a, b);
+    return opponent_to_rgb(w + 0.5, a, b);
 }
 
-// CSM-1 — Chirikov Standard Map (sinは周期1のためwrap01済み入力でも完全可逆)
-float3 csmForward(float3 color)
+// CSM-1 — Chirikov Standard Map
+float3 csm_forward(float3 color)
 {
-    float x = wrap01(color.r);
-    float p = wrap01(color.g);
-    float z = wrap01(color.b);
+    float3 safe_col = clamp(color, 0.0, 0.99999);
+    float x = safe_col.r;
+    float p = safe_col.g;
+    float z = safe_col.b;
     float p1 = wrap01(p + (5.8 / TWO_PI) * sin(TWO_PI * x));
     float x1 = wrap01(x + p1);
     float z1 = wrap01(z + 0.37 * sin(TWO_PI * x1) - 0.29 * sin(TWO_PI * p1));
     return float3(x1, p1, z1);
 }
 
-float3 csmInverse(float3 value)
+float3 csm_inverse(float3 value)
 {
     float x1 = wrap01(value.x);
     float p1 = wrap01(value.y);
@@ -230,18 +246,19 @@ float3 csmInverse(float3 value)
 }
 
 // KSM-1 — Kicked Standard
-float3 ksmForward(float3 color)
+float3 ksm_forward(float3 color)
 {
-    float x = wrap01(color.r);
-    float p = wrap01(color.g);
-    float z = wrap01(color.b);
+    float3 safe_col = clamp(color, 0.0, 0.99999);
+    float x = safe_col.r;
+    float p = safe_col.g;
+    float z = safe_col.b;
     float p1 = wrap01(p + (8.8 / TWO_PI) * sin(TWO_PI * x));
     float x1 = wrap01(x + p1);
     float z1 = wrap01(z + 0.42 * sin(TWO_PI * x1) - 0.34 * sin(TWO_PI * (x1 + p1)));
     return float3(x1, p1, z1);
 }
 
-float3 ksmInverse(float3 value)
+float3 ksm_inverse(float3 value)
 {
     float x1 = wrap01(value.x);
     float p1 = wrap01(value.y);
@@ -253,7 +270,7 @@ float3 ksmInverse(float3 value)
 }
 
 // CFE-1 — Continued-Fraction Natural Extension
-float3 cfeForward(float3 color)
+float3 cfe_forward(float3 color)
 {
     const float epsilon = 0.001;
     float3 squeezed = epsilon + (1.0 - 2.0 * epsilon) * saturate(color);
@@ -264,7 +281,7 @@ float3 cfeForward(float3 color)
     return float3(x, y, z);
 }
 
-float3 cfeInverse(float3 value)
+float3 cfe_inverse(float3 value)
 {
     const float epsilon = 0.001;
     float y_coord = max(value.y, 1e-5);
@@ -276,16 +293,16 @@ float3 cfeInverse(float3 value)
 }
 
 // ANO-1 — Anosov Torus
-float3 anoForward(float3 color)
+float3 ano_forward(float3 color)
 {
-    float3 x = wrap01(color);
+    float3 x = clamp(color, 0.0, 0.99999);
     return wrap01(float3(
         2.0 * x.x + x.y + x.z,
         x.x + x.y + x.z,
         x.x + x.y));
 }
 
-float3 anoInverse(float3 value)
+float3 ano_inverse(float3 value)
 {
     float3 y = wrap01(value);
     return wrap01(float3(
@@ -294,8 +311,8 @@ float3 anoInverse(float3 value)
         y.y - y.z));
 }
 
-// CAT-2 — Optical Catastrophe (z->y->xの順で計算する逐次逆変換により厳密に一致)
-float3 catForward(float3 color)
+// CAT-2 — Optical Catastrophe
+float3 cat_forward(float3 color)
 {
     float3 q = color - 0.5;
     float x = q.x + 0.70 * cube(q.y) + 0.18 * sin(6.0 * PI * q.y);
@@ -304,7 +321,7 @@ float3 catForward(float3 color)
     return float3(x, y, z);
 }
 
-float3 catInverse(float3 value)
+float3 cat_inverse(float3 value)
 {
     float z = value.z - 0.75 * cube(value.x) + 0.28 * value.y - 0.12 * sin(TWO_PI * value.x);
     float y = value.y - 0.80 * cube(z) - 0.24 * sin(4.0 * PI * value.x);
@@ -320,7 +337,7 @@ float2 rotate2(float2 value, float angle)
 }
 
 // BRD-2 — Braid Catastrophe
-float3 brdForward(float3 color)
+float3 brd_forward(float3 color)
 {
     float3 q = color - 0.5;
     float a = 3.6 * sin(TWO_PI * q.z) + 0.9 * sin(6.0 * PI * q.z);
@@ -332,7 +349,7 @@ float3 brdForward(float3 color)
     return float3(zx3.y, yz2.x, zx3.x);
 }
 
-float3 brdInverse(float3 value)
+float3 brd_inverse(float3 value)
 {
     float c = 3.8 * sin(TWO_PI * value.y) + 1.1 * sin(4.0 * PI * value.y);
     float2 zx2 = rotate2(float2(value.z, value.x), -c);
@@ -348,17 +365,16 @@ float3 brdInverse(float3 value)
 }
 
 // TOR-2 — Integer Torus
-// 行列 M = { {1,1,1}, {1,2,1}, {1,1,2} }, det(M) = 1 (ユニモジュラ行列のためトーラス空間で完全可逆)
-float3 torForward(float3 color)
+float3 tor_forward(float3 color)
 {
-    float3 x = wrap01(color);
+    float3 x = clamp(color, 0.0, 0.99999);
     return wrap01(float3(
         x.x + x.y + x.z,
         x.x + 2.0 * x.y + x.z,
         x.x + x.y + 2.0 * x.z));
 }
 
-float3 torInverse(float3 value)
+float3 tor_inverse(float3 value)
 {
     float3 y = wrap01(value);
     return wrap01(float3(
@@ -368,18 +384,19 @@ float3 torInverse(float3 value)
 }
 
 // STD-2 — Double Standard
-float3 stdForward(float3 color)
+float3 std_forward(float3 color)
 {
-    float x = wrap01(color.r);
-    float p = wrap01(color.g);
-    float z = wrap01(color.b);
+    float3 safe_col = clamp(color, 0.0, 0.99999);
+    float x = safe_col.r;
+    float p = safe_col.g;
+    float z = safe_col.b;
     float p1 = wrap01(p + (7.6 / TWO_PI) * sin(TWO_PI * x));
     float x1 = wrap01(x + p1);
     float z1 = wrap01(z + 0.30 * sin(TWO_PI * x1) - 0.27 * sin(TWO_PI * p1));
     return float3(x1, p1, z1);
 }
 
-float3 stdInverse(float3 value)
+float3 std_inverse(float3 value)
 {
     float x1 = wrap01(value.x);
     float p1 = wrap01(value.y);
@@ -391,9 +408,7 @@ float3 stdInverse(float3 value)
 }
 
 // QRO-2 — Quaternion Ribbon
-// 回転軸 axis=(1,1,1)/sqrt(3) まわりの回転のため、length(q) および dot(axis, q) は回転不変量。
-// したがって qroAngle(value) == qroAngle(q) が成立し、-qroAngle(value) で正確に復元される。
-float3 qroRotate(float3 q, float angle)
+float3 qro_rotate(float3 q, float angle)
 {
     const float inv_sqrt3 = 0.5773502691896258;
     float3 axis = float3(inv_sqrt3, inv_sqrt3, inv_sqrt3);
@@ -402,27 +417,27 @@ float3 qroRotate(float3 q, float angle)
     return q * cosine + cross(axis, q) * sine + axis * dot(axis, q) * (1.0 - cosine);
 }
 
-float qroAngle(float3 q)
+float qro_angle(float3 q)
 {
     const float inv_sqrt3 = 0.5773502691896258;
     float rho = length(q);
     float proj = dot(float3(inv_sqrt3, inv_sqrt3, inv_sqrt3), q);
-    return 4.2 * safeTanh(2.0 * rho) + 2.4 * sin(4.0 * proj);
+    return 4.2 * safe_tanh(2.0 * rho) + 2.4 * sin(4.0 * proj);
 }
 
-float3 qroForward(float3 color)
+float3 qro_forward(float3 color)
 {
     float3 q = color - 0.5;
-    return qroRotate(q, qroAngle(q));
+    return qro_rotate(q, qro_angle(q));
 }
 
-float3 qroInverse(float3 value)
+float3 qro_inverse(float3 value)
 {
-    return qroRotate(value, -qroAngle(value)) + 0.5;
+    return qro_rotate(value, -qro_angle(value)) + 0.5;
 }
 
 // HBP-2 — Hyperbolic Prism
-float3 hbpBasisForward(float3 q)
+float3 hbp_basis_forward(float3 q)
 {
     const float inv_sqrt3 = 0.5773502691896258;
     const float inv_sqrt2 = 0.7071067811865475;
@@ -433,7 +448,7 @@ float3 hbpBasisForward(float3 q)
         (q.x - 2.0 * q.y + q.z) * inv_sqrt6);
 }
 
-float3 hbpBasisInverse(float3 value)
+float3 hbp_basis_inverse(float3 value)
 {
     const float inv_sqrt3 = 0.5773502691896258;
     const float inv_sqrt2 = 0.7071067811865475;
@@ -444,91 +459,92 @@ float3 hbpBasisInverse(float3 value)
         value.x * inv_sqrt3 - value.y * inv_sqrt2 + value.z * inv_sqrt6);
 }
 
-float3 hbpForward(float3 color)
+float3 hbp_forward(float3 color)
 {
-    float3 q = hbpBasisForward(color - 0.5);
-    float x = safeAsinh(1.6 * q.x) / 1.6;
+    float3 q = hbp_basis_forward(color - 0.5);
+    float x = safe_asinh(1.6 * q.x) / 1.6;
     float y0 = q.y + 0.32 * sin(PI * x);
-    float y = safeAsinh(2.1 * y0) / 2.1;
+    float y = safe_asinh(2.1 * y0) / 2.1;
     float z0 = q.z - 0.28 * cos(PI * y) + 0.14 * sin(PI * x);
-    float z = safeAsinh(1.8 * z0) / 1.8;
+    float z = safe_asinh(1.8 * z0) / 1.8;
     return float3(x, y, z);
 }
 
-float3 hbpInverse(float3 value)
+float3 hbp_inverse(float3 value)
 {
-    float z0 = safeSinh(1.8 * value.z) / 1.8;
+    float z0 = safe_sinh(1.8 * value.z) / 1.8;
     float z = z0 + 0.28 * cos(PI * value.y) - 0.14 * sin(PI * value.x);
-    float y0 = safeSinh(2.1 * value.y) / 2.1;
+    float y0 = safe_sinh(2.1 * value.y) / 2.1;
     float y = y0 - 0.32 * sin(PI * value.x);
-    float x = safeSinh(1.6 * value.x) / 1.6;
-    return hbpBasisInverse(float3(x, y, z)) + 0.5;
+    float x = safe_sinh(1.6 * value.x) / 1.6;
+    return hbp_basis_inverse(float3(x, y, z)) + 0.5;
 }
 
 // CMY-1 — Cyan-Magenta-Yellow
-float3 cmyForward(float3 color)
+float3 cmy_forward(float3 color)
 {
     return 1.0 - saturate(color);
 }
 
-float3 cmyInverse(float3 value)
+float3 cmy_inverse(float3 value)
 {
     return 1.0 - saturate(value);
 }
 
-float3 colorForward(float3 color, int color_space)
+float3 color_forward(float3 color, int color_space)
 {
     float3 res = color;
     [branch]
     switch (color_space) {
-        case 1:  res = rssForward(color); break;
-        case 2:  res = fssForward(color); break;
-        case 3:  res = cslForward(color); break;
-        case 4:  res = hcsForward(color); break;
-        case 5:  res = phsForward(color); break;
-        case 6:  res = csmForward(color); break;
-        case 7:  res = ksmForward(color); break;
-        case 8:  res = cfeForward(color); break;
-        case 9:  res = anoForward(color); break;
-        case 10: res = catForward(color); break;
-        case 11: res = brdForward(color); break;
-        case 12: res = torForward(color); break;
-        case 13: res = stdForward(color); break;
-        case 14: res = qroForward(color); break;
-        case 15: res = hbpForward(color); break;
-        case 16: res = cmyForward(color); break;
+        case 1:  res = rss_forward(color); break;
+        case 2:  res = fss_forward(color); break;
+        case 3:  res = csl_forward(color); break;
+        case 4:  res = hcs_forward(color); break;
+        case 5:  res = phs_forward(color); break;
+        case 6:  res = csm_forward(color); break;
+        case 7:  res = ksm_forward(color); break;
+        case 8:  res = cfe_forward(color); break;
+        case 9:  res = ano_forward(color); break;
+        case 10: res = cat_forward(color); break;
+        case 11: res = brd_forward(color); break;
+        case 12: res = tor_forward(color); break;
+        case 13: res = std_forward(color); break;
+        case 14: res = qro_forward(color); break;
+        case 15: res = hbp_forward(color); break;
+        case 16: res = cmy_forward(color); break;
         default: res = color; break;
     }
     return res;
 }
 
-float3 colorInverse(float3 value, int color_space)
+float3 color_inverse(float3 value, int color_space)
 {
     float3 res = value;
     [branch]
     switch (color_space) {
-        case 1:  res = rssInverse(value); break;
-        case 2:  res = fssInverse(value); break;
-        case 3:  res = cslInverse(value); break;
-        case 4:  res = hcsInverse(value); break;
-        case 5:  res = phsInverse(value); break;
-        case 6:  res = csmInverse(value); break;
-        case 7:  res = ksmInverse(value); break;
-        case 8:  res = cfeInverse(value); break;
-        case 9:  res = anoInverse(value); break;
-        case 10: res = catInverse(value); break;
-        case 11: res = brdInverse(value); break;
-        case 12: res = torInverse(value); break;
-        case 13: res = stdInverse(value); break;
-        case 14: res = qroInverse(value); break;
-        case 15: res = hbpInverse(value); break;
-        case 16: res = cmyInverse(value); break;
+        case 1:  res = rss_inverse(value); break;
+        case 2:  res = fss_inverse(value); break;
+        case 3:  res = csl_inverse(value); break;
+        case 4:  res = hcs_inverse(value); break;
+        case 5:  res = phs_inverse(value); break;
+        case 6:  res = csm_inverse(value); break;
+        case 7:  res = ksm_inverse(value); break;
+        case 8:  res = cfe_inverse(value); break;
+        case 9:  res = ano_inverse(value); break;
+        case 10: res = cat_inverse(value); break;
+        case 11: res = brd_inverse(value); break;
+        case 12: res = tor_inverse(value); break;
+        case 13: res = std_inverse(value); break;
+        case 14: res = qro_inverse(value); break;
+        case 15: res = hbp_inverse(value); break;
+        case 16: res = cmy_inverse(value); break;
         default: res = value; break;
     }
     return res;
 }
 
-float3 get_color_weight(int order, float t, float hide) {
+float3 get_color_weight(int order, float t, float hide, float step_factor)
+{
     float d1 = (t - 1.0) * 4.0;
     float d2 = (t - 0.5) * 4.0;
     float d3 = t * 4.0;
@@ -537,12 +553,13 @@ float3 get_color_weight(int order, float t, float hide) {
     float w3 = exp(-0.5 * d3 * d3);
 
     if (hide > 0.5) {
-        float original_suppression = smoothstep(0.05, 0.35, abs(t - 0.5));
+        float suppress_width = max(0.25, step_factor * 0.9);
+        float original_suppression = smoothstep(0.02, suppress_width, abs(t - 0.5));
         w1 *= original_suppression;
         w2 *= original_suppression;
         w3 *= original_suppression;
     }
-    
+
     if (order == 1) return float3(w3, w1, w2);
     if (order == 2) return float3(w2, w3, w1);
     if (order == 3) return float3(w1, w3, w2);
@@ -551,7 +568,8 @@ float3 get_color_weight(int order, float t, float hide) {
     return float3(w1, w2, w3);
 }
 
-float get_falloff(float distance_px, float radius_px, float power, int mode) {
+float get_falloff(float distance_px, float radius_px, float power, int mode)
+{
     float normalized = max(distance_px / max(radius_px, 0.0001), 0.0);
     power = max(power, 0.0);
     if (mode == 1) {
@@ -569,15 +587,19 @@ float get_falloff(float distance_px, float radius_px, float power, int mode) {
     return power <= 0.0001 ? 1.0 : min(pow(normalized, power), 1000000.0);
 }
 
-float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
+{
     float4 orig = tex.Sample(smp, uv);
+    orig = float4(clamp(orig.rgb, 0.0, orig.a), saturate(orig.a));
 
     float3 sum_col = float3(0.0, 0.0, 0.0);
     float3 sum_a   = float3(0.0, 0.0, 0.0);
     float3 sum_w   = float3(0.0, 0.0, 0.0);
+    float3 sum_trans_vec = float3(0.0, 0.0, 0.0);
+    float  sum_trans_a   = 0.0;
 
-    int q = (int)param_geom.w;
-    int order = (int)(param_mode.y + 0.5);
+    int q = (int)round(param_geom.w);
+    int order = (int)round(param_mode.y);
     float amount_val = param_geom.x;
     float mode_val = param_mode.x;
     float hide_val = param_mode.z;
@@ -589,15 +611,16 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
     float radius_scale = max(param_extra.x, 0.01);
     float radial_amount = param_extra.y;
     float scale_amount = param_extra.z;
-    int scale_mode = (int)(param_extra.w + 0.5);
-    int falloff_mode = (int)(param_shape.x + 0.5);
-    int color_space = (int)(param_shape.y + 0.5);
+    int scale_mode = (int)round(param_extra.w);
+    int falloff_mode = (int)round(param_shape.x);
+    int color_space = (int)round(param_shape.y);
 
     float2 p_px = uv * res;
     float2 d_px = p_px - center_px;
 
     float step_factor = (q > 1) ? (1.0 / float(q - 1)) : 0.0;
-    float2 half_size = max(res * 0.5, 1e-5);
+    float2 orig_res = (param_shape.z > 0.0) ? param_shape.zw : res;
+    float2 half_size = max(orig_res * 0.5, 1e-5);
     float normalized_radius = length(d_px / half_size) / max(radius_scale, 0.0001);
     float falloff = get_falloff(
         normalized_radius,
@@ -640,60 +663,78 @@ float4 omni_chromatic_aberration(float4 pos : SV_Position, float2 uv : TEXCOORD0
             float radial_angle = radial_amount * s * falloff;
             float radial_cos = cos(radial_angle);
             float radial_sin = sin(radial_angle);
-            float2 sample_d = sample_uv - center_uv;
-            sample_uv = center_uv + float2(
-                sample_d.x * radial_cos - sample_d.y * radial_sin,
-                sample_d.x * radial_sin + sample_d.y * radial_cos
+            float2 sample_d_px = (sample_uv - center_uv) * res;
+            float2 rot_sample_px = float2(
+                sample_d_px.x * radial_cos - sample_d_px.y * radial_sin,
+                sample_d_px.x * radial_sin + sample_d_px.y * radial_cos
             );
+            sample_uv = center_uv + rot_sample_px * inv_res;
         }
 
         if (has_scale) {
             float scale_delta = scale_amount * s * falloff;
             float channel_scale = (scale_mode == 1)
                 ? exp(clamp(scale_delta, -16.0, 16.0))
-                : abs(1.0 + scale_delta);
+                : max(1.0 + scale_delta, 0.0);
             sample_uv = center_uv + (sample_uv - center_uv) * channel_scale;
         }
-        
-        float4 smp_col = tex.Sample(smp, sample_uv);
-        float3 cw = get_color_weight(order, t, hide_val);
-        float3 straight = smp_col.a > 0.00001
-            ? smp_col.rgb / smp_col.a
+
+        float4 smp_col = tex.SampleLevel(smp, sample_uv, 0.0);
+        smp_col = float4(clamp(smp_col.rgb, 0.0, smp_col.a), saturate(smp_col.a));
+
+        float3 cw = get_color_weight(order, t, hide_val, step_factor);
+        float3 straight_srgb = (smp_col.a > 1e-5)
+            ? saturate(smp_col.rgb / smp_col.a)
             : float3(0.0, 0.0, 0.0);
-        
-        float3 transformed = (color_space != 0) ? colorForward(straight, color_space) : straight;
-        sum_col += transformed * smp_col.a * cw;
+        float3 straight_lin = srgb_to_linear(straight_srgb);
+
+        float3 transformed = (color_space != 0) ? color_forward(straight_lin, color_space) : straight_lin;
+        sum_col += transformed * (smp_col.a * cw);
         sum_a   += float3(smp_col.a, smp_col.a, smp_col.a) * cw;
         sum_w   += cw;
+
+        float total_cw = cw.r + cw.g + cw.b;
+        sum_trans_vec += transformed * (smp_col.a * total_cw);
+        sum_trans_a   += smp_col.a * total_cw;
     }
 
-    float4 final_color = float4(0.0, 0.0, 0.0, 0.0);
-    
+    float fallback_a = (hide_val > 0.5) ? 0.0 : orig.a;
+    float out_a_r = (sum_w.r > 1e-5) ? (sum_a.r / sum_w.r) : fallback_a;
+    float out_a_g = (sum_w.g > 1e-5) ? (sum_a.g / sum_w.g) : fallback_a;
+    float out_a_b = (sum_w.b > 1e-5) ? (sum_a.b / sum_w.b) : fallback_a;
+
+    float3 fallback_srgb = (hide_val > 0.5 || orig.a <= 1e-5) ? float3(0.0, 0.0, 0.0) : saturate(orig.rgb / orig.a);
+    float3 fallback_lin = srgb_to_linear(fallback_srgb);
+    float3 fallback_trans = (color_space != 0 && sum_trans_a > 1e-5)
+        ? (sum_trans_vec / sum_trans_a)
+        : ((color_space != 0) ? color_forward(fallback_lin, color_space) : fallback_lin);
+
     float3 transformed_color = float3(
-        (sum_w.r > 0.0) ? (sum_col.r / sum_w.r) : orig.r,
-        (sum_w.g > 0.0) ? (sum_col.g / sum_w.g) : orig.g,
-        (sum_w.b > 0.0) ? (sum_col.b / sum_w.b) : orig.b);
-    float3 restored_color = (color_space != 0) ? colorInverse(transformed_color, color_space) : transformed_color;
-    
-    float out_a_r = (sum_w.r > 0.0) ? (sum_a.r / sum_w.r) : orig.a;
-    float out_a_g = (sum_w.g > 0.0) ? (sum_a.g / sum_w.g) : orig.a;
-    float out_a_b = (sum_w.b > 0.0) ? (sum_a.b / sum_w.b) : orig.a;
-    
-    final_color.a = (out_a_r + out_a_g + out_a_b) / 3.0;
+        (sum_a.r > 1e-5) ? (sum_col.r / sum_a.r) : fallback_trans.r,
+        (sum_a.g > 1e-5) ? (sum_col.g / sum_a.g) : fallback_trans.g,
+        (sum_a.b > 1e-5) ? (sum_col.b / sum_a.b) : fallback_trans.b
+    );
+    float3 restored_lin = (color_space != 0) ? color_inverse(transformed_color, color_space) : transformed_color;
+    float3 restored_srgb = linear_to_srgb(saturate(restored_lin));
 
-    final_color.rgb = saturate(restored_color) * final_color.a;
-    
-    // mix_factor: 元画像ブレンド率 (0%: 色収差成分のみ, 100%: 原音/原画像100%)
+    float3 channel_a = saturate(float3(out_a_r, out_a_g, out_a_b));
+    float max_out_a = max(channel_a.r, max(channel_a.g, channel_a.b));
+
+    float4 final_color = float4(restored_srgb * channel_a, max_out_a);
+
     float mix_factor = param_mode.w * 0.01;
-    float4 result = lerp(final_color, orig, mix_factor);
-
-    return result * param_center.z;
+    return lerp(final_color, orig, mix_factor);
 }
 ]]
 
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
 obj.setanchor("center_x,center_y", 1, "line")
 
-if obj.w <= 0 or obj.h <= 0 then
+local is_no_shift = (amount == 0 and radial == 0 and scale == 0 and not hide_orig)
+if is_no_shift or mix_rate >= 100.0 then
     return
 end
 
@@ -708,84 +749,112 @@ do
     local sin = math.sin
     local sqrt = math.sqrt
 
-    local safe_amount = amount or 0.0
-    local safe_angle = angle or 0.0
-    local safe_center_x = center_x or 0.0
-    local safe_center_y = center_y or 0.0
-    local safe_effect_mode = min(max(mode or 0, 0), 2)
+    local effect_mode = min(max(floor(mode + 0.5), 0), 2)
+    local q = min(max(floor(quality + 0.5), 3), 64)
+    local c_order = min(max(floor(color_order + 0.5), 0), 5)
+    local c_space = min(max(floor(color_space + 0.5), 0), 16)
+    local hide_orig_flag = hide_orig and 1.0 or 0.0
+    local clamped_mix = min(max(mix_rate, 0.0), 100.0)
 
-    local safe_radial = radial or 0.0
-    local safe_scale = scale or 0.0
-    local safe_scale_mode = scale_mode or 0
-    local safe_radius = radius or 1.0
-    local safe_falloff = falloff or 0.0
-    local safe_falloff_mode = falloff_mode or 0
-
-    local safe_quality = max(quality or 8, 2)
-    local safe_color_order = min(max(color_order or 0, 0), 5)
-    local safe_color_space = min(max(color_space or 0, 0), 16)
-    local safe_hide_orig = (hide_orig == 1 or hide_orig == true) and 1.0 or 0.0
-    local safe_mix_rate = min(max(mix_rate or 0.0, 0.0), 100.0)
-
-    local q = min(64, floor(safe_quality))
-    local angle_rad = rad(safe_angle)
+    local angle_rad = rad(angle)
     local cos_a = cos(angle_rad)
     local sin_a = sin(angle_rad)
 
     local orig_w = obj.w
     local orig_h = obj.h
-    local ex_x = 0
-    local ex_y = 0
+    local is_filter = obj.getinfo("filter")
 
-    if safe_effect_mode == 0 then
-        local max_shift = abs(safe_amount)
-        ex_x = ceil(abs(cos_a) * max_shift) + 2
-        ex_y = ceil(abs(sin_a) * max_shift) + 2
-    elseif safe_effect_mode == 1 then
+    if not is_filter then
         local hw = orig_w * 0.5
         local hh = orig_h * 0.5
-        local cx_rel = safe_center_x
-        local cy_rel = safe_center_y
 
-        local d1 = sqrt((-hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
-        local d2 = sqrt(( hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
-        local d3 = sqrt(( hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
-        local d4 = sqrt((-hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
+        local c1_x, c1_y = -hw - center_x, -hh - center_y
+        local c2_x, c2_y =  hw - center_x, -hh - center_y
+        local c3_x, c3_y =  hw - center_x,  hh - center_y
+        local c4_x, c4_y = -hw - center_x,  hh - center_y
+
+        local d1 = sqrt(c1_x * c1_x + c1_y * c1_y)
+        local d2 = sqrt(c2_x * c2_x + c2_y * c2_y)
+        local d3 = sqrt(c3_x * c3_x + c3_y * c3_y)
+        local d4 = sqrt(c4_x * c4_x + c4_y * c4_y)
         local max_dist = max(d1, max(d2, max(d3, d4)))
 
-        local max_shift = max_dist * (abs(safe_amount) * 0.001 + abs(safe_scale))
-        local pad = ceil(max_shift) + 4
-        ex_x = pad
-        ex_y = pad
-    else
-        -- 回転ズレおよび複合変調に対する拡張量の安全マージン算出
-        local hw = orig_w * 0.5
-        local hh = orig_h * 0.5
-        local cx_rel = safe_center_x
-        local cy_rel = safe_center_y
+        local safe_r_scale = max(radius, 0.01)
+        local inv_hw = 1.0 / max(hw, 1e-5)
+        local inv_hh = 1.0 / max(hh, 1e-5)
+        local nr1 = sqrt((c1_x * inv_hw) ^ 2 + (c1_y * inv_hh) ^ 2) / safe_r_scale
+        local nr2 = sqrt((c2_x * inv_hw) ^ 2 + (c2_y * inv_hh) ^ 2) / safe_r_scale
+        local nr3 = sqrt((c3_x * inv_hw) ^ 2 + (c3_y * inv_hh) ^ 2) / safe_r_scale
+        local nr4 = sqrt((c4_x * inv_hw) ^ 2 + (c4_y * inv_hh) ^ 2) / safe_r_scale
+        local max_norm_r = max(nr1, max(nr2, max(nr3, nr4)))
 
-        local d1 = sqrt((-hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
-        local d2 = sqrt(( hw - cx_rel) ^ 2 + (-hh - cy_rel) ^ 2)
-        local d3 = sqrt(( hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
-        local d4 = sqrt((-hw - cx_rel) ^ 2 + ( hh - cy_rel) ^ 2)
-        local max_dist = max(d1, max(d2, max(d3, d4)))
+        local function calc_falloff(norm_r, power, fmode)
+            power = max(power, 0.0)
+            if power <= 0.0001 then
+                return 1.0
+            end
+            if fmode == 1 then
+                power = max(power, 3.0)
+            elseif fmode == 2 then
+                power = max(power, 4.0)
+            elseif fmode == 3 then
+                power = max(power, 6.0)
+            elseif fmode == 4 then
+                power = max(power, 2.0)
+                local num = (2.0 ^ min(norm_r * power, 64.0)) - 1.0
+                local den = max((2.0 ^ power) - 1.0, 0.0001)
+                return min(num / den, 100.0)
+            end
+            return min(norm_r ^ power, 100.0)
+        end
 
-        local max_theta = abs(safe_amount) * 0.001 + abs(safe_radial) + abs(safe_scale)
-        local max_shift = 2.0 * max_dist * sin(min(max_theta, 3.14159265) * 0.5)
-        local pad = ceil(max_shift) + 4
-        ex_x = pad
-        ex_y = pad
-    end
+        local max_falloff = max(1.0, calc_falloff(max_norm_r, falloff, falloff_mode))
 
-    local feature_pad = ceil(
-        (orig_w + orig_h) * 0.25
-        * (abs(safe_radial) + abs(safe_scale))
-    )
-    ex_x = max(ex_x, feature_pad)
-    ex_y = max(ex_y, feature_pad)
+        local rot_rad = abs(radial) * max_falloff
+        local radial_shift = 2.0 * max_dist * sin(min(rot_rad, 3.14159265) * 0.5)
 
-    if ex_x > 0 or ex_y > 0 then
-        obj.effect("領域拡張", "上", ex_y, "下", ex_y, "左", ex_x, "右", ex_x)
+        local scale_shift = 0.0
+        if scale_mode == 1 then
+            local s_delta = abs(scale) * max_falloff
+            scale_shift = max_dist * (math.exp(min(s_delta, 4.0)) - 1.0)
+        else
+            scale_shift = max_dist * (abs(scale) * max_falloff)
+        end
+        local extra_shift = ceil(radial_shift + scale_shift)
+
+        local ex_x = 0
+        local ex_y = 0
+        if effect_mode == 0 then
+            local shift_base = abs(amount) * max_falloff
+            ex_x = ceil(abs(cos_a) * shift_base) + extra_shift + 4
+            ex_y = ceil(abs(sin_a) * shift_base) + extra_shift + 4
+        elseif effect_mode == 1 then
+            local mode1_shift = max_dist * (abs(amount) * 0.001 * max_falloff)
+            local pad = ceil(mode1_shift) + extra_shift + 4
+            ex_x = pad
+            ex_y = pad
+        else
+            local rot_amount = abs(amount) * 0.001 * max_falloff
+            local mode2_shift = 2.0 * max_dist * sin(min(rot_amount, 3.14159265) * 0.5)
+            local pad = ceil(mode2_shift) + extra_shift + 4
+            ex_x = pad
+            ex_y = pad
+        end
+
+        local limit_x = 2000
+        local limit_y = 2000
+        local max_w, max_h = obj.getinfo("image_max")
+        if max_w and max_w > 0 and max_h and max_h > 0 then
+            limit_x = min(limit_x, max(0, floor((max_w - orig_w) * 0.5)))
+            limit_y = min(limit_y, max(0, floor((max_h - orig_h) * 0.5)))
+        end
+
+        ex_x = min(max(ex_x, 0), limit_x)
+        ex_y = min(max(ex_y, 0), limit_y)
+
+        if ex_x > 0 or ex_y > 0 then
+            obj.effect("領域拡張", "上", ex_y, "下", ex_y, "左", ex_x, "右", ex_x)
+        end
     end
 
     if obj.w <= 0 or obj.h <= 0 then
@@ -794,45 +863,45 @@ do
 
     local width = max(1, floor(obj.w))
     local height = max(1, floor(obj.h))
-    local center_px_x = width * 0.5 + safe_center_x
-    local center_px_y = height * 0.5 + safe_center_y
+    local center_px_x = width * 0.5 + center_x
+    local center_px_y = height * 0.5 + center_y
 
     obj.pixelshader(
         "omni_chromatic_aberration",
         "object",
         { "object" },
         {
-            safe_amount,
+            amount,
             cos_a,
             sin_a,
             q,
 
-            safe_effect_mode,
-            safe_color_order,
-            safe_hide_orig,
-            safe_mix_rate,
+            effect_mode,
+            c_order,
+            hide_orig_flag,
+            clamped_mix,
 
             center_px_x,
             center_px_y,
-            obj.alpha or 1.0,
-            safe_falloff,
+            0.0,
+            falloff,
 
             width,
             height,
             1.0 / width,
             1.0 / height,
 
-            safe_radius,
-            safe_radial,
-            safe_scale,
-            safe_scale_mode,
+            radius,
+            radial,
+            scale,
+            scale_mode,
 
-            safe_falloff_mode,
-            safe_color_space,
-            0.0,
-            0.0
+            falloff_mode,
+            c_space,
+            orig_w,
+            orig_h
         },
         "copy",
-        "clip"
+        "clamp"
     )
 end
