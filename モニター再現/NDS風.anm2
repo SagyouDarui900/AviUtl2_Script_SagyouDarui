@@ -3,6 +3,8 @@
 --select@model:モデル=0,初代DS (NTR)=0,DS Lite (USG)=1,DSi LL (UTL)=2
 --select@screen:画面=0,上画面=0,下画面(タッチ)=1
 --check@pixelate:実機解像度に合わせる,1
+--check@keep_aspect:ドット比率を正方形に保つ,1
+--hide@keep_aspect:pixelate==0
 --track@scale:ドットサイズ,1,50,4,0.1
 --hide@scale:pixelate==1
 --track@brightness:明るさ,0,200,100,1
@@ -10,6 +12,7 @@
 --check@use_subpixel:サブピクセル表示,1
 --select@subpixel_order:サブピクセル配列=0,機種自動(実機準拠)=0,RGB=1,BGR=2
 --hide@subpixel_order:use_subpixel==0
+--check@quantize:18bitカラー化,1
 
 --[[pixelshader@nds_lcd:
     cbuffer params : register(b0) {
@@ -21,7 +24,8 @@
         float use_subpixel;
         float brightness;
         float subpixel_order;
-        float2 pad;
+        float quantize;
+        float pad;
     };
 
     Texture2D tex : register(t0);
@@ -38,6 +42,10 @@
         float4 original = tex.Sample(samp, pixel_uv);
         if (original.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
         float3 rgb = original.rgb / original.a;
+
+        if (quantize > 0.5) {
+            rgb = round(rgb * 63.0) / 63.0;
+        }
 
         float luma = dot(rgb, float3(0.299, 0.587, 0.114));
         float hw_gap = gap_a;
@@ -63,8 +71,8 @@
         if (is_lower) {
             lcd_color *= float3(0.94, 0.95, 0.90);
             lcd_color = lerp(lcd_color, float3(0.5, 0.5, 0.5), 0.04);
-            float noise = frac(sin(dot(uv.xy, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
-            lcd_color += noise * 0.025;
+            float noise = frac(sin(dot(pixel_uv, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
+            lcd_color += noise * 0.015;
         }
 
         lcd_color = saturate(lcd_color * brightness);
@@ -123,11 +131,22 @@
 if obj.w <= 0 or obj.h <= 0 then return end
 
 local sp = (use_subpixel == 1) and 1.0 or 0.0
+local qz = (quantize == 1) and 1.0 or 0.0
 local gx, gy
 
 if pixelate == 1 then
-    gy = 192
-    gx = 256
+    local base_w, base_h = 256, 192
+    if keep_aspect == 1 then
+        if (obj.w / obj.h) > (base_w / base_h) then
+            gy = base_h
+            gx = math.max(1, math.floor(base_h * (obj.w / obj.h) + 0.5))
+        else
+            gx = base_w
+            gy = math.max(1, math.floor(base_w * (obj.h / obj.w) + 0.5))
+        end
+    else
+        gx, gy = base_w, base_h
+    end
 else
     local s = math.max(scale, 0.1)
     gx = math.max(1, math.floor(obj.w / s + 0.5))
@@ -143,5 +162,6 @@ obj.pixelshader("nds_lcd", "object", {"object"}, {
     sp,
     brightness / 100.0,
     subpixel_order,
-    0.0, 0.0
+    qz,
+    0.0
 }, "copy", "clamp")
