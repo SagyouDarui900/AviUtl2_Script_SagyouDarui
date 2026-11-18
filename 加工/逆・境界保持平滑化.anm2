@@ -1,91 +1,126 @@
 --label:加工
+--filter
 --track@edge_sens:エッジ感度,0.0,10.0,2.0,0.1
 --track@threshold:エッジ閾値,0.0,1.0,0.1,0.01
 --track@radius:ぼかし範囲,0.0,100.0,10.0,0.1
 
 --[[pixelshader@inverse_edge_blur_ps:
 cbuffer params : register(b0) {
-    float2 pixel_size;
+    float2 src_size;
+    float2 dst_size;
     float edge_sens;
     float threshold;
     float radius;
-    float3 padding;
+    float pad_px;
 };
 
 Texture2D tex : register(t0);
 SamplerState samp : register(s0);
 
-float get_intensity(float4 color) {
-    float luma = dot(color.rgb, float3(0.299, 0.587, 0.114));
-    return luma + color.a * 0.5;
-}
+static const float2 SOBEL_OFFSETS[9] = {
+    float2(-1.0, -1.0), float2(0.0, -1.0), float2(1.0, -1.0),
+    float2(-1.0,  0.0), float2(0.0,  0.0), float2(1.0,  0.0),
+    float2(-1.0,  1.0), float2(0.0,  1.0), float2(1.0,  1.0)
+};
 
-float calc_edge(float2 uv, float2 step_size) {
-    float2 off[9] = {
-        float2(-1, -1), float2(0, -1), float2(1, -1),
-        float2(-1,  0), float2(0,  0), float2(1,  0),
-        float2(-1,  1), float2(0,  1), float2(1,  1)
-    };
-    
-    float l[9];
+static const float2 POISSON_DISK[16] = {
+    float2(-0.1815,  0.1452), float2( 0.2143, -0.1187),
+    float2(-0.0942, -0.3418), float2( 0.3450,  0.2939),
+    float2(-0.4621, -0.0514), float2( 0.0528,  0.4812),
+    float2(-0.3828,  0.4768), float2( 0.5374, -0.4737),
+    float2( 0.6812,  0.0914), float2(-0.6543,  0.2891),
+    float2(-0.2650, -0.6889), float2( 0.2419, -0.7471),
+    float2( 0.7920,  0.4509), float2(-0.8154, -0.4291),
+    float2(-0.1438,  0.8810), float2( 0.4432, -0.8551)
+};
+
+float calc_edge(float2 src_uv, float2 step_size, float4 center_col) {
+    float4 c[9];
     [unroll]
     for (int i = 0; i < 9; i++) {
-        l[i] = get_intensity(tex.Sample(samp, uv + off[i] * step_size));
+        if (i == 4) {
+            c[i] = center_col;
+        } else {
+            c[i] = tex.SampleLevel(samp, src_uv + SOBEL_OFFSETS[i] * step_size, 0.0);
+        }
     }
-    
-    float gx = (l[2] + 2.0 * l[5] + l[8]) - (l[0] + 2.0 * l[3] + l[6]);
-    float gy = (l[0] + 2.0 * l[1] + l[2]) - (l[6] + 2.0 * l[7] + l[8]);
-    
-    return sqrt(gx * gx + gy * gy);
+
+    float4 gx = (c[2] + 2.0 * c[5] + c[8]) - (c[0] + 2.0 * c[3] + c[6]);
+    float4 gy = (c[0] + 2.0 * c[1] + c[2]) - (c[6] + 2.0 * c[7] + c[8]);
+
+    return sqrt(dot(gx, gx) + dot(gy, gy)) * 0.25;
+}
+
+float hash12(float2 p) {
+    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
 }
 
 float4 inverse_edge_blur_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float4 center_color = tex.Sample(samp, uv);
-    if (center_color.a <= 0.0) {
-        return float4(0.0, 0.0, 0.0, 0.0);
-    }
+    float2 step_size = 1.0 / src_size;
+    float2 src_uv = (uv * dst_size - pad_px) * step_size;
 
-    float raw_edge = calc_edge(uv, pixel_size) * edge_sens;
-    float edge_mask = smoothstep(threshold, threshold + 0.2, raw_edge);
+    float4 center_color = tex.SampleLevel(samp, src_uv, 0.0);
+    float raw_edge = calc_edge(src_uv, step_size, center_color) * edge_sens;
+    float edge_mask = smoothstep(threshold, threshold + 0.15, raw_edge);
 
     if (edge_mask <= 0.0) {
         return center_color;
     }
 
-    float2 poisson[16] = {
-        float2(-0.94201624, -0.39906216), float2(0.94558609, -0.76890725), float2(-0.094184101, -0.92938870), float2(0.34495938, 0.29387760),
-        float2(-0.91588581, 0.45771432), float2(-0.81544232, -0.87912464), float2(-0.38277543, 0.27676845), float2(0.97484398, 0.75648379),
-        float2(0.44323325, -0.97511554), float2(0.53742981, -0.47373420), float2(-0.26496911, -0.41893023), float2(0.79197514, 0.19090188),
-        float2(-0.24188840, 0.99706507), float2(-0.81409955, 0.91437590), float2(0.19984126, 0.78641367), float2(0.14383161, -0.14100790)
-    };
+    float angle = hash12(pos.xy) * 6.2831853;
+    float s = sin(angle);
+    float c = cos(angle);
+    float2x2 rot = float2x2(c, -s, s, c);
 
     float4 blur_color = center_color;
-    float count = 1.0;
-    
+    float2 blur_scale = step_size * radius;
+
     [unroll]
     for (int j = 0; j < 16; j++) {
-        blur_color += tex.Sample(samp, uv + poisson[j] * pixel_size * radius);
-        count += 1.0;
+        float2 offset = mul(rot, POISSON_DISK[j]) * blur_scale;
+        blur_color += tex.SampleLevel(samp, src_uv + offset, 0.0);
     }
-    blur_color /= count;
+    blur_color *= (1.0 / 17.0);
 
     return lerp(center_color, blur_color, edge_mask);
 }
 ]]
 
-if edge_sens <= 0.0 or radius <= 0.0 then
+if edge_sens <= 0.0 or radius <= 0.0 or obj.w <= 0 or obj.h <= 0 then
     return
 end
 
-local ps_w = 1.0 / obj.w
-local ps_h = 1.0 / obj.h
+local orig_w = obj.w
+local orig_h = obj.h
+local is_filter = obj.getinfo("filter")
 
-local cb = {
-    ps_w, ps_h,
+local pad_px = 0
+if not is_filter then
+    local max_w, max_h = obj.getinfo("image_max")
+    local max_pad_w = math.max(0, math.floor((max_w - orig_w) * 0.5))
+    local max_pad_h = math.max(0, math.floor((max_h - orig_h) * 0.5))
+    pad_px = math.min(math.ceil(radius), max_pad_w, max_pad_h)
+end
+
+local dst_w = orig_w + pad_px * 2
+local dst_h = orig_h + pad_px * 2
+
+local constants = {
+    orig_w, orig_h,
+    dst_w, dst_h,
     edge_sens,
     threshold,
     radius,
-    0.0, 0.0, 0.0
+    pad_px
 }
 
-obj.pixelshader("inverse_edge_blur_ps", "object", {"object"}, cb, "copy", "clamp")
+if pad_px > 0 then
+    local cache_name = "cache:inv_edge_blur_" .. tostring(obj.id) .. "_" .. tostring(obj.effect_id)
+    obj.copybuffer(cache_name, "object")
+    obj.clearbuffer("object", dst_w, dst_h)
+    obj.pixelshader("inverse_edge_blur_ps", "object", { cache_name }, constants, "copy", "clip")
+else
+    obj.pixelshader("inverse_edge_blur_ps", "object", { "object" }, constants, "copy", "clip")
+end
