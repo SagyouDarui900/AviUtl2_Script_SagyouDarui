@@ -1,0 +1,57 @@
+--label:色調整
+--information:ビット演算や剰余演算により色情報をグリッチ・破壊します。
+--filter
+
+--track@level1:乗算係数,1,255,1,1
+--track@level2:剰余・XOR値,0,255,0,1
+--select@mode:破壊モード=0,モジュロ(剰余)=0,XORビット演算=1
+
+if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+--[[pixelshader@color_destroy_ps:
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+
+    cbuffer params : register(b0) {
+        float level1;
+        float level2;
+        float mode;
+        float padding;
+    };
+
+    float4 color_destroy_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float4 col = tex.Sample(samp, uv);
+        if (col.a <= 0.0) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
+
+        float safe_a = max(col.a, 0.00001);
+        float3 straight_rgb = col.rgb / safe_a;
+        float3 c = straight_rgb * 255.0;
+
+        float l1 = round(level1);
+        float l2 = round(level2);
+
+        // モジュロ(剰余)演算
+        float safe_l2 = max(l2, 1.0);
+        float denom = max(safe_l2 - 1.0, 1.0);
+        float3 mod_c = (fmod(floor(c * l1), safe_l2) / denom) * 255.0;
+        // l2 == 0 のときは巨大な中間値発生を防ぐためスケール後にクランプ
+        float3 c_mod = (l2 > 0.5) ? mod_c : saturate((c * l1) / 255.0) * 255.0;
+
+        // XORビット演算
+        uint3 c_u = (uint3)round(c);
+        uint3 xor_c = ((c_u * (uint)l1) ^ (uint)l2) & 255u;
+        float3 c_xor = (float3)xor_c;
+
+        int m = (int)round(mode);
+        float3 result_c = (m == 0) ? c_mod : c_xor;
+        float3 out_rgb = saturate(result_c / 255.0) * col.a;
+
+        return float4(out_rgb, col.a);
+    }
+]]
+
+obj.pixelshader("color_destroy_ps", "object", { "object" }, { level1, level2, mode, 0.0 }, "copy", "clamp")
