@@ -1,5 +1,5 @@
 --label:変形
---information:指定解像度リサイズ v2.0
+--information:指定解像度リサイズ
 
 --group:解像度設定,true
 --select@reso:解像度=0,画面サイズに合わせる=0,1920x1080 (FHD 16:9)=1,1440x1080 (HD 4:3)=2,1280x720 (HD 16:9)=3,640x360 (16:9)=4,640x480 (SD 4:3)=5,720x720 (Square 1:1)=6,480x480 (Square 1:1)=7,360x360 (Square 1:1)=8,1080x1920 (FHD 9:16)=9,720x1280 (HD 9:16)=10,カスタム=11
@@ -42,8 +42,8 @@ local resolutions = {
 local dst_w, dst_h
 
 if reso == 0 then
-    dst_w = obj.screen_w
-    dst_h = obj.screen_h
+    dst_w = obj.screen_w or obj.w
+    dst_h = obj.screen_h or obj.h
 elseif resolutions[reso] then
     local target = resolutions[reso]
     dst_w = target[1]
@@ -81,11 +81,11 @@ if math.abs(final_scale_x - 1.0) < 1e-6 and math.abs(final_scale_y - 1.0) < 1e-6
     return
 end
 
-if pixel_art then
-    local max_w, max_h = obj.getinfo("image_max")
-    max_w = max_w or 8192
-    max_h = max_h or 8192
+local max_w, max_h = obj.getinfo("image_max")
+max_w = max_w or 8192
+max_h = max_h or 8192
 
+if pixel_art then
     local target_tex_w = obj.w * final_scale_x
     local target_tex_h = obj.h * final_scale_y
 
@@ -94,10 +94,21 @@ if pixel_art then
 
     obj.effect("リサイズ", "X", new_w, "Y", new_h, "補間なし", 1, "ピクセル数でサイズ指定", 1)
 
-    -- 上限クランプや整数丸めによる誤差を相対スケールで補完
-    obj.sx = obj.sx * (target_tex_w / new_w)
-    obj.sy = obj.sy * (target_tex_h / new_h)
+    -- リサイズ成功時は上限クランプや整数丸めによる誤差を補完し、非適用時は通常拡大率へフォールバック
+    if obj.w > 0 and obj.h > 0 then
+        obj.sx = obj.sx * (target_tex_w / obj.w)
+        obj.sy = obj.sy * (target_tex_h / obj.h)
+    end
 else
+    if mode == 1 or mode == 2 then
+        local limit_ratio = math_min(1.0, max_w / (cur_w * final_scale_x), max_h / (cur_h * final_scale_y))
+        final_scale_x = final_scale_x * limit_ratio
+        final_scale_y = final_scale_y * limit_ratio
+    else
+        final_scale_x = math_min(final_scale_x, max_w / cur_w)
+        final_scale_y = math_min(final_scale_y, max_h / cur_h)
+    end
+
     obj.sx = obj.sx * final_scale_x
     obj.sy = obj.sy * final_scale_y
 end

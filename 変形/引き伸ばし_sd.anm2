@@ -1,5 +1,5 @@
 --label:変形
---information:引き伸ばし
+--information:引き伸ばし v1.1
 --filter
 
 --group:伸長設定,true
@@ -103,15 +103,19 @@ float4 stretch_ps(float4 vpos : SV_Position, float2 uv : TEXCOORD0) : SV_Target 
     float u = (src_x + obj_w * 0.5) / obj_w;
     float v = (src_y + obj_h * 0.5) / obj_h;
 
+    // 範囲外は透明を返す（"clamp"サンプラーと組み合わせて境界の透明黒混色を防止）
     if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
+    // 全体の不透明度(obj.alpha)はスクリプト終了後のホスト描画パイプラインで自動適用されるため、
+    // ここではPremultiplied Alphaを維持したまま引き伸ばし帯の半透明倍率のみを乗算する
     float4 col = tex.Sample(samp, float2(u, v));
     return col * alpha_mult;
 }
 ]]
 
+-- 個別オブジェクト有効時に全要素でアンカーが重複生成されるのを防ぐため先頭要素のみに配置
 if obj.index == 0 then
     obj.setanchor("center_x,center_y", 0, "line")
 end
@@ -135,58 +139,82 @@ local sin_a = math.sin(rad_val)
 local cx = center_x
 local cy = center_y
 local stretch_half = width * 0.5
-
--- 4隅のAABB算出処理
-local min_x = 10000000.0
-local max_x = -10000000.0
-local min_y = 10000000.0
-local max_y = -10000000.0
-
-local function expand_bounds(x, y)
-    local lx = x - cx
-    local ly = y - cy
-    local rx = lx * cos_a + ly * sin_a
-    local ry = -lx * sin_a + ly * cos_a
-    if mode == 0 then
-        if rx > stretch_half then
-            rx = rx + ext
-        elseif rx < -stretch_half then
-            rx = rx - ext
-        end
-    elseif mode == 1 then
-        if rx > width then
-            rx = rx + ext
-        end
-    elseif mode == 2 then
-        if rx < -width then
-            rx = rx - ext
-        end
-    end
-    local nx = rx * cos_a - ry * sin_a + cx
-    local ny = rx * sin_a + ry * cos_a + cy
-    if nx < min_x then min_x = nx end
-    if nx > max_x then max_x = nx end
-    if ny < min_y then min_y = ny end
-    if ny > max_y then max_y = ny end
-end
-
 local w2 = obj_w * 0.5
 local h2 = obj_h * 0.5
-expand_bounds(-w2, -h2)
-expand_bounds( w2, -h2)
-expand_bounds( w2,  h2)
-expand_bounds(-w2,  h2)
+
+-- 指定した伸長量に対する4隅のAABBおよび偶数化済み必要バッファサイズを算出
+local function calc_aabb(test_ext)
+    local b_min_x = 1e9
+    local b_max_x = -1e9
+    local b_min_y = 1e9
+    local b_max_y = -1e9
+
+    local function expand(x, y)
+        local lx = x - cx
+        local ly = y - cy
+        local rx = lx * cos_a + ly * sin_a
+        local ry = -lx * sin_a + ly * cos_a
+        if mode == 0 then
+            if rx > stretch_half then
+                rx = rx + test_ext
+            elseif rx < -stretch_half then
+                rx = rx - test_ext
+            end
+        elseif mode == 1 then
+            if rx > width then
+                rx = rx + test_ext
+            end
+        elseif mode == 2 then
+            if rx < -width then
+                rx = rx - test_ext
+            end
+        end
+        local nx = rx * cos_a - ry * sin_a + cx
+        local ny = rx * sin_a + ry * cos_a + cy
+        if nx < b_min_x then b_min_x = nx end
+        if nx > b_max_x then b_max_x = nx end
+        if ny < b_min_y then b_min_y = ny end
+        if ny > b_max_y then b_max_y = ny end
+    end
+
+    expand(-w2, -h2)
+    expand( w2, -h2)
+    expand( w2,  h2)
+    expand(-w2,  h2)
+
+    local req_w = math.max(1, math.ceil(b_max_x - b_min_x) + 4)
+    local req_h = math.max(1, math.ceil(b_max_y - b_min_y) + 4)
+    if req_w % 2 ~= 0 then req_w = req_w + 1 end
+    if req_h % 2 ~= 0 then req_h = req_h + 1 end
+
+    return b_min_x, b_max_x, b_min_y, b_max_y, req_w, req_h
+end
 
 local max_w, max_h = obj.getinfo("image_max")
 max_w = max_w or 8192
 max_h = max_h or 8192
 
-local new_w = math.max(1, math.ceil(max_x - min_x) + 4)
-local new_h = math.max(1, math.ceil(max_y - min_y) + 4)
-if new_w % 2 ~= 0 then new_w = new_w + 1 end
-if new_h % 2 ~= 0 then new_h = new_h + 1 end
-new_w = math.min(new_w, max_w)
-new_h = math.min(new_h, max_h)
+local min_x, max_x, min_y, max_y, req_w, req_h = calc_aabb(ext)
+
+-- 必要バッファサイズが最大テクスチャ上限を超える場合は、収まる最大伸長量へ自動制限して欠けを防止
+if req_w > max_w or req_h > max_h then
+    local low = 0.0
+    local high = ext
+    for _ = 1, 20 do
+        local mid = (low + high) * 0.5
+        local _, _, _, _, tw, th = calc_aabb(mid)
+        if tw <= max_w and th <= max_h then
+            low = mid
+        else
+            high = mid
+        end
+    end
+    ext = low
+    min_x, max_x, min_y, max_y, req_w, req_h = calc_aabb(ext)
+end
+
+local new_w = math.min(req_w, max_w)
+local new_h = math.min(req_h, max_h)
 
 local center_nx = (max_x + min_x) * 0.5
 local center_ny = (max_y + min_y) * 0.5
@@ -206,7 +234,7 @@ obj.pixelshader(
         center_nx, center_ny, blur_adjust, 0.0
     },
     "copy",
-    "clip"
+    "clamp"
 )
 
 obj.ox = obj.ox + center_nx

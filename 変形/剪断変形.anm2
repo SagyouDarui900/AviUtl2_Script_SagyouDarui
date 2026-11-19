@@ -1,5 +1,5 @@
 --label:変形
---information:剪断変形
+--information:剪断変形 v1.1
 
 --group:変形パラメータ
 --track@shear_x:横傾斜(度),-89.0,89.0,10.0,0.1
@@ -33,6 +33,8 @@ float4 shear_simple_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Tar
     float2 edge = smoothstep(-0.5 * fw, 0.5 * fw, src_uv) * smoothstep(-0.5 * fw, 0.5 * fw, 1.0 - src_uv);
     float aa = edge.x * edge.y;
 
+    // 全体の不透明度(obj.alpha)はスクリプト終了後のホスト描画パイプラインで自動適用されるため、
+    // ここではPremultiplied Alphaを維持したまま境界AAのみを乗算する
     float4 col = tex.Sample(samp, src_uv);
     return col * aa;
 }
@@ -44,8 +46,8 @@ if w <= 0 or h <= 0 then
     return
 end
 
--- 個別オブジェクト時の文字間隔補正
-if space_x ~= 0 or space_y ~= 0 then
+-- 個別オブジェクト有効時の文字間隔補正
+if (space_x ~= 0 or space_y ~= 0) and (obj.getoption("multi_object") or obj.num > 1) then
     local count = math.max(1, obj.num)
     local pivot_idx = (count - 1) * (space_align * 0.01)
     local char_offset_idx = obj.index - pivot_idx
@@ -80,7 +82,7 @@ local m22 = sin_r * tan_sx + cos_r
 -- 行列式 det(M)
 local det = m11 * m22 - m12 * m21
 
--- 特異行列ガード: 面が潰れる状態では透明にして描画をスキップ
+-- 特異行列ガード: 面が潰れる状態ではobj.alphaを0にして描画をスキップ
 if math.abs(det) < 0.0001 then
     obj.alpha = 0
     return
@@ -101,8 +103,19 @@ local max_abs_y = math.abs(m21) * hw + math.abs(m22) * hh
 
 -- システムの最大画像サイズ上限を考慮して出力バッファサイズを決定（中心対称維持のため偶数化）
 local max_tex_w, max_tex_h = obj.getinfo("image_max")
-local new_w = math.min(math.max(w, math.ceil(max_abs_x) * 2), max_tex_w)
-local new_h = math.min(math.max(h, math.ceil(max_abs_y) * 2), max_tex_h)
+max_tex_w = max_tex_w or 8192
+max_tex_h = max_tex_h or 8192
+
+local new_w = math.max(w, math.ceil(max_abs_x) * 2)
+local new_h = math.max(h, math.ceil(max_abs_y) * 2)
+if new_w % 2 ~= 0 then
+    new_w = new_w + 1
+end
+if new_h % 2 ~= 0 then
+    new_h = new_h + 1
+end
+new_w = math.min(new_w, max_tex_w)
+new_h = math.min(new_h, max_tex_h)
 
 -- 元画像を固有キャッシュに退避し、出力バッファをリサイズ
 local cache_name = string.format("cache:shear_%d_%d", obj.id, obj.effect_id)

@@ -1,5 +1,5 @@
 --label:変形
---information:円反転フラクタル変形
+--information:円反転フラクタル変形 v1.1 (AviUtl2 GPU Shader)
 --filter
 
 --group:基本幾何設定
@@ -9,20 +9,20 @@
 --track@pos_x:中心X,-20.0,20.0,0.0,0.01
 --track@pos_y:中心Y,-20.0,20.0,0.0,0.01
 --trackgroup@pos_x,pos_y:中心座標
---group:
+--group
 
 --group:反転・IFSパラメータ
 --track@radius:反転半径,0.1,5.0,1.0,0.01
 --track@scale_factor:スケール倍率,1.0,5.0,1.5,0.01
 --track@iteration:反復回数,1.0,30.0,8.0,0.01
---track@rot_spd:回転速度,-10.0,10.0,0.0,0.01
---group:
+--track@rot_spd:回転速度(rad/秒),-10.0,10.0,0.0,0.01
+--group
 
 --group:描画・カラー設定
 --select@render_mode:描画モード=0,変形のみ=0,模様を合成=1
 --color@fractal_col:模様色,0xff00ff
 --hide@fractal_col:render_mode==0
---group:
+--group
 
 obj.setanchor("pos_x,pos_y", 0, "line")
 
@@ -35,37 +35,42 @@ cbuffer Params : register(b0) {
     float4 param_geom;   // x: zoom, y: pos_x, z: pos_y, w: power
     float4 param_ifs;    // x: radius_sq, y: scale_fac, z: mode, w: iteration
     float4 param_render; // x: render_mode, y: rot_angle, zw: resolution
-    float4 param_color;  // rgb: blend_col * alpha, a: obj_alpha
+    float4 param_color;  // rgb: blend_col (sRGB), a: obj_alpha
 };
 
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
+static const int MAX_ITER = 30;            // トラックバー「反復回数」の上限値と一致
+static const float INIT_MIN_DIST = 1e4;    // 最小距離トラッキング用の十分大きな初期値
+
 float4 ps_inversion_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float2 res = param_render.zw;
+    float aspect = res.x / max(res.y, 1.0);
     float zoom_val = max(param_geom.x, 0.0001);
 
     // アスペクト比補正と中心座標オフセット
     float2 p = (uv - 0.5) * 2.0;
-    p.x *= res.x / res.y;
+    p.x *= aspect;
     p = (p / zoom_val) + param_geom.yz;
 
     float rad_sq = param_ifs.x;
     float scale = param_ifs.y;
-    int mode = (int)param_ifs.z;
+    int mode = (int)round(param_ifs.z);
     float iter_f = param_ifs.w;
-    int max_i = ceil(iter_f);
+    int max_i = (int)ceil(iter_f);
 
     float rot = param_render.y;
     float2x2 rot_mat = float2x2(cos(rot), -sin(rot), sin(rot), cos(rot));
 
     float2 orig_p = p;
-    float min_d = 1000.0;
+    float min_d = INIT_MIN_DIST;
     float n = 0.0;
 
     [loop]
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < MAX_ITER; i++) {
         if (i >= max_i) break;
+        if (dot(p, p) > 1e10) break;
 
         float2 next_p = p;
 
@@ -95,8 +100,6 @@ float4 ps_inversion_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : S
             next_p = mul(rot_mat, next_p) * scale;
         }
 
-        min_d = min(min_d, length(next_p));
-
         // 最後の反復ステップ（小数端数）の補間
         if (i == max_i - 1 && frac(iter_f) > 0.001) {
             float t = frac(iter_f);
@@ -106,15 +109,19 @@ float4 ps_inversion_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : S
             p = next_p;
             n += 1.0;
         }
+
+        min_d = min(min_d, length(p));
     }
 
-    // 差分ベクトルによるUV座標の歪曲
+    // 差分ベクトルをUV空間のアスペクト比へ戻してから歪曲を適用
     float2 distort = (p - orig_p) * (param_geom.w * 0.01);
+    distort.x /= aspect;
+    distort = clamp(distort, -4.0, 4.0);
     float2 new_uv = uv + distort;
 
     float4 col = srcTex.Sample(srcSmp, new_uv);
 
-    // 幾何学境界パターンの合成
+    // 幾何学境界パターンの合成（入力テクスチャと同じsRGB空間でブレンド）
     if (param_render.x > 0.5 && col.a > 0.0) {
         float pattern = saturate(min_d);
         float alpha = saturate(n / 10.0);
@@ -128,15 +135,16 @@ float4 ps_inversion_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : S
 ]]
 
 do
-    local rot_angle = (rot_spd ~= 0.0) and (obj.time * rot_spd) or 0.0
+    local fmod = math.fmod
+    local two_pi = 2.0 * math.pi
+
+    local rot_angle = (rot_spd ~= 0.0) and fmod(obj.time * rot_spd, two_pi) or 0.0
     local rad_val = radius * radius
 
     local r_val, g_val, b_val = RGB(fractal_col)
-    local obj_alpha = obj.alpha
-
-    local fr = (r_val / 255.0) * obj_alpha
-    local fg = (g_val / 255.0) * obj_alpha
-    local fb = (b_val / 255.0) * obj_alpha
+    local fr = r_val / 255.0
+    local fg = g_val / 255.0
+    local fb = b_val / 255.0
 
     obj.pixelshader(
         "ps_inversion_distort",
@@ -146,7 +154,7 @@ do
             zoom, pos_x, pos_y, power,
             rad_val, scale_factor, fractal_mode, iteration,
             (render_mode == 1) and 1.0 or 0.0, rot_angle, obj.w, obj.h,
-            fr, fg, fb, obj_alpha
+            fr, fg, fb, obj.alpha
         },
         "copy",
         "mirror"

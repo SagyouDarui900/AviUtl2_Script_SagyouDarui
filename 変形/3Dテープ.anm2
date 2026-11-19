@@ -1,4 +1,5 @@
 --label:変形
+--information:3Dテープ変形（obj.drawpoly描画のため後続のフィルタ効果は適用されません）
 --select@shape_mode:形状パターン=0,横ベルト（円筒）=0,横円盤（土星の輪・チャクラム）=1,縦ベルト（セロハンテープ巻き）=2,縦円盤（正面リング）=3
 --track@radius:半径,10,2000,250,0.1
 --track@width_scale:テープ幅(%),1,500,100,0.1
@@ -92,7 +93,7 @@ local cam_mode = obj.getoption("camera_mode")
 local cam = nil
 local cam_fwd_x, cam_fwd_y, cam_fwd_z = 0.0, 0.0, 1.0
 local has_cam_dir = false
-if cam_mode ~= 0 then
+if cam_mode ~= nil and cam_mode ~= 0 then
     cam = obj.getoption("camera_param")
     if cam ~= nil then
         local fx = cam.tx - cam.x
@@ -297,19 +298,38 @@ elseif need_back then
     local back_pass_alpha = obj.alpha * (back_alpha / 100.0)
     obj.setoption("culling", 1)
 
-    local batch = {}
-    local cur_is_back = nil
-    for i = 1, #items do
-        local it = items[i]
-        if cur_is_back ~= nil and it.is_back ~= cur_is_back then
-            obj.drawpoly(batch, cur_is_back and back_pass_alpha or front_alpha)
-            batch = {}
+    if z_sort then
+        local batch = {}
+        local cur_is_back = nil
+        for i = 1, #items do
+            local it = items[i]
+            if cur_is_back ~= nil and it.is_back ~= cur_is_back then
+                obj.drawpoly(batch, cur_is_back and back_pass_alpha or front_alpha)
+                batch = {}
+            end
+            cur_is_back = it.is_back
+            batch[#batch + 1] = it.quad
         end
-        cur_is_back = it.is_back
-        batch[#batch + 1] = it.quad
-    end
-    if #batch > 0 then
-        obj.drawpoly(batch, cur_is_back and back_pass_alpha or front_alpha)
+        if #batch > 0 then
+            obj.drawpoly(batch, cur_is_back and back_pass_alpha or front_alpha)
+        end
+    else
+        local back_quads = {}
+        local front_quads = {}
+        for i = 1, #items do
+            local it = items[i]
+            if it.is_back then
+                back_quads[#back_quads + 1] = it.quad
+            else
+                front_quads[#front_quads + 1] = it.quad
+            end
+        end
+        if #back_quads > 0 then
+            obj.drawpoly(back_quads, back_pass_alpha)
+        end
+        if #front_quads > 0 then
+            obj.drawpoly(front_quads, front_alpha)
+        end
     end
 else
     local quads = {}

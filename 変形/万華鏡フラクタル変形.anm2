@@ -1,5 +1,5 @@
 --label:変形
---information:万華鏡フラクタル変形
+--information:万華鏡フラクタル変形 v1.1 (KIFS GPU Shader)
 --filter
 
 --group:基本幾何設定
@@ -9,21 +9,21 @@
 --track@pos_x:中心X,-20.0,20.0,0.0,0.01
 --track@pos_y:中心Y,-20.0,20.0,0.0,0.01
 --trackgroup@pos_x,pos_y:中心座標
---group:
+--group
 
 --group:フラクタル・折り畳み設定
 --track@iteration:反復回数,1.0,20.0,5.0,0.01
 --track@scale_factor:スケール倍率,1.0,5.0,2.0,0.01
 --track@offset_val:オフセット,0.0,5.0,1.0,0.01
 --track@fold_rot:折り畳み回転,-360.0,360.0,0.0,0.1
---track@rot_spd:回転速度,-10.0,10.0,0.0,0.01
---group:
+--track@rot_spd:回転速度(rad/秒),-10.0,10.0,0.0,0.01
+--group
 
 --group:描画・カラー設定
 --select@render_mode:描画モード=0,変形のみ=0,模様を合成=1
 --color@fractal_col:模様色,0xffffff
 --hide@fractal_col:render_mode==0
---group:
+--group
 
 obj.setanchor("pos_x,pos_y", 0, "line")
 
@@ -36,7 +36,7 @@ cbuffer Params : register(b0) {
     float4 param_geom;   // x: zoom, y: pos_x, z: pos_y, w: power
     float4 param_kifs;   // x: sym_type, y: scale_factor, z: offset_val, w: iteration
     float4 param_render; // x: render_mode, y: rot_angle, zw: resolution
-    float4 param_color;  // rgb: blend_col * alpha, a: obj_alpha
+    float4 param_color;  // rgb: blend_col, a: obj_alpha
 };
 
 Texture2D srcTex : register(t0);
@@ -59,11 +59,11 @@ float4 ps_kifs_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Tar
 
     float2 orig_p = p;
 
-    int sym = (int)param_kifs.x;
+    int sym = (int)round(param_kifs.x);
     float scale = param_kifs.y;
     float offset = param_kifs.z;
     float iter_f = param_kifs.w;
-    int max_i = ceil(iter_f);
+    int max_i = (int)ceil(iter_f);
 
     float rot = param_render.y;
     float2x2 rot_mat = float2x2(cos(rot), -sin(rot), sin(rot), cos(rot));
@@ -80,34 +80,33 @@ float4 ps_kifs_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Tar
     [loop]
     for (int i = 0; i < 20; i++) {
         if (i >= max_i) break;
+        if (dot(p, p) > 1e10) break;
 
         float2 next_p = p;
 
         if (sym == 0) {
-            // ヘキサフレーク (6回対称フォールディング)
+            // ヘキサフレーク (6回対称フォールディング: 頂点方向 X軸へオフセット)
             next_p = abs(next_p);
             next_p = fold(next_p, n_hex1);
             next_p = fold(next_p, float2(n_hex1.y, -n_hex1.x));
             next_p = mul(rot_mat, next_p) * scale - float2(offset, 0.0);
         } else if (sym == 1) {
-            // コッホ雪片 (3回対称フォールディング)
+            // コッホ雪片 (3回対称フォールディング: 辺の法線方向 X軸へオフセット)
             next_p.x = abs(next_p.x);
             next_p = fold(next_p, n_tri1);
             next_p = mul(rot_mat, next_p) * scale - float2(offset, 0.0);
         } else if (sym == 2) {
-            // ペンタフレーク (5回対称フォールディング)
+            // ペンタフレーク (5回対称フォールディング: 対称軸 Y軸へオフセット)
             next_p.x = abs(next_p.x);
             next_p = fold(next_p, n_pent1);
             next_p = fold(next_p, n_pent2);
             next_p = mul(rot_mat, next_p) * scale - float2(0.0, offset);
         } else {
-            // 四角格子 / カーペット (4回対称直交フォールディング)
+            // 四角格子 / カーペット (4回対称直交フォールディング: 対角方向 XY両軸へオフセット)
             next_p = abs(next_p);
             if (next_p.x < next_p.y) next_p = next_p.yx;
             next_p = mul(rot_mat, next_p) * scale - float2(offset, offset);
         }
-
-        min_dist = min(min_dist, length(next_p));
 
         // 最後の反復ステップ（小数端数）の線形補間
         if (i == max_i - 1 && frac(iter_f) > 0.001) {
@@ -118,10 +117,12 @@ float4 ps_kifs_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Tar
             p = next_p;
             n_accum += 1.0;
         }
+
+        min_dist = min(min_dist, length(p));
     }
 
-    // 空間折り畳み差分ベクトルによるUV座標の歪曲
-    float2 distort = (p - orig_p) * (param_geom.w * 0.01);
+    // 空間折り畳み差分ベクトルによるUV座標の歪曲（高倍率時の極端な発散をクランプ）
+    float2 distort = clamp((p - orig_p) * (param_geom.w * 0.01), -4.0, 4.0);
     float2 new_uv = uv + distort;
 
     float4 col = srcTex.Sample(srcSmp, new_uv);
@@ -141,15 +142,17 @@ float4 ps_kifs_distort(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Tar
 
 do
     local rad = math.rad
+    local fmod = math.fmod
+    local two_pi = 2.0 * math.pi
+
     local rot_base = rad(fold_rot)
-    local total_rot = rot_base + ((rot_spd ~= 0.0) and (obj.time * rot_spd) or 0.0)
+    local rot_anim = (rot_spd ~= 0.0) and fmod(obj.time * rot_spd, two_pi) or 0.0
+    local total_rot = fmod(rot_base + rot_anim, two_pi)
 
     local r_val, g_val, b_val = RGB(fractal_col)
-    local obj_alpha = obj.alpha
-
-    local fr = (r_val / 255.0) * obj_alpha
-    local fg = (g_val / 255.0) * obj_alpha
-    local fb = (b_val / 255.0) * obj_alpha
+    local fr = r_val / 255.0
+    local fg = g_val / 255.0
+    local fb = b_val / 255.0
 
     obj.pixelshader(
         "ps_kifs_distort",
@@ -159,7 +162,7 @@ do
             zoom, pos_x, pos_y, power,
             sym_type, scale_factor, offset_val, iteration,
             (render_mode == 1) and 1.0 or 0.0, total_rot, obj.w, obj.h,
-            fr, fg, fb, obj_alpha
+            fr, fg, fb, obj.alpha
         },
         "copy",
         "mirror"
