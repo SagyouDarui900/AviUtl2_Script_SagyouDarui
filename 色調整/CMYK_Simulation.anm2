@@ -1,12 +1,17 @@
 --label:色調整
 --filter
---information:CMYKシミュレーション (プロセスカラー近似変換)
+--information:CMYKシミュレーション v1.1 (プロセスカラー近似変換)
 
 --group:パラメータ
 --track@ratio:強度,0,100,100,0.1
 --select@mode:表示=0,CMYK合成=0,C(シアン)版=1,M(マゼンタ)版=2,Y(イエロー)版=3,K(キー)版=4
 --check@pure:純色表示(版確認用),false
---group:
+--hide@pure:mode==0
+--group
+
+if obj.w <= 0 or obj.h <= 0 or ratio <= 0 then
+    return
+end
 
 --[[pixelshader@PS_CMYK:
     Texture2D tex0 : register(t0);
@@ -21,24 +26,24 @@
 
     float4 PS_CMYK(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
         float4 c = tex0.Sample(smp, uv);
-        
+
         // 極小アルファの早期リターン（半透明境界での除算ノイズ防止）
         if (c.a <= 0.005) return c;
 
         // プリマルチプライド解除によるストレートRGB復元
         float3 rgb = saturate(c.rgb / c.a);
 
-        // RGB -> 簡易CMYK変換 (デバイス非依存カラーモデル)
+        // RGB -> 簡易CMYK変換（デバイス依存の素朴な近似）
         float k = 1.0 - max(rgb.r, max(rgb.g, rgb.b));
         float div = max(1.0 - k, 0.0001);
-        
+
         float cy = saturate((1.0 - rgb.r - k) / div);
         float mg = saturate((1.0 - rgb.g - k) / div);
         float yl = saturate((1.0 - rgb.b - k) / div);
 
         float4 result = float4(0.0, 0.0, 0.0, c.a);
         int m = (int)round(mode);
-        
+
         if (m == 0) {
             // CMYK -> RGB 再合成
             float r = (1.0 - cy) * (1.0 - k);
@@ -58,11 +63,12 @@
             else if (m == 2) val = mg;
             else if (m == 3) val = yl;
             else if (m == 4) val = k;
-            
+
             result.rgb = float3(val, val, val);
         }
 
         // ストレートRGBからプリマルチプライドアルファへ再変換
+        // 全体の不透明度(obj.alpha)はスクリプト終了後のホスト描画パイプラインで自動適用される
         result.rgb *= result.a;
 
         // 元画像と変換後画像のプリマルチプライド線形合成

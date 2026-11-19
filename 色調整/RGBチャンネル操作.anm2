@@ -1,10 +1,10 @@
 --label:色調整
---information:RGBチャンネル操作
+--information:RGBチャンネル操作 v1.1
 --filter
 
 --group:基本設定,true
 --select@swap_mode:RGB順序=0,R G B=0,R B G=1,G R B=2,G B R=3,B R G=4,B G R=5
---select@gray_mode:グレスケ表示=0,なし(カラー)=0,輝度(Rec.601)=1,赤(Red)=2,緑(Green)=3,青(Blue)=4,アルファ(Alpha)=5,彩度(Saturation)=6,明度(Value)=7
+--select@gray_mode:グレースケール表示=0,なし(カラー)=0,輝度(Rec.709)=1,赤(Red)=2,緑(Green)=3,青(Blue)=4,アルファ(Alpha)=5,彩度(Saturation)=6,明度(Value)=7
 --check@invert:反転,0
 --group
 
@@ -73,11 +73,12 @@ float4 ps_rgb_channel_tool(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
     rgb = saturate(rgb + param1.xyz);
 
     // 3. グレースケール抽出またはカラー出力
+    // アルファ表示モードでもレベル確認のため全体オフセットと反転を適用し、出力透明度は元のアルファを維持する
     float3 out_rgb;
     if (gray_mode > 0) {
         float gray_val = 0.0;
         if (gray_mode == 1) {
-            gray_val = dot(rgb, float3(0.299, 0.587, 0.114));
+            gray_val = dot(rgb, float3(0.2126, 0.7152, 0.0722));
         } else if (gray_mode == 2) {
             gray_val = rgb.r;
         } else if (gray_mode == 3) {
@@ -105,6 +106,7 @@ float4 ps_rgb_channel_tool(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
     }
 
     // 4. 元のアルファ値でプリマルチ再適用して出力
+    // 全体の不透明度(obj.alpha)はスクリプト終了後のホスト描画パイプラインで自動適用される
     return premul(float4(out_rgb, straight.a));
 }
 ]]

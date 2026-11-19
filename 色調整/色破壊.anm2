@@ -1,5 +1,5 @@
 --label:色調整
---information:ビット演算や剰余演算により色情報をグリッチ・破壊します。
+--information:色破壊 v1.1（ビット演算・剰余演算による色グリッチ）
 --filter
 
 --track@level1:乗算係数,1,255,1,1
@@ -7,6 +7,14 @@
 --select@mode:破壊モード=0,モジュロ(剰余)=0,XORビット演算=1
 
 if obj.w <= 0 or obj.h <= 0 then
+    return
+end
+
+local l1_int = math.floor(level1 + 0.5)
+local l2_int = math.floor(level2 + 0.5)
+
+-- 初期状態（乗算1・剰余/XOR 0）では出力が変化しないため処理をスキップ
+if l1_int == 1 and l2_int == 0 then
     return
 end
 
@@ -23,35 +31,35 @@ end
 
     float4 color_destroy_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float4 col = tex.Sample(samp, uv);
-        if (col.a <= 0.0) {
+        if (col.a <= 0.00001) {
             return float4(0.0, 0.0, 0.0, 0.0);
         }
 
-        float safe_a = max(col.a, 0.00001);
-        float3 straight_rgb = col.rgb / safe_a;
+        // Premultiplied Alpha を解除して 0.0～255.0 のストレートRGBへ変換
+        float3 straight_rgb = saturate(col.rgb / col.a);
         float3 c = straight_rgb * 255.0;
 
-        float l1 = round(level1);
-        float l2 = round(level2);
-
         // モジュロ(剰余)演算
-        float safe_l2 = max(l2, 1.0);
+        float safe_l2 = max(level2, 1.0);
         float denom = max(safe_l2 - 1.0, 1.0);
-        float3 mod_c = (fmod(floor(c * l1), safe_l2) / denom) * 255.0;
-        // l2 == 0 のときは巨大な中間値発生を防ぐためスケール後にクランプ
-        float3 c_mod = (l2 > 0.5) ? mod_c : saturate((c * l1) / 255.0) * 255.0;
+        float3 mod_c = (fmod(floor(c * level1), safe_l2) / denom) * 255.0;
+        // level2 == 0 のときはモジュロを行わず乗算スケール後にクランプ
+        float3 c_mod = (level2 > 0.5) ? mod_c : saturate((c * level1) / 255.0) * 255.0;
 
         // XORビット演算
         uint3 c_u = (uint3)round(c);
-        uint3 xor_c = ((c_u * (uint)l1) ^ (uint)l2) & 255u;
+        uint3 xor_c = ((c_u * (uint)level1) ^ (uint)level2) & 255u;
         float3 c_xor = (float3)xor_c;
 
         int m = (int)round(mode);
         float3 result_c = (m == 0) ? c_mod : c_xor;
+
+        // 全体の不透明度(obj.alpha)はスクリプト終了後のホスト描画パイプラインで自動適用されるため、
+        // ここでは元のアルファ値 col.a のみを掛けて Premultiplied Alpha へ戻す
         float3 out_rgb = saturate(result_c / 255.0) * col.a;
 
         return float4(out_rgb, col.a);
     }
 ]]
 
-obj.pixelshader("color_destroy_ps", "object", { "object" }, { level1, level2, mode, 0.0 }, "copy", "clamp")
+obj.pixelshader("color_destroy_ps", "object", { "object" }, { l1_int, l2_int, mode, 0.0 }, "copy", "clamp")

@@ -1,5 +1,5 @@
 --label:色調整
---information:ディザリンググラデーション
+--information:ディザリンググラデーション v1.1
 --filter
 
 --group:グラデーション設定,true
@@ -9,44 +9,47 @@
 --track@center_y:中心Ｙ,-5000,5000,0,1
 --trackgroup@center_x,center_y:中心座標
 --select@shape:形状=0,線形=0,円形=1,矩形=2,凸形=3,角丸矩形=4
---group:
+--group
 
 --group:ディザ設定,true
 --track@levels:階調数,2,256,4,1
 --track@dither_strength:ディザ強度,0,200,100,1
 --track@dot_size:ドットサイズ,1,100,1,1
 --select@dither_type:ディザパターン=2,ランダム=0,Bayer 2x2=1,Bayer 4x4=2,Bayer 8x8=3,Bayer 16x16=4,市松模様=5,縦縞=6,横縞=7
---group:
+--group
 
 --group:色設定,true
 --color@col1:開始色,0xffffff
 --track@alpha1:開始色透明度,0,100,0,1
 --color@col2:終了色,0x000000
 --track@alpha2:終了色透明度,0,100,0,1
---group:
+--group
 
 --group:合成設定,false
 --select@blend_mode:合成モード=0,通常=0,加算=1,減算=2,乗算=3,スクリーン=4,オーバーレイ=5,比較(明)=6,比較(暗)=7,輝度=8,色差=9,陰影=10,明暗=11,差分=12,アルファ加算=13,アルファ最大値=14,アルファ減算=15,アルファ加算2=16
 --check@clear_bg:元画像を無視,0
---group:
+--group
 
 --[[pixelshader@dither_grad_ps:
     cbuffer Params : register(b0) {
-        float4 p_grad;
-        float4 p_center;
-        float4 p_dither;
-        float4 p_col1;
-        float4 p_col2;
+        float4 p_grad;   // x: width, y: angle(rad), z: shape, w: clear_bg
+        float4 p_center; // x: center_x, y: center_y, z: res_w, w: res_h
+        float4 p_dither; // x: levels, y: dither_strength, z: dot_size, w: dither_type
+        float4 p_col1;   // rgb: col1, a: a1
+        float4 p_col2;   // rgb: col2, a: a2
+        float4 p_env;    // x: frame(wrapped), y: 0, z: 0, w: 0
     };
 
     Texture2D tex : register(t0);
     SamplerState samp : register(s0);
 
     float3 srgb2linear(float3 c) {
+        c = saturate(c);
         return lerp(c / 12.92, pow(max(c + 0.055, 0.0) / 1.055, 2.4), step(0.04045, c));
     }
 
     float3 linear2srgb(float3 c) {
+        c = saturate(c);
         return lerp(c * 12.92, 1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055, step(0.0031308, c));
     }
 
@@ -66,84 +69,102 @@
         return ((float)d + 0.5) / max_val - 0.5;
     }
 
-    float get_random(int2 pos) {
-        float2 p = float2(pos);
-        float f = frac(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
-        return f - 0.5;
+    float get_random(int2 pos, float frame) {
+        float2 p = float2(pos) + float2(frame * 17.1, frame * 31.7);
+        float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+        p3 += dot(p3, p3.yzx + 33.33);
+        return frac((p3.x + p3.y) * p3.z) - 0.5;
     }
 
     float4 dither_grad_ps(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
         float width = max(p_grad.x, 0.001);
+        float half_w = max(width * 0.5, 0.001);
         float angle = p_grad.y;
-        int shape = (int)p_grad.z;
+        int shape = (int)round(p_grad.z);
         float clear_bg = p_grad.w;
-        
+
         float2 res = p_center.zw;
         float2 center_pos = p_center.xy;
-        
+
         float levels = p_dither.x;
         float dither_strength = p_dither.y;
         float dot_size = max(p_dither.z, 1.0);
-        int dither_type = (int)p_dither.w;
-        
+        int dither_type = (int)round(p_dither.w);
+
         float2 local_px = (uv - 0.5) * res;
-        
+
         float2 grid_float = floor((local_px - center_pos) / dot_size);
         int2 grid_pos = (int2)grid_float;
         float2 sample_pos = (grid_float + 0.5) * dot_size;
-        
+
+        // グラデーションローカル座標系へ逆回転
+        float cos_a = cos(angle);
+        float sin_a = sin(angle);
+        float2 rot_pos = float2(
+            sample_pos.x * cos_a + sample_pos.y * sin_a,
+            -sample_pos.x * sin_a + sample_pos.y * cos_a
+        );
+
+        // 全形状で全体幅 width（片側 half_w）を基準に 0.0～1.0 へ正規化
         float t = 0.0;
         if (shape == 0) {
-            float2 dir = float2(cos(angle), sin(angle));
-            t = dot(sample_pos, dir) / width + 0.5;
+            // 線形: -half_w ～ +half_w
+            t = rot_pos.x / width + 0.5;
         } else if (shape == 1) {
-            t = length(sample_pos) / width;
+            // 円形: 直径 width（半径 half_w）
+            t = length(rot_pos) / half_w;
         } else if (shape == 2) {
-            t = max(abs(sample_pos.x), abs(sample_pos.y)) / width;
+            // 矩形: 1辺 width（半幅 half_w）
+            t = max(abs(rot_pos.x), abs(rot_pos.y)) / half_w;
         } else if (shape == 3) {
-            t = abs(sample_pos.y) / width;
-        } else if (shape == 4) {
-            float2 dist = abs(sample_pos) - max(0.0, width * 0.5);
-            t = (length(max(dist, 0.0)) + min(max(dist.x, dist.y), 0.0) + width * 0.5) / width;
+            // 凸形(帯状): 全幅 width（片側 half_w）
+            t = abs(rot_pos.y) / half_w;
+        } else {
+            // 角丸矩形: 1辺 width（半幅 half_w、角丸半径 half_w * 0.5）
+            float r_corner = half_w * 0.5;
+            float2 q = abs(rot_pos) - (half_w - r_corner);
+            float sdf = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r_corner;
+            t = 1.0 + sdf / half_w;
         }
         t = saturate(t);
-        
+
         float dither_val = 0.0;
         if (dither_type == 0) {
-            dither_val = get_random(grid_pos);
+            dither_val = get_random(grid_pos, p_env.x);
         } else if (dither_type >= 1 && dither_type <= 4) {
             dither_val = get_bayer(grid_pos, dither_type);
         } else if (dither_type == 5) {
             dither_val = (((grid_pos.x & 1) ^ (grid_pos.y & 1)) == 0) ? -0.5 : 0.5;
         } else if (dither_type == 6) {
             dither_val = ((grid_pos.x & 1) == 0) ? -0.5 : 0.5;
-        } else if (dither_type == 7) {
+        } else {
             dither_val = ((grid_pos.y & 1) == 0) ? -0.5 : 0.5;
         }
-        
+
         float steps = max(1.0, levels - 1.0);
         float offset = dither_val * dither_strength;
         float quantized_t = saturate(round(t * steps + offset) / steps);
-        
+
         float3 lin1 = srgb2linear(p_col1.rgb);
         float3 lin2 = srgb2linear(p_col2.rgb);
         float3 mix_lin = lerp(lin1, lin2, quantized_t);
         float mix_a = lerp(p_col1.a, p_col2.a, quantized_t);
         float3 mix_rgb = linear2srgb(mix_lin);
-        
+
+        // Premultiplied Alpha 形式で出力（obj.alpha はホスト側最終描画で自動適用される）
         float4 grad_col = float4(mix_rgb * mix_a, mix_a);
-        
-        float4 src_col = tex.SampleLevel(samp, uv, 0);
+
         if (clear_bg < 0.5) {
+            float4 src_col = tex.SampleLevel(samp, uv, 0);
             grad_col *= src_col.a;
         }
-        
+
         return grad_col;
     }
 ]]
 
-local current_w = (obj.w and obj.w > 0) and obj.w or obj.screen_w
-local current_h = (obj.h and obj.h > 0) and obj.h or obj.screen_h
+local current_w = (obj.w and obj.w > 0) and obj.w or (obj.screen_w or 0)
+local current_h = (obj.h and obj.h > 0) and obj.h or (obj.screen_h or 0)
 
 if current_w <= 0 or current_h <= 0 then
     return
@@ -157,36 +178,68 @@ local blend_modes = {
 
 local r1, g1, b1 = RGB(col1)
 local r2, g2, b2 = RGB(col2)
-local a1_val = (1.0 - alpha1 * 0.01) * obj.alpha
-local a2_val = (1.0 - alpha2 * 0.01) * obj.alpha
+local a1_val = 1.0 - alpha1 * 0.01
+local a2_val = 1.0 - alpha2 * 0.01
 local angle_rad = math.rad(angle)
+local wrapped_frame = (obj.frame or 0) % 4096
 
 local constants = {
     width, angle_rad, shape, (clear_bg == 1) and 1.0 or 0.0,
     center_x, center_y, current_w, current_h,
     levels, dither_strength * 0.01, dot_size, dither_type,
     r1 / 255.0, g1 / 255.0, b1 / 255.0, a1_val,
-    r2 / 255.0, g2 / 255.0, b2 / 255.0, a2_val
+    r2 / 255.0, g2 / 255.0, b2 / 255.0, a2_val,
+    wrapped_frame, 0.0, 0.0, 0.0
 }
 
-obj.setanchor("center_x,center_y", 0, "line")
+-- 個別オブジェクト有効時に全要素でアンカーが重複生成されるのを防ぐため先頭要素のみに配置
+if obj.index == 0 then
+    obj.setanchor("center_x,center_y", 0, "line")
+end
 
 if clear_bg == 1 then
-    obj.pixelshader("dither_grad_ps", "object", {"object"}, constants, "copy", "clamp")
+    obj.pixelshader("dither_grad_ps", "object", { "object" }, constants, "copy", "clamp")
 else
-    obj.copybuffer("cache:src", "object")
-    obj.clearbuffer("tempbuffer", current_w, current_h)
-    obj.pixelshader("dither_grad_ps", "tempbuffer", {"cache:src"}, constants, "copy", "clamp")
-    obj.copybuffer("object", "cache:src")
-    
-    local selected_blend = blend_modes[blend_mode + 1] or "none"
-    if selected_blend ~= "none" then
-        obj.setoption("blend", selected_blend, "force")
-    else
-        obj.setoption("blend", "none")
-    end
-    
-    obj.load("tempbuffer")
-    obj.draw(0, 0, 0, 1.0, 1.0)
+    local uid = string.format("%s_%s", tostring(obj.id), tostring(obj.effect_id))
+    local cache_src = "cache:dgrad_src_" .. uid
+    local cache_grad = "cache:dgrad_grad_" .. uid
+
+    obj.copybuffer(cache_src, "object")
+    obj.clearbuffer(cache_grad, current_w, current_h)
+    obj.pixelshader("dither_grad_ps", cache_grad, { cache_src }, constants, "copy", "clamp")
+
+    -- 仮想バッファ上で等倍・無回転合成を行うためオブジェクトの変換パラメータを一時退避
+    local saved_state = {
+        ox = obj.ox, oy = obj.oy, oz = obj.oz,
+        rx = obj.rx, ry = obj.ry, rz = obj.rz,
+        cx = obj.cx, cy = obj.cy, cz = obj.cz,
+        sx = obj.sx, sy = obj.sy, sz = obj.sz,
+        zoom = obj.zoom, aspect = obj.aspect, alpha = obj.alpha
+    }
+
+    obj.ox, obj.oy, obj.oz = 0, 0, 0
+    obj.rx, obj.ry, obj.rz = 0, 0, 0
+    obj.cx, obj.cy, obj.cz = 0, 0, 0
+    obj.sx, obj.sy, obj.sz = 1, 1, 1
+    obj.zoom, obj.aspect, obj.alpha = 1, 0, 1
+
+    obj.setoption("drawtarget", "tempbuffer", current_w, current_h)
     obj.setoption("blend", "none")
+    obj.draw(0, 0, 0, 1.0, 1.0)
+
+    obj.load(cache_grad)
+    local selected_blend = blend_modes[blend_mode + 1] or "none"
+    obj.setoption("blend", selected_blend, "force")
+    obj.draw(0, 0, 0, 1.0, 1.0)
+
+    obj.copybuffer("object", "tempbuffer")
+    obj.setoption("blend", "none")
+    obj.setoption("drawtarget", "framebuffer")
+
+    -- 退避したパラメータを復元して後続フィルタ・最終描画へ引き継ぐ
+    obj.ox, obj.oy, obj.oz = saved_state.ox, saved_state.oy, saved_state.oz
+    obj.rx, obj.ry, obj.rz = saved_state.rx, saved_state.ry, saved_state.rz
+    obj.cx, obj.cy, obj.cz = saved_state.cx, saved_state.cy, saved_state.cz
+    obj.sx, obj.sy, obj.sz = saved_state.sx, saved_state.sy, saved_state.sz
+    obj.zoom, obj.aspect, obj.alpha = saved_state.zoom, saved_state.aspect, saved_state.alpha
 end
