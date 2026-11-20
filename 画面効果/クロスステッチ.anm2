@@ -8,13 +8,13 @@
 --track@param_thickness:線の太さ,1.0,20.0,1.0,1
 --track@param_angle:角度,-360.0,360.0,0.0,0.1
 --check@param_invert:反転/白黒化,0
---group:
+--group
 
 --group:中心座標設定
 --track@param_cx:中心X,-2000.0,2000.0,0.0,0.1
 --track@param_cy:中心Y,-2000.0,2000.0,0.0,0.1
 --trackgroup@param_cx,param_cy:中心
---group:
+--group
 
 obj.setanchor("param_cx,param_cy", 0, "line")
 
@@ -37,10 +37,18 @@ float get_mod(float a, float b) {
     return a - floor(a / b) * b;
 }
 
-// 浮動小数点演算でセル内の対角ステッチ判定を実施
+// 輝度計算用の線形RGB変換（IEC 61966-2-1 準拠）
+float3 srgb_to_linear(float3 c) {
+    float3 c_pos = max(c, 0.0);
+    return lerp(c_pos / 12.92, pow((c_pos + 0.055) / 1.055, 2.4), step(0.04045, c_pos));
+}
+
+// セル内の対角ステッチ判定（1/sqrt(2) を掛けて線に垂直な幅を指定太さに合わせる）
 bool check_stitch(float2 localPos, float2 localCellPos, float sz, float thick) {
     float2 rem = localPos - localCellPos;
-    return (abs(rem.x - rem.y) < thick) || (abs(rem.x - (sz - 1.0 - rem.y)) < thick);
+    const float inv_sqrt2 = 0.70710678;
+    return (abs(rem.x - rem.y) * inv_sqrt2 < thick) ||
+           (abs(rem.x - (sz - 1.0 - rem.y)) * inv_sqrt2 < thick);
 }
 
 // 輝度段階に応じたクロスハッチング線判定
@@ -80,19 +88,15 @@ float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
         float2 localCellPos = floor(localPos / sz) * sz;
         float2 localSamplePos = localCellPos + sz * 0.5;
         float2 invSamplePos = mul(invRot, localSamplePos) + center;
-        sampleUV = invSamplePos / res;
-
-        // 回転・サンプリング座標の範囲外チェック（透明化）
-        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) {
-            return float4(0.0, 0.0, 0.0, 0.0);
-        }
+        // 回転時に角のセル中心が範囲外へわずかに出た場合も端の色で補完する
+        sampleUV = saturate(invSamplePos / res);
     }
 
     float4 texColor = tex.Sample(samp, sampleUV);
     if (texColor.a <= 0.0) return float4(0.0, 0.0, 0.0, 0.0);
 
-    float3 straightRGB = texColor.rgb / texColor.a;
-    float lum = dot(straightRGB, float3(0.2126, 0.7152, 0.0722));
+    float3 straightRGB = saturate(texColor.rgb / max(texColor.a, 1.0e-5));
+    float lum = dot(srgb_to_linear(straightRGB), float3(0.2126, 0.7152, 0.0722));
 
     float3 outRGB = float3(0.0, 0.0, 0.0);
 
@@ -126,13 +130,14 @@ float4 cross_pattern_ps(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Ta
                 outRGB = float3(0.0, 0.0, 0.0);
             }
         } else {
-            // ステッチ部以外の背景領域を描画
-            outRGB = isHatch ? float3(0.0, 0.0, 0.0) : straightRGB;
+            // 反転/白黒化時はクロスハッチングモードと同様に背景を白で統一
+            float3 bgColor = invert_flag ? float3(1.0, 1.0, 1.0) : straightRGB;
+            outRGB = isHatch ? float3(0.0, 0.0, 0.0) : bgColor;
         }
     }
 
     float finalA = texColor.a * obj_alpha;
-    return float4(outRGB * finalA, finalA);
+    return float4(saturate(outRGB) * finalA, finalA);
 }
 ]]
 
@@ -158,6 +163,6 @@ do
             param_mode, (param_invert == 1) and 1.0 or 0.0, obj.alpha, 0.0
         },
         "copy",
-        "clip"
+        "clamp"
     )
 end
