@@ -8,34 +8,34 @@
 --trackgroup@grid_x,grid_y:グリッド分割
 --check@is_square:正方形にする,0
 --hide@grid_y:is_square==1
---group:
+--group
 
 --group:ノイズ・ランダム設定
 --select@noise_type:ノイズタイプ=0,ホワイトノイズ=0,ブルーノイズ=1
 --track@seed_val:シード値,0,1000,0,1
 --track@sync_cycle:同期サイクル,1,120,1,1
 --track@speed:速度(%),0.0,1000.0,100.0,1.0
---group:
+--group
 
 --group:色調変動設定
 --track@hue_var:色相変動,0.0,360.0,15.0,1.0
 --track@sat_var:彩度変動(%),0.0,100.0,5.0,0.1
 --track@light_var:明度変動(%),0.0,100.0,5.0,0.1
 --trackgroup@hue_var,sat_var,light_var:色調変動
---group:
+--group
 
 --group:質感・エッジ設定
 --track@depth:深度,0.0,100.0,0.0,0.1
 --track@edge_emp:エッジ強調,0.0,100.0,0.0,0.1
 --check@ml_protect:ML学習保護,0
---group:
+--group
 
 --group:変形・ブラー設定
 --track@distort:歪みpx,0.0,200.0,2.0,0.1
 --track@shake:震えpx,0.0,200.0,0.0,0.1
 --track@blur_px:ぼかしpx,0.0,100.0,1.0,0.1
 --check@transparent_bg:背景を透明化,0
---group:
+--group
 
 if obj.w <= 0 or obj.h <= 0 then
     return
@@ -52,26 +52,38 @@ cbuffer Params : register(b0) {
 Texture2D srcTex : register(t0);
 SamplerState srcSmp : register(s0);
 
-float rand(float2 co) {
-    return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
+// float32精度低下とsin演算コストを回避する32bit整数ハッシュ
+uint hash_u32(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
 }
 
-// 高周波成分を強調した擬似ブルーノイズ（均一な分布のため過度なクリッピングを抑制）
-float pseudo_blue_noise(float2 co) {
-    float center = rand(co);
-    float l = rand(co + float2(-1.0, 0.0));
-    float r = rand(co + float2( 1.0, 0.0));
-    float u = rand(co + float2( 0.0, -1.0));
-    float d = rand(co + float2( 0.0,  1.0));
+float hash21(int2 p, uint seed) {
+    uint hx = hash_u32((uint)p.x ^ (seed * 0x9e3779b9u));
+    uint hy = hash_u32((uint)p.y ^ hx);
+    return (float)(hy & 0x00ffffffu) * (1.0 / 16777216.0);
+}
+
+// 隣接4セルの平均を差し引く高周波強調ノイズ（擬似ブルーノイズ近似）
+float highpass_noise(int2 cell, uint seed) {
+    float center = hash21(cell, seed);
+    float l = hash21(cell + int2(-1,  0), seed);
+    float r = hash21(cell + int2( 1,  0), seed);
+    float u = hash21(cell + int2( 0, -1), seed);
+    float d = hash21(cell + int2( 0,  1), seed);
     float val = center - (l + r + u + d) * 0.25;
     return saturate(val + 0.5);
 }
 
-float get_noise(float2 co, float type) {
+float get_noise(int2 cell, uint seed, float type) {
     if (type > 0.5) {
-        return pseudo_blue_noise(co);
+        return highpass_noise(cell, seed);
     } else {
-        return rand(co);
+        return hash21(cell, seed);
     }
 }
 
@@ -95,31 +107,24 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
     float2 grid_uv_float = (uv - 0.5) * param_grid.xy;
     float2 grid_uv = floor(grid_uv_float);
     float2 cell_uv = frac(grid_uv_float);
+    int2 cell = int2((int)grid_uv.x, (int)grid_uv.y);
 
-    float rnd_seed = param_env.x + 123.456;
+    uint base_seed = (uint)param_env.x + 123u;
     float n_type = param_hsv.w;
 
-    // 時間シードを連続加算せず、時間からランダムな巨大オフセットを生成して加算する
-    float2 off_hue   = float2(rand(float2(rnd_seed, 1.1)), rand(float2(rnd_seed, 1.2))) * 1000.0;
-    float2 off_sat   = float2(rand(float2(rnd_seed, 1.3)), rand(float2(rnd_seed, 1.4))) * 1000.0;
-    float2 off_light = float2(rand(float2(rnd_seed, 1.5)), rand(float2(rnd_seed, 1.6))) * 1000.0;
-    float2 off_distX = float2(rand(float2(rnd_seed, 1.7)), rand(float2(rnd_seed, 1.8))) * 1000.0;
-    float2 off_distY = float2(rand(float2(rnd_seed, 1.9)), rand(float2(rnd_seed, 2.0))) * 1000.0;
-
-    float r_hue   = (get_noise(grid_uv + off_hue, n_type) - 0.5) * 2.0;
-    float r_sat   = (get_noise(grid_uv + off_sat, n_type) - 0.5) * 2.0;
-    float r_light = (get_noise(grid_uv + off_light, n_type) - 0.5) * 2.0;
-    float r_distX = (get_noise(grid_uv + off_distX, n_type) - 0.5) * 2.0;
-    float r_distY = (get_noise(grid_uv + off_distY, n_type) - 0.5) * 2.0;
+    // チャンネルごとに独立した整数シードを割り当てて乱数を生成
+    float r_hue   = (get_noise(cell, base_seed + 11u, n_type) - 0.5) * 2.0;
+    float r_sat   = (get_noise(cell, base_seed + 23u, n_type) - 0.5) * 2.0;
+    float r_light = (get_noise(cell, base_seed + 37u, n_type) - 0.5) * 2.0;
+    float r_distX = (get_noise(cell, base_seed + 53u, n_type) - 0.5) * 2.0;
+    float r_distY = (get_noise(cell, base_seed + 67u, n_type) - 0.5) * 2.0;
 
     float2 inv_res = param_env.yz;
 
     float2 shake_offset = float2(0.0, 0.0);
     if (param_fx.w > 0.0) {
-        float2 off_sx = float2(rand(float2(rnd_seed, 2.1)), 12.34) * 1000.0;
-        float2 off_sy = float2(rand(float2(rnd_seed, 2.2)), 56.78) * 1000.0;
-        float shake_x = (rand(grid_uv + off_sx) - 0.5) * 2.0;
-        float shake_y = (rand(grid_uv + off_sy) - 0.5) * 2.0;
+        float shake_x = (hash21(cell, base_seed + 79u) - 0.5) * 2.0;
+        float shake_y = (hash21(cell, base_seed + 89u) - 0.5) * 2.0;
         shake_offset = float2(shake_x, shake_y) * (param_fx.w * inv_res);
     }
 
@@ -172,9 +177,10 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
     edge = saturate(edge);
     rgb = lerp(rgb, float3(0.0, 0.0, 0.0), edge * (param_fx.y * 0.01));
 
-    // ML保護ノイズ
+    // ML保護ノイズ（ピクセル単位の整数座標から生成）
     if (param_fx.z > 0.5) {
-        float ml_noise = (rand(pos.xy + float2(rand(float2(rnd_seed, 3.1)), rand(float2(rnd_seed, 3.2))) * 1000.0) - 0.5) * 0.1;
+        int2 px_coord = int2((int)pos.x, (int)pos.y);
+        float ml_noise = (hash21(px_coord, base_seed + 101u) - 0.5) * 0.1;
         rgb = saturate(rgb + ml_noise);
     }
 
@@ -186,10 +192,9 @@ float4 grid_noise_animator(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV
 
 do
     local w, h = obj.w, obj.h
-    local actual_grid_y = (is_square == 1) and (grid_x * (h / w)) or grid_y
+    local actual_grid_y = (is_square == 1) and math.max(1, math.floor(grid_x * (h / w) + 0.5)) or grid_y
     local safe_cycle = math.max(1, math.floor(sync_cycle))
-    -- 長時間再生時における float32 精度劣化防止のためシード値を 10000 周期でラップ
-    local total_seed = (math.floor((obj.frame * (speed * 0.01)) / safe_cycle) + seed_val) % 10000
+    local total_seed = math.floor((obj.frame * (speed * 0.01)) / safe_cycle + seed_val) % 100000
     local sampler_mode = (transparent_bg == 1) and "clip" or "clamp"
 
     obj.pixelshader(
