@@ -7,12 +7,14 @@
 --track@wave_speed:波の速度,-10.0,10.0,1.2,0.1
 --track@wave_angle:波の角度,-360.0,360.0,30.0,0.1
 --trackgroup@wave_scale,wave_speed,wave_angle:波の設定
+--group
 
 --group:質感の設定
 --track@distortion:歪み強さ,0.0,0.6,0.07,0.01
 --track@iridescence:虹色度,0.0,2.0,1.15,0.01
 --track@gloss:光沢強さ,0.0,3.0,1.45,0.01
 --trackgroup@distortion,iridescence,gloss:質感の設定
+--group
 
 --group:合成・前処理
 --track@blend_ratio:ブレンド率,0.0,1.0,0.88,0.01
@@ -32,9 +34,9 @@ Texture2D tex : register(t0);
 SamplerState smp : register(s0);
 
 cbuffer Params : register(b0) {
-    float4 param_wave;     // x: wave_scale, y: wave_speed, z: cos(ang), w: sin(ang)
+    float4 param_wave;     // x: wave_scale, y: wrapped_phase_time, z: cos(ang), w: sin(ang)
     float4 param_material; // x: distortion, y: iridescence, z: gloss, w: blend_ratio
-    float4 param_render;   // x: time, y: width, z: height, w: pad
+    float4 param_render;   // x: unused, y: width, z: height, w: pad
 };
 
 // 3段階のドメインワーピングによる流体状の波高生成
@@ -54,7 +56,8 @@ float liquid_wave(float2 p, float t) {
     return (sin(s.x * 1.18) + cos(s.y * 1.12)) * 0.27 + 0.5;
 }
 
-// 前進差分による勾配(xy)と波高(z)の算出
+// スケール済みp空間での前進差分により勾配(xy)と波高(z)を算出
+// （wave_scaleを変更しても歪み量と法線傾斜が一定範囲に保たれるようp空間基準で正規化）
 float3 get_wave(float2 uv, float t, float scale) {
     float2 p = uv * scale;
     float n  = liquid_wave(p, t);
@@ -73,20 +76,15 @@ float3 pastel_palette(float t, float sat_boost) {
     return saturate(a + b * cos(6.2831853 * (c * t + d)));
 }
 
+// IEC 61966-2-1 準拠の sRGB <-> 線形変換
 float3 srgb_to_linear(float3 c) {
-    return float3(
-        pow(max(c.r, 0.0), 2.2),
-        pow(max(c.g, 0.0), 2.2),
-        pow(max(c.b, 0.0), 2.2)
-    );
+    float3 c_pos = max(c, 0.0);
+    return lerp(c_pos / 12.92, pow((c_pos + 0.055) / 1.055, 2.4), step(0.04045, c_pos));
 }
 
 float3 linear_to_srgb(float3 c) {
-    return float3(
-        pow(max(c.r, 0.0), 1.0 / 2.2),
-        pow(max(c.g, 0.0), 1.0 / 2.2),
-        pow(max(c.b, 0.0), 1.0 / 2.2)
-    );
+    float3 c_pos = max(c, 0.0);
+    return lerp(c_pos * 12.92, 1.055 * pow(c_pos, 1.0 / 2.4) - 0.055, step(0.0031308, c_pos));
 }
 
 float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
@@ -94,7 +92,7 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
     float height = max(param_render.z, 1.0);
     float aspect = width / height;
 
-    // アスペクト比補正と回転
+    // アスペクト比補正と座標回転（UVを逆回転させることで表示上の波模様を時計回りに回転）
     float2 suv = uv - 0.5;
     suv.x *= aspect;
 
@@ -103,7 +101,7 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
     float2x2 rot = float2x2(c, -s, s, c);
     suv = mul(suv, rot);
 
-    float t = param_render.x * param_wave.y;
+    float t = param_wave.y;
     float3 wave = get_wave(suv, t, param_wave.x);
 
     // 逆回転した等方勾配（法線用）とUVアスペクト補正済み勾配（歪み用）
@@ -157,10 +155,12 @@ float4 ps_holographic(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Targ
 ]]
 
 local rad_val = math.rad(wave_angle)
+-- 長時間再生時の float32 仮数部精度劣化を防ぐため、Lua側で位相時間をラップ
+local wrapped_time = (obj.time * wave_speed) % 10000.0
 
 local constants = {
     wave_scale,
-    wave_speed,
+    wrapped_time,
     math.cos(rad_val),
     math.sin(rad_val),
 
@@ -169,7 +169,7 @@ local constants = {
     gloss,
     blend_ratio,
 
-    obj.time,
+    0.0,
     obj.w,
     obj.h,
     0.0
